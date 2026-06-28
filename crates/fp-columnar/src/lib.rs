@@ -12014,6 +12014,33 @@ impl Column {
 
     /// Remove missing values, returning a shorter column.
     pub fn dropna(&self) -> Result<Self, ColumnError> {
+        // Typed fast paths: compact the present values from the raw buffer +
+        // validity, no per-element Scalar materialization. Bit-identical to the
+        // Scalar filter: a present slot keeps its value in order; a Float64 valid
+        // slot whose datum is NaN is dropped (Scalar::Float64(NaN).is_missing()),
+        // and Int64 missingness is the validity bit alone. Output is all-valid.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let mut out = Vec::with_capacity(data.len());
+            for (i, &d) in data.iter().enumerate() {
+                if validity.get(i) && !d.is_nan() {
+                    out.push(d);
+                }
+            }
+            return Ok(Self::from_f64_values_owned(out));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut out = Vec::with_capacity(data.len());
+            for (i, &d) in data.iter().enumerate() {
+                if validity.get(i) {
+                    out.push(d);
+                }
+            }
+            return Ok(Self::from_i64_values(out));
+        }
         let values = self
             .values
             .iter()
@@ -22415,6 +22442,44 @@ mod tests {
                     });
                 }
                 assert_fillna(case, "timedelta", timedeltas, Scalar::Timedelta64(123_456));
+            }
+        }
+
+        #[test]
+        fn dropna_typed_matches_oracle() {
+            // Typed nullable i64/f64 dropna == an independent order-preserving
+            // filter. Built via from_*_values_with_validity to drive the typed path.
+            let mut state: u64 = 0x6BD3_27F1_0A95_CC48;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..200 {
+                let n = (next() % 200) as usize + 1;
+                let ivals: Vec<i64> = (0..n).map(|_| (next() % 1000) as i64).collect();
+                let fvals: Vec<f64> = ivals.iter().map(|&v| v as f64 + 0.5).collect();
+                let mut vmask = ValidityMask::all_valid(n);
+                let mut present = vec![true; n];
+                for (i, p) in present.iter_mut().enumerate() {
+                    if next() % 3 == 0 {
+                        vmask.set(i, false);
+                        *p = false;
+                    }
+                }
+                let icol = Column::from_i64_values_with_validity(ivals.clone(), vmask.clone());
+                let fcol = Column::from_f64_values_with_validity(fvals.clone(), vmask.clone());
+                let iexp: Vec<Scalar> = (0..n)
+                    .filter(|&i| present[i])
+                    .map(|i| Scalar::Int64(ivals[i]))
+                    .collect();
+                let fexp: Vec<Scalar> = (0..n)
+                    .filter(|&i| present[i])
+                    .map(|i| Scalar::Float64(fvals[i]))
+                    .collect();
+                assert_eq!(icol.dropna().unwrap().values(), iexp);
+                assert_eq!(fcol.dropna().unwrap().values(), fexp);
             }
         }
 

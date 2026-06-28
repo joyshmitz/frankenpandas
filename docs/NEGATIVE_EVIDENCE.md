@@ -6886,3 +6886,19 @@ Same-box best-of-3, 5M nullable (1/4 NA) (`fp-columnar/examples/bench_ffill`):
 bfill f64 flips LOSS->WIN. i64 bfill still reallocs (from_i64_values_with_validity all() → from_i64_values; the owned
 Int64 sibling remains the one deferred structural gap). FULL fp-columnar suite 464 passed / 0 failed (the shared
 constructor change is bit-identical across diff/shift/pct_change/interpolate/fillna/ffill/bfill).
+
+### 2026-06-27 TealOsprey — dropna typed f64+i64 (compact present values): 0.19x/0.30x LOSS -> 2.5x/2.3x WIN vs pandas
+`Column::dropna` filtered self.values cloning Scalars from the lazy column (~285/176ms, 0.19x/0.30x vs pandas). Added
+typed paths: compact present values from the raw buffer + validity into a typed Vec (f64: validity AND !is_nan; i64:
+validity bit alone), then from_f64_values_owned / from_i64_values. Bit-identical to the order-preserving Scalar filter
+(dropped slots match Scalar::is_missing; output all-valid, same order).
+
+Same-box best-of-3, 5M nullable (1/4 NA) (`fp-columnar/examples/bench_dropna`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (Scalar) | patched (typed) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `dropna` f64 5M | 285.1ms | 21.2ms | 13.5x | 0.19x -> 2.52x (pandas 53.3ms) |
+| `dropna` i64 5M | 175.8ms | 23.3ms | 7.6x | 0.30x -> 2.29x |
+
+Both flip LOSS->WIN. Bit-identical: new `dropna_typed_matches_oracle` (i64 & f64, random validity, independent
+order-preserving oracle) + fp-columnar 6 dropna + fp-frame 40 dropna tests green.

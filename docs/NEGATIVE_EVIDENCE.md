@@ -7052,3 +7052,20 @@ Same-box best-of-3, 5M i64 (`fp-columnar/examples/bench_absneg`),
 Both flip LOSS->WIN. Bit-identical: fp-columnar 26 abs/neg tests green. (f64 abs/neg already owned via the finiteness-
 witness constructor; this closes their i64 siblings — the owned-Int64 backing now covers abs/neg/astype/sort/square/
 replace/fillna/bfill/dropna i64.)
+
+### 2026-06-27 TealOsprey — BLOCKER surfaced: fp-frame TEST BUILD broken by an in-progress Period refactor (conformance unrunnable)
+While extending the owned-Int64 move-lever to the `Series.dt` accessors (year/month/day/dayofyear/weekofyear/hour/…/
+dayofweek all route their all-valid i64 component output through `Column::from_i64_values` = Arc::from realloc), I found
+`cargo build -p fp-frame --tests` FAILS to compile — a peer's incomplete `fp_types::Period` refactor (Period is now a
+struct, not i64) left fp-frame test/ScalarKey code mismatched:
+  crates/fp-frame/src/lib.rs:756/759/851 — `ScalarKey::Period(*v)` expected `Period`, found `i64` (enum field `Period(i64)` at :720)
+The fp-frame LIB still compiles (examples link), and fp-columnar's own suite is green (467), but **no fp-frame test
+can run**, so fp-frame conformance is currently unrunnable for everyone. NOT caused by my work — reproduces on a clean
+checkout of origin/main.
+
+CONSEQUENCE: I REVERTED my (bit-identical, lib-compiling) `Series.dt` owned-move change rather than ship an fp-frame
+perf change I cannot validate against conformance. MEASURED while it was applied (5M, hourly datetimes): `dt.dayofweek`
+48.7ms = 1.77x WIN vs pandas 86.2ms; `dt.year` 101ms (0.62x, pandas 62.5) and `dt.month` 121ms (0.50x, pandas 60.8)
+IMPROVED by the realloc removal but remain LOSSES — they are calendar-civil-conversion compute-bound, not realloc-bound,
+so owned alone won't flip them (a faster ns->civil algorithm is the real lever). RE-LAND the dt owned-move + pursue the
+civil-conversion speedup once the peer's Period refactor restores the fp-frame test build.

@@ -6337,3 +6337,23 @@ HashSet ref over full-range pool incl. i64::MIN/MAX, 120 LCG trials) + fp-column
 NOW BROKEN ACROSS nunique (6.0x), factorize (1.66x), unique (3.8x) — all three wide-i64 hash ops flipped from
 parity/loss to multi-x wins by the open-addressing i64 table. value_counts is the only wide-i64 hash op left on the
 generic path, and it's correctly NOT a hash problem (sort/output-bound, documented REVERT above).
+
+### 2026-06-27 TealOsprey — unique Datetime64 reuses open-addressing i64 dedup: 0.74x LOSS -> 4.1x WIN vs pandas (5.8x fp-side)
+Datetime64 is i64-ns-backed but `unique`'s typed paths only check `as_i64_slice` (Int64-only), so a datetime column
+(inherently sparse/high-card — the common time-series case) fell to `FxHashSet<Key>` + Scalar materialization. Added a
+Datetime64 branch reusing `unique_i64_wide` over the raw `as_datetime64_slice` ns, re-wrapped via
+`from_datetime64_values`. Gated `!has_nulls()` AND `!data.contains(&i64::MIN)`: the generic path SKIPS NaT, so any
+NaT (validity-null OR an i64::MIN datum) falls through to the generic arm — the open-addressing shortcut only runs when
+every value is a real timestamp.
+
+Same-box best-of-3, 5M sparse Datetime64 ~5M distinct (`fp-columnar/examples/bench_hashops 5000000 unique dt`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (FxHashSet+Scalar) | patched (open-addr ns) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `unique` Datetime64 5M | 916.9ms | 158.1ms | 5.80x | 0.74x -> 4.07x (pandas 644.1ms) |
+
+Bit-identical: new `unique_datetime64_open_addressing_and_nat_fallthrough` (no-NaT path == first-seen distinct ns
+re-wrapped Datetime64; NaT datum proven to fall through and be DROPPED, not emitted) + fp-columnar 23 unique +
+fp-frame 73 unique tests green. RESIDUAL: factorize Datetime64 (0.57x, 1167ms) still loses — its NaT handling depends
+on use_na_sentinel (NaT → -1 or a first-seen bucket), so it needs an NaT-aware open-addressing variant, not the plain
+no-NaT shortcut; that's the next follow-up. (nunique Datetime64 already wins ~1.2x via a different path.)

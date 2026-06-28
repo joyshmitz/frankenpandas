@@ -17605,6 +17605,19 @@ impl Column {
             return Ok(Self::from_i64_values(unique_i64_wide(data)));
         }
 
+        // Datetime64 is i64-ns-backed: an all-valid column with NO NaT (i64::MIN)
+        // can reuse the open-addressing i64 dedup over the raw ns, then re-wrap as
+        // Datetime64 — no Scalar materialization. The generic path SKIPS NaT, so a
+        // NaT-bearing column (validity-null OR an i64::MIN datum) must fall through.
+        // Bit-identical: a non-NaT Datetime64's key is the ns value, and first-seen
+        // order + re-wrapped Scalar::Datetime64 match the generic arm exactly.
+        if !self.has_nulls()
+            && let Some(data) = self.as_datetime64_slice()
+            && !data.contains(&i64::MIN)
+        {
+            return Ok(Self::from_datetime64_values(unique_i64_wide(data)));
+        }
+
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Bool(bool),
@@ -22074,6 +22087,51 @@ mod tests {
             assert_eq!(u.values()[0], Scalar::Int64(3));
             assert_eq!(u.values()[1], Scalar::Int64(1));
             assert_eq!(u.values()[2], Scalar::Int64(2));
+        }
+
+        #[test]
+        fn unique_datetime64_open_addressing_and_nat_fallthrough() {
+            // All-valid, no-NaT Datetime64 takes the open-addressing ns path;
+            // first-seen distinct timestamps, re-wrapped as Datetime64.
+            let ns = vec![
+                946_684_800_000_000_000i64,
+                946_684_800_000_000_000,
+                946_684_837_000_000_000,
+                100,
+                946_684_837_000_000_000,
+                100,
+            ];
+            let col = Column::from_datetime64_values(ns);
+            let u = col.unique().expect("unique");
+            let got: Vec<i64> = u
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Datetime64(x) => *x,
+                    other => panic!("expected Datetime64, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(got, vec![946_684_800_000_000_000, 946_684_837_000_000_000, 100]);
+
+            // A NaT datum (i64::MIN) must fall through to the generic path, which
+            // DROPS NaT — so the open-addressing shortcut must NOT emit it.
+            let with_nat = Column::from_datetime64_values(vec![
+                i64::MIN, // NaT sentinel
+                5,
+                5,
+                i64::MIN,
+                7,
+            ]);
+            let u2 = with_nat.unique().expect("unique nat");
+            let got2: Vec<i64> = u2
+                .values()
+                .iter()
+                .filter_map(|v| match v {
+                    Scalar::Datetime64(x) => Some(*x),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(got2, vec![5, 7], "NaT must be dropped, not emitted");
         }
 
         #[test]

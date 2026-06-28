@@ -6536,3 +6536,29 @@ Float64 hash keeps now on main, the patched tree rechecked at 504.737670ms via t
 open locally. Final landing gates passed: `fp-conformance --release` green and valid per-crate
 `cargo bench -p fp-columnar` green. The literal requested `cargo bench --release -p fp-columnar` form is still a Cargo
 CLI error (`--release` is not accepted by `cargo bench`).
+
+### 2026-06-27 TealOsprey — nlargest/nsmallest bounded top-k scan (Int64): 0.21x LOSS -> 2.14x WIN vs pandas (10.4x fp-side)
+`Column::nlargest(k)` did a FULL `sort_values` (radix over all 5M) then took `[..k]` — O(n·passes) for a tiny k,
+0.21x vs pandas' introselect. Added a bounded top-k LINEAR scan (`nkeep_typed_i64`): one sequential pass maintaining
+the k best in a best-first buffer (binary insert; most elements rejected by the `worst` threshold), O(n) with a tiny
+working set. Wired into `nlargest`/`nsmallest` (Int64, 1 ≤ k ≤ 4096, k < len — matching `sort_values`' STABLE
+radix = value-order then first-seen) AND into `nkeep_impl` (the `_keep` variants, Int64+Float64, matching
+`compare_scalars_na_last`). Two select_nth attempts (idx-indirection and tuple) were REVERTED as ~0-gain — select_nth
+reorders the whole array; bounded-scan is the right algorithm for k ≪ n.
+
+`-0.0` subtlety: `nlargest()` rides `sort_values`' radix (`total_cmp`, −0.0 < +0.0) so its fast path is Int64-ONLY;
+`nkeep_impl`'s f64 path uses `partial_cmp` (−0.0 == +0.0) matching its own full-sort reference. Float64 `nlargest()`
+(no-keep) stays on the radix sort (deferred — needs a total_cmp bounded scan).
+
+Same-box best-of-3, 5M Int64, k=10 (`fp-columnar/examples/bench_nlargest`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (full radix sort) | patched (bounded scan) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `nlargest(10)` i64 5M | 497.1ms | 47.7ms | 10.4x | 0.21x -> 2.14x (pandas 102.2ms) |
+| `nsmallest(10)` i64 5M | ~497ms | ~48ms | ~10x | -> ~1.6x (pandas 75.6ms) |
+
+Bit-identical: new `nlargest_nsmallest_i64_bounded_scan_matches_sort_take` (vs sort_values±+take over heavy-tie data,
+k ∈ {1,3,10,len−1}) + `nlargest_keep_f64_bounded_scan_matches_partial_cmp_reference` (f64 _keep vs partial_cmp+pos
+ref incl. ±0.0/±Inf) + fp-columnar 11 + fp-frame 31 nlargest/nsmallest tests green. GOTCHA: rch caches example
+binaries by source hash — `touch` the example to force relink against a changed lib (3 stale-binary phantom reads
+before this was caught).

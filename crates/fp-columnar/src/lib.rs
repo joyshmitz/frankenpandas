@@ -5068,12 +5068,87 @@ pub enum ComparisonOp {
     Le,
 }
 
+/// Largest `k` for which the typed `nkeep` uses a bounded top-`k` linear scan.
+/// For small `k` (the dominant case) this is O(n) with a tiny working set and a
+/// cheap threshold reject — far better than a full O(n·log n) sort or a
+/// `select_nth` that reorders the whole 5M array. Larger `k` falls back to the
+/// generic sort.
+const NKEEP_BOUNDED_SCAN_MAX_K: usize = 4096;
+
+/// Typed `keep="first"` top-`k` over an all-valid `i64` slice: one sequential
+/// pass maintaining the current `k` best in a best-first sorted buffer (binary
+/// insert; most elements rejected by the `worst` threshold). Comparator matches
+/// `compare_scalars_na_last(ascending)` then position-ascending, so the result
+/// is byte-identical to the first `k` of `nkeep_impl`'s full sort.
+fn nkeep_typed_i64(data: &[i64], k: usize, ascending: bool) -> Vec<i64> {
+    use std::cmp::Ordering;
+    let cmp = |a: (i64, u32), b: (i64, u32)| -> Ordering {
+        let ord = a.0.cmp(&b.0);
+        let ord = if ascending { ord } else { ord.reverse() };
+        ord.then(a.1.cmp(&b.1))
+    };
+    let mut top: Vec<(i64, u32)> = Vec::with_capacity(k);
+    for (i, &v) in data.iter().enumerate() {
+        let item = (v, i as u32);
+        if top.len() < k {
+            let pos = top.partition_point(|&x| cmp(x, item) == Ordering::Less);
+            top.insert(pos, item);
+        } else if cmp(item, top[k - 1]) == Ordering::Less {
+            let pos = top.partition_point(|&x| cmp(x, item) == Ordering::Less);
+            top.insert(pos, item);
+            top.pop();
+        }
+    }
+    top.iter().map(|&(v, _)| v).collect()
+}
+
+/// Float64 analogue. `as_f64_slice` is NaN-free, so `partial_cmp` never returns
+/// `None` — matching `compare_scalars_na_last`'s `partial_cmp` (which treats
+/// -0.0 == +0.0, deferring to the position tie-break).
+fn nkeep_typed_f64(data: &[f64], k: usize, ascending: bool) -> Vec<f64> {
+    use std::cmp::Ordering;
+    let cmp = |a: (f64, u32), b: (f64, u32)| -> Ordering {
+        let ord = a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal);
+        let ord = if ascending { ord } else { ord.reverse() };
+        ord.then(a.1.cmp(&b.1))
+    };
+    let mut top: Vec<(f64, u32)> = Vec::with_capacity(k);
+    for (i, &v) in data.iter().enumerate() {
+        let item = (v, i as u32);
+        if top.len() < k {
+            let pos = top.partition_point(|&x| cmp(x, item) == Ordering::Less);
+            top.insert(pos, item);
+        } else if cmp(item, top[k - 1]) == Ordering::Less {
+            let pos = top.partition_point(|&x| cmp(x, item) == Ordering::Less);
+            top.insert(pos, item);
+            top.pop();
+        }
+    }
+    top.iter().map(|&(v, _)| v).collect()
+}
+
 fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Column, ColumnError> {
     if !matches!(keep, "first" | "last" | "all") {
         return Err(ColumnError::Type(TypeError::NonNumericValue {
             value: keep.to_string(),
             dtype: col.dtype(),
         }));
+    }
+
+    // Typed partial-selection fast path for keep="first" with 1 ≤ k < len: a
+    // typed `select_nth_unstable` over the raw slice is O(n) vs the generic
+    // full sort's O(n·log n) + per-comparison Scalar dispatch. Bit-identical
+    // (same comparator + position tie-break, returning the first k in order).
+    if keep == "first" && n >= 1 && n <= NKEEP_BOUNDED_SCAN_MAX_K {
+        if let Some(data) = col.as_i64_slice() {
+            if n < data.len() {
+                return Ok(Column::from_i64_values(nkeep_typed_i64(data, n, ascending)));
+            }
+        } else if let Some(data) = col.as_f64_slice() {
+            if n < data.len() {
+                return Ok(Column::from_f64_values(nkeep_typed_f64(data, n, ascending)));
+            }
+        }
     }
     // Annotate each value with its original position, then sort
     // (position is the secondary key; Rust's sort_by is stable, so
@@ -15115,6 +15190,18 @@ impl Column {
     /// therefore excluded from the top-n when `n` fits within the
     /// non-missing count. `n > len()` clamps to the full column.
     pub fn nlargest(&self, n: usize) -> Result<Self, ColumnError> {
+        // Typed bounded top-k scan for small n over an all-valid Int64 column:
+        // O(n) single pass vs a full radix sort of the whole column. Bit-identical
+        // to `sort_values(false)` (stable: ties first-seen) + take — i64 cmp then
+        // position-ascending. (Float64 is left on the sort path: its radix orders
+        // -0.0/+0.0 by bits, which `partial_cmp` would treat as a position tie.)
+        if n >= 1 && n <= NKEEP_BOUNDED_SCAN_MAX_K {
+            if let Some(data) = self.as_i64_slice() {
+                if n < data.len() {
+                    return Ok(Self::from_i64_values(nkeep_typed_i64(data, n, false)));
+                }
+            }
+        }
         let sorted = self.sort_values(false)?;
         let take = n.min(sorted.values.len());
         let values: Vec<Scalar> = sorted.values[..take].to_vec();
@@ -15125,6 +15212,13 @@ impl Column {
     ///
     /// Matches `pd.Series.nsmallest(n)` with `keep='first'`.
     pub fn nsmallest(&self, n: usize) -> Result<Self, ColumnError> {
+        if n >= 1 && n <= NKEEP_BOUNDED_SCAN_MAX_K {
+            if let Some(data) = self.as_i64_slice() {
+                if n < data.len() {
+                    return Ok(Self::from_i64_values(nkeep_typed_i64(data, n, true)));
+                }
+            }
+        }
         let sorted = self.sort_values(true)?;
         let take = n.min(sorted.values.len());
         let values: Vec<Scalar> = sorted.values[..take].to_vec();
@@ -26726,6 +26820,87 @@ mod tests {
             assert_eq!(r.len(), 2);
             assert_eq!(r.values()[0], Scalar::Int64(1));
             assert_eq!(r.values()[1], Scalar::Int64(1));
+        }
+
+        #[test]
+        fn nlargest_keep_f64_bounded_scan_matches_partial_cmp_reference() {
+            // nkeep_impl's f64 bounded scan must match a stable (partial_cmp,
+            // position-asc) reference — the compare_scalars_na_last semantics
+            // (−0.0 == +0.0, position tie-break), including signed-zero data.
+            use std::cmp::Ordering;
+            let mut state: u64 = 0xABCD_1234_9876_FEDC;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..150 {
+                let len = (next() % 400) as usize + 1;
+                let data: Vec<f64> = (0..len)
+                    .map(|_| match next() % 8 {
+                        0 => -0.0,
+                        1 => 0.0,
+                        2 => 1.0,
+                        3 => -1.0,
+                        4 => f64::INFINITY,
+                        5 => f64::NEG_INFINITY,
+                        _ => (next() % 15) as f64,
+                    })
+                    .collect();
+                let col = Column::from_f64_values(data.clone());
+                for &k in &[1usize, 5, 10] {
+                    let got: Vec<u64> = col
+                        .nlargest_keep(k, "first")
+                        .expect("nlk")
+                        .values()
+                        .iter()
+                        .map(|v| match v {
+                            Scalar::Float64(x) => x.to_bits(),
+                            o => panic!("{o:?}"),
+                        })
+                        .collect();
+                    let mut idx: Vec<usize> = (0..len).collect();
+                    idx.sort_by(|&a, &b| {
+                        data[b].partial_cmp(&data[a]).unwrap_or(Ordering::Equal).then(a.cmp(&b))
+                    });
+                    let take = k.min(len);
+                    let expected: Vec<u64> =
+                        idx[..take].iter().map(|&i| data[i].to_bits()).collect();
+                    assert_eq!(got, expected, "k={k}");
+                }
+            }
+        }
+
+        #[test]
+        fn nlargest_nsmallest_i64_bounded_scan_matches_sort_take() {
+            // The typed bounded-scan nlargest/nsmallest must equal the reference
+            // sort_values(±)+take[..n] over random i64 WITH heavy ties (so the
+            // first-seen position tie-break is exercised at the boundary).
+            let mut state: u64 = 0x1122_3344_5566_7788;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..200 {
+                let len = (next() % 500) as usize + 1;
+                // small value range => many ties
+                let data: Vec<i64> = (0..len).map(|_| (next() % 20) as i64 - 10).collect();
+                let col = Column::from_i64_values(data);
+                for &k in &[1usize, 3, 10, len.saturating_sub(1).max(1)] {
+                    let large = col.nlargest(k).expect("nlargest");
+                    let small = col.nsmallest(k).expect("nsmallest");
+                    let take = k.min(col.len());
+                    let ref_large: Vec<Scalar> =
+                        col.sort_values(false).unwrap().values()[..take].to_vec();
+                    let ref_small: Vec<Scalar> =
+                        col.sort_values(true).unwrap().values()[..take].to_vec();
+                    assert_eq!(large.values(), ref_large.as_slice(), "nlargest k={k}");
+                    assert_eq!(small.values(), ref_small.as_slice(), "nsmallest k={k}");
+                }
+            }
         }
 
         #[test]

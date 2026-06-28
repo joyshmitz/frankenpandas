@@ -7036,3 +7036,19 @@ Same-box best-of-3, 5M single-col DataFrame (`fp-frame/examples/bench_addscalar`
 Flips LOSS->parity/WIN, covers the whole DataFrame scalar-arithmetic family. Bit-identical: fp-frame scalar/arithmetic
 tests green. (NB: 3 PRE-EXISTING failures — series/dataframe arccosh+acosh golden mismatches — reproduce on a CLEAN
 tree without this change; a peer's unrelated acosh golden drift, NOT caused by apply_scalar_op.)
+
+### 2026-06-27 TealOsprey — abs/neg i64 owned-move output: 0.38x LOSS -> ~1.06x WIN vs pandas
+abs/neg already had typed paths (f64 via the witness-carrying from_f64_all_valid_with_finite_opt), but the i64 arms
+emitted via from_i64_values (Arc::from realloc). Switched to from_i64_values_owned (move; i64 wrapping_abs/wrapping_neg
+output is all-valid). Bit-identical.
+
+Same-box best-of-3, 5M i64 (`fp-columnar/examples/bench_absneg`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | before (Arc::from) | after (owned) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `abs` i64 5M | 59.9ms | 21.6ms | 2.77x | 0.39x -> 1.08x (pandas 23.3ms) |
+| `neg` i64 5M | 59.7ms | 20.7ms | 2.88x | 0.37x -> 1.05x (pandas 21.8ms) |
+
+Both flip LOSS->WIN. Bit-identical: fp-columnar 26 abs/neg tests green. (f64 abs/neg already owned via the finiteness-
+witness constructor; this closes their i64 siblings — the owned-Int64 backing now covers abs/neg/astype/sort/square/
+replace/fillna/bfill/dropna i64.)

@@ -16646,7 +16646,8 @@ impl Column {
         // to the loop below (Int64 wrapping_abs incl i64::MIN; Float64 .abs()
         // incl -0.0→0.0; all-valid ⇒ no missing branch).
         if let Some(data) = self.as_i64_slice() {
-            return Ok(Self::from_i64_values(
+            // all-valid i64 output → MOVE (no Arc::from realloc).
+            return Ok(Self::from_i64_values_owned(
                 data.iter().map(|&x| x.wrapping_abs()).collect(),
             ));
         }
@@ -16706,7 +16707,7 @@ impl Column {
         // the i64 buffer (wrapping, incl i64::MIN) and stays Int64; Float64
         // negates over the f64 buffer. Bit-identical to the scalar loop.
         if let Some(data) = self.as_i64_slice() {
-            return Ok(Self::from_i64_values(
+            return Ok(Self::from_i64_values_owned(
                 data.iter().map(|&x| x.wrapping_neg()).collect(),
             ));
         }

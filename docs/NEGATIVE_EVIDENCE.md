@@ -6169,7 +6169,12 @@ commit's worktree. Command:
 | `SeriesGroupBy.diff(1)` | 4.041242ms | 3.618641ms | 1.12x | prior same-workload pandas comparator 29.100ms, so both already win |
 
 The lever is intentionally narrow: `periods > 1`, non-dense keys, null/NaN values, and non-float fall back to the
-existing paths. Validation: pending in this commit cycle.
+existing paths. Validation: focused `fp-frame --release gbcum` tests green (4/4); full `fp-conformance --release`
+crate green; valid per-crate `cargo bench -p fp-frame` green; per-crate `cargo check -p fp-frame --all-targets`
+green on remote `hz2` with pre-existing example unused-import warnings. The literal requested `cargo bench --release
+-p fp-frame` form was also run and rejected by Cargo because `bench` has no `--release` argument. `cargo fmt -p
+fp-frame --check` is blocked by pre-existing example formatting drift outside this hunk; bounded
+`timeout 180s ubs crates/fp-frame/src/lib.rs` timed out without a focused finding, matching the known broad inventory.
 
 ### 2026-06-27 TealOsprey — to_csv typed FastCol path extended to Datetime64: 1.95x fp-side (6.9x -> 13.5x vs pandas)
 Mirror of the to_json datetime fix on the CSV side. `try_write_csv_typed`'s `FastCol` only knew F/I/B/U, so ANY

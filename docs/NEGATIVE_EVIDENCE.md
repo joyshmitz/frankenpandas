@@ -7087,3 +7087,22 @@ Same-box best-of-3, 5M hourly datetimes (`fp-frame/examples/bench_dt2`),
 dayofweek WIN; year/month improved 1.4-1.5x fp-side but remain LOSSES — calendar civil-conversion (ns->y/m/d) is the
 bottleneck, not the realloc (the next lever is a faster ns->civil algorithm, e.g. Howard Hinnant's days_from_civil
 inverse). Bit-identical: fp-frame 17 dt component tests green (fp-frame test build now compiles).
+
+### 2026-06-27 TealOsprey — Series.dt year/month/day PARALLEL civil-conversion: 0.5-0.86x LOSS -> 3.5-4.2x WIN vs pandas
+The remaining dt losses (year 0.86x, month 0.68x) were CIVIL-CONVERSION COMPUTE-bound (Hinnant's ns->y/m/d is already
+the optimal serial algorithm; ~12 int ops/elem, the loads hide behind the math), NOT realloc-bound. Since it's
+compute-bound (not bandwidth-bound — the regime where memory's "thread-spawn HURTS" note applies), added a scoped-thread
+parallel mapper `par_map_i64_from_nanos` (available_parallelism().min(8), n>=200k gate, serial fallback) and routed the
+year + civil[month,day] paths through it. Bit-identical (chunk i writes out[i*chunk..]; order preserved).
+
+Same-box best-of-3, 5M hourly datetimes (`fp-frame/examples/bench_dt2`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | serial (owned) | parallel | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `dt.year` 5M | 73.1ms | 14.96ms | 0.86x -> 4.18x (pandas 62.5ms) |
+| `dt.month` 5M | 89.2ms | 17.36ms | 0.68x -> 3.50x (pandas 60.8ms) |
+
+Both flip LOSS->strong WIN (~5x core scaling). Confirms the compute-bound-parallelism regime is DISTINCT from the
+bandwidth-bound ops (add/abs) where threads only contend. NEXT: the nanos-component (dayofweek/hour/min/sec) and
+dayofyear/weekofyear paths are also compute-bound and would win more via the same helper (they already win via owned;
+dayofweek 2.70x). Bit-identical: fp-frame 17 dt component tests green.

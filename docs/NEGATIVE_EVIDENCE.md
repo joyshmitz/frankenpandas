@@ -7402,3 +7402,23 @@ Same-box best-of-6, 5M Timedelta64 (`fp-frame/examples/bench_tdsec`):
 | `dt.total_seconds()` 5M | 69.3ms | 26.7ms | 2.60x | 0.72x -> 1.88x (pandas 50.1ms) |
 
 Flips LOSS->WIN. FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — Utf8 factorize typed Scalar-backed path: 0.47x LOSS -> 4.9x WIN (10.6x fp-side)
+factorize() on an all-valid Utf8 Series whose column is Scalar-materialized (the `from_values(Vec<Scalar::Utf8>)`
+ingestion path — NOT `LazyContiguousUtf8`, so the cached-witness and byte-span fast paths can't fire) fell to the
+generic ScalarKey path: it boxed every code as `Scalar::Int64` (2M × 32B), re-inferred the codes' dtype through
+`from_values`, and materialized a `(0..n)` `Vec<IndexLabel>` for the codes index (then re-scanned it for uniqueness in
+`Index::new`). Added a typed all-valid-Utf8 path BEFORE the generic one: key on the borrowed `&str` via
+`FxHashMap<&str,i64>`, emit codes through `from_i64_values_owned` + the O(1) lazy unit-range index (sibling of the
+Int64 factorize paths), clone each unique once. Bit-identical: first-seen code assignment + uniques order match the
+ScalarKey path for all-valid Utf8 (factorize suite green). Also switched the two CONTIGUOUS Utf8 paths (cached-witness +
+byte-span) from `Index::new((0..n) labels)` to the same lazy unit-range index — same lever, removes a ~32MB IndexLabel
+build per call even though the factorize witness itself is OnceCell-cached.
+
+Same-box best-of-6, 2M Utf8 8-card (`fp-frame/examples/bench_reshape`):
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `factorize()` Utf8 2M | 128.2ms | 12.1ms | 10.6x | 0.47x -> 4.92x (pandas 59.5ms) |
+
+No caching in the new path ⇒ the 12.1ms is a true per-call cost (not a witness-cache phantom). Flips a real LOSS->WIN.
+FULL fp-frame suite 3109 passed / 0 failed. (get_dummies Utf8 0.62x is the next gap in this vein — separate.)

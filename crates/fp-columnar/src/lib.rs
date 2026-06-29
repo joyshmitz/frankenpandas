@@ -12008,7 +12008,7 @@ impl Column {
                     .zip(mask_bits)
                     .filter_map(|(&v, &m)| m.then_some(v))
                     .collect();
-                return Ok(Self::from_f64_values(gathered));
+                return Ok(Self::from_f64_values_owned(gathered));
             }
             if let Some(data) = self.as_i64_slice() {
                 let gathered: Vec<i64> = data
@@ -12033,7 +12033,7 @@ impl Column {
                 .zip(mask.values.iter())
                 .filter_map(|(&v, m)| matches!(m, Scalar::Bool(true)).then_some(v))
                 .collect();
-            return Ok(Self::from_f64_values(gathered));
+            return Ok(Self::from_f64_values_owned(gathered));
         }
         if let Some(data) = self.as_i64_slice() {
             let gathered: Vec<i64> = data

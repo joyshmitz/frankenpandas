@@ -1828,18 +1828,31 @@ fn vectorized_binary_i64(
         ArithmeticOp::Div | ArithmeticOp::Pow => unreachable!("handled by early return above"),
     };
 
-    let out: Vec<i64> = left
-        .iter()
-        .zip(right.iter())
-        .enumerate()
-        .map(|(i, (&l, &r))| {
+    // Mod/FloorDiv (python_mod_i64 / python_floor_div_i64) are COMPUTE-bound
+    // (integer idiv ~20-40 cycles + sign adjustment) → parallelize; add/sub/mul
+    // are bandwidth-bound → keep serial. Bit-identical (same apply, same combined
+    // gate, same order; invalid positions sentinel-0 either way).
+    let out: Vec<i64> = if matches!(op, ArithmeticOp::Mod | ArithmeticOp::FloorDiv) {
+        par_map_vec_i64(left.len(), |i| {
             if combined.get(i) {
-                apply(l, r)
+                apply(left[i], right[i])
             } else {
-                0 // sentinel for invalid positions
+                0
             }
         })
-        .collect();
+    } else {
+        left.iter()
+            .zip(right.iter())
+            .enumerate()
+            .map(|(i, (&l, &r))| {
+                if combined.get(i) {
+                    apply(l, r)
+                } else {
+                    0 // sentinel for invalid positions
+                }
+            })
+            .collect()
+    };
 
     Some((out, combined))
 }
@@ -5970,6 +5983,36 @@ fn f64_radix_key(value: f64) -> u64 {
 fn par_map_vec_f64<G: Fn(usize) -> f64 + Sync>(n: usize, g: G) -> Vec<f64> {
     const PAR_MIN: usize = 200_000;
     let mut out = vec![0.0_f64; n];
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(8);
+    if workers <= 1 || n < PAR_MIN {
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = g(i);
+        }
+        return out;
+    }
+    let chunk = n.div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (ci, out_c) in out.chunks_mut(chunk).enumerate() {
+            let g = &g;
+            let base = ci * chunk;
+            scope.spawn(move || {
+                for (j, o) in out_c.iter_mut().enumerate() {
+                    *o = g(base + j);
+                }
+            });
+        }
+    });
+    out
+}
+
+/// `i64` sibling of [`par_map_vec_f64`] for compute-bound i64 index maps
+/// (python_mod_i64 / python_floor_div_i64 — integer idiv + sign adjustment).
+fn par_map_vec_i64<G: Fn(usize) -> i64 + Sync>(n: usize, g: G) -> Vec<i64> {
+    const PAR_MIN: usize = 200_000;
+    let mut out = vec![0_i64; n];
     let workers = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)

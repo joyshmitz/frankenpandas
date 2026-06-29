@@ -7246,3 +7246,18 @@ Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_fdiv`),
 (Lower scaling than mod's 3.9x — floordiv is lighter compute so more bandwidth-relative, but still a clear win.) The
 f64 binary parallel special-case now covers Pow/Mod/FloorDiv (compute-bound); add/sub/mul/div stay serial (bandwidth).
 FULL fp-columnar suite 467 passed / 0 failed.
+
+### 2026-06-27 TealOsprey — PARALLEL i64 mod/floordiv: 0.63-0.88x LOSS -> 3.0x WIN vs pandas
+i64 mod/floordiv go through vectorized_binary_i64 (not the f64 apply path). python_mod_i64 / python_floor_div_i64
+(integer idiv ~20-40 cycles + sign adjustment) are COMPUTE-bound and were LOSSES. Added par_map_vec_i64 and
+parallelized the Mod/FloorDiv out-map (combined-validity gate preserved; add/sub/mul stay serial). Bit-identical.
+
+Same-box best-of-3, 5M i64 (`fp-columnar/examples/bench_imod`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | serial | parallel | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `mod` (a%b) i64 5M | 37.6ms | 10.86ms | 3.46x | 0.88x -> 3.04x (pandas 33.0ms) |
+| `floordiv` (a//b) i64 5M | 51.3ms | 10.65ms | 4.82x | 0.63x -> 3.01x (pandas 32.1ms) |
+
+Both flip LOSS->WIN — integer idiv is genuinely compute-bound (unlike pipelined fdiv/add). The mod/floordiv family
+(f64 AND i64) is now parallel + wins 3-6x. FULL fp-columnar suite 467 passed / 0 failed.

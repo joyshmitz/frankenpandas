@@ -7164,3 +7164,22 @@ Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_pow`, `bench_atan2`),
 All strong WINS. (pandas arctan2/hypot are themselves slow ~150-200ms; fp already edged them serially, now dominates.)
 Cheap binaries (add/sub/mul/div/mod/max/min/copysign) stay serial — bandwidth-bound. FULL fp-columnar suite 467
 passed / 0 failed.
+
+### 2026-06-27 TealOsprey — PARALLEL remaining dt components (hour/dayofyear/weekofyear/is_leap_year/is_month_start/…): 4.4-7.9x WIN
+Completes the dt-accessor parallelism: routed the nanos-component (hour/minute/second/dayofweek), dayofyear,
+weekofyear, and the BOOL calendar predicates (is_leap_year/is_month_start/is_quarter_start/…) through the parallel
+mappers (par_map_i64_from_nanos + new par_map_bool_from_nanos), with a NaT pre-scan + serial/small-n fallback.
+Bit-identical (same per-element civil math, order-preserving chunks; from_i64_values_owned / from_bool_values output).
+
+Same-box best-of-3, 5M hourly datetimes (`fp-frame/examples/bench_dt3`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | parallel | vs pandas 2.2.3 |
+| --- | ---: | ---: |
+| `dt.hour` 5M | 8.58ms | 7.14x (pandas 61.3ms) |
+| `dt.dayofyear` 5M | 15.58ms | 4.43x (pandas 69.1ms) |
+| `dt.is_leap_year` 5M | 15.00ms | 7.87x (pandas 118.1ms) |
+| `dt.is_month_start` 5M | 13.56ms | 4.47x (pandas 60.6ms) |
+
+All strong WINS (~5x core scaling over the serial civil path). The ENTIRE dt-accessor surface (year/month/day/
+dayofweek/dayofyear/weekofyear/hour/minute/second/is_leap_year/is_month_start/…) is now parallel + wins 4-8x.
+Bit-identical: fp-frame 55+ dt tests green.

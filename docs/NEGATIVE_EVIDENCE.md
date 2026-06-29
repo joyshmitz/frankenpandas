@@ -7564,3 +7564,20 @@ Same-box best-of-6, 2M rows × 2 f64 value cols by Scalar-backed 15-byte Utf8 ke
 A modest, bit-identical high-card gain (neutral at low card) that generalizes to all fixed-width ≤16-byte string keys.
 The residual high-card gap is the cache-cold 100k-entry hashmap itself (open-addressing / radix grouping would be the
 next primitive). FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — DataFrameGroupBy idxmax/idxmin by Utf8 key dense path: 0.38x LOSS -> 1.95-2.88x WIN
+`try_idx_extreme_dense` (the dense path for df.groupby(k).idxmax()/idxmin()) gated the single key on `as_i64_slice` — so
+ANY Utf8 key (contiguous OR Scalar-backed) fell to build_groups + a scattered per-group `col.values()[idx]` Scalar
+gather. Added a single all-valid Utf8 key branch: hash-group the borrowed &str (via pivot_utf8_key_strs, covers both
+backings), sort distinct keys when self.sort, then run the existing typed-f64 argmax/argmin scan over `as_f64_slice`
+value columns. Bit-identical: same sorted (str::cmp) group order and first-extreme-row-in-row-order index as the generic
+path; all-valid f64 value gate ⇒ no missing to skip.
+
+Same-box best-of-6, 2M rows × 2 f64 value cols by Scalar-backed Utf8 key (`bench_dfgbu2`), pandas 2.2.3 per-call:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.groupby(Utf8).idxmax()` 2M card=1000 | 191.3ms | 30.5ms  | 6.27x | 0.46x -> 2.88x (pandas 87.8ms) |
+| `df.groupby(Utf8).idxmax()` 2M card=100k | 797.0ms | 154.5ms | 5.16x | 0.38x -> 1.95x (pandas 302.8ms) |
+
+Flips LOSS->WIN (idxmin shares the path). Also confirmed this turn: DataFrameGroupBy nunique (2.3x WIN), pivot_table by
+Utf8 (4.5-5.4x WIN), Series.map(dict) Utf8 (1.3-1.7x WIN) all already dominate — no gap. FULL fp-frame suite 3109/0.

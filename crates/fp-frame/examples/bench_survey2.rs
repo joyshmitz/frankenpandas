@@ -39,6 +39,11 @@ fn main() {
     let other_i = Series::new("o", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).collect())).unwrap();
     let mi = si.gt_scalar(&Scalar::Int64(500)).unwrap();
     timeit("where_series_i64", || { std::hint::black_box(si.where_cond_series(&mi, &other_i).unwrap().len()); });
+    let siq = Series::new("siq", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as u64).map(|i| { let mut z=i.wrapping_mul(0x9E3779B97F4A7C15); z=(z^(z>>30)).wrapping_mul(0xBF58476D1CE4E5B9); (z>>11) as i64 }).collect())).unwrap();
+    timeit("pct_change_i64", || { std::hint::black_box(siq.pct_change(1).unwrap().len()); });
+    timeit("nlargest_i64", || { std::hint::black_box(siq.nlargest(100).unwrap().len()); });
+    timeit("idxmax_i64", || { std::hint::black_box(siq.idxmax().unwrap()); });
+    timeit("ffill_i64_clean", || { std::hint::black_box(siq.ffill(None).unwrap().len()); });
     let oth_i = Series::new("o", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).map(|i| i % 777).collect())).unwrap();
     timeit("update_i64", || { std::hint::black_box(si.update(&oth_i).unwrap().len()); });
     timeit("combine_first_i64", || { std::hint::black_box(si.combine_first(&oth_i).unwrap().len()); });

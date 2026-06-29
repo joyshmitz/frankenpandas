@@ -7684,3 +7684,17 @@ column must be copied once; matching pandas needs an index representation that b
 (structural). Also confirmed dominant this turn (no gap): groupby by Datetime64 key (sum 4.4x / count 2.5-3.7x WIN);
 agg(list)/agg(dict) by Utf8 key (dispatch through the already-fixed gb.count/first/last/min/max/named_func). FULL
 fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — multi-key merge on Scalar-backed Utf8 keys: 0.62-0.73x LOSS (SURFACED; lever = dense_packed multi-key)
+`merge_dataframes_on` on TWO Scalar-backed Utf8 keys is a moderate LOSS: inner 796.7ms (pandas 583.4 = 0.73x), left
+785.5ms (pandas 487.6 = 0.62x) at 2M-left × 1M-right (card=1000), `bench_merge2u`. Root cause: the multi-key path runs
+`collect_composite_keys`, which for each row builds a `CompositeJoinKey` SmallVec<[JoinKeyComponent;1]> (2 elems >
+inline ⇒ heap spill per row) and calls `scalar_to_key_component` per cell, which for Utf8 does
+`IndexLabel::Utf8(v.clone())` — a String clone per key cell (4M+ clones across both sides). The single-key Utf8 merge
+WINS (no composite SmallVec; bench_merge_utf8 2-3x), and a bounded-Int64 composite already has a dense packed-CSR path
+(merge ~line 7036/7740). LEVER (the codebase's OPEN "dense_packed multi-key", join-vein memory): factorize each Utf8
+key column over left∪right to shared u32 codes (one FxHashMap<&str> pass/side/column), pack the per-row codes into one
+i64, and feed the EXISTING dense Int64 composite CSR — matching on codes, output gathering the original columns by
+position. Replaces 4M String clones + 2M SmallVec spills with 2 factorize passes + i64 packing. NOT attempted here:
+intricate fp-join change (null/Missing class, duplicate-cardinality multiplication, sort/outer ordering) — too risky to
+land half-tested in the time box. Surfaced with bench + lever for a focused session. (Conformance GREEN; no source change.)

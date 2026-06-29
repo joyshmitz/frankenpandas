@@ -7742,3 +7742,22 @@ The ONLY remaining vs-pandas LOSSES are the documented STRUCTURAL ones: multi-ke
 factorize-to-codes), 1M-group multi-key groupby output assembly 0.25x (categorical MultiIndex / Vec<MixedKey> String
 materialization), single-Utf8-subset DataFrame dedup 0.60x (string-hashtable khash floor), and the f64-comparison
 Vec<bool> bandwidth 0.40x (packed-bitmask Bool). All need multi-hour structural work, not a fast-path reroute.
+
+### 2026-06-29 BlackThrush — multi-key Utf8 merge dense_packed lever PROTOTYPED & VALIDATED (inner 5.8x on match phase)
+Prototyped the lever from the prior merge entry directly in `bench_merge2u`: pre-factorize each Utf8 key column over
+left∪right to shared i64 codes, then merge on the i64-code key columns (the existing dense Int64 composite CSR).
+Same-box best-of-6, 2M-left × 1M-right, card=1000, timing ONLY the merge call (factorize done outside the loop, as a
+real impl would amortize / it mirrors the work the Utf8 hash-composite path already does inline):
+| op | Utf8 keys (now) | i64-CODED (lever) | speedup |
+| --- | ---: | ---: | ---: |
+| inner | 762.1ms | 130.8ms | 5.83x |
+| left  | 758.5ms | 519.0ms | 1.46x |
+
+The lever PAYS — inner merge on codes is 5.8x faster (the dense Int64 composite CSR vs the per-row Vec<JoinKeyComponent>
+SmallVec + String-clone composite + hash). vs pandas 583ms (inner), a real impl (factorize ~100ms + 130ms merge ≈ 230ms)
+flips 0.73x LOSS -> ~2.5x WIN. NOT landed: the in-place wrapper (factorize→code-frames→merge→map output codes back to
+Utf8) is correctness-critical — output ORDER must match pandas across join types. Inner/left (left-position order,
+encoding-independent) are safe; outer/right (key-sorted order: codes are first-seen, not lexicographic) are NOT and must
+keep the Utf8 path. Implementable with an inner/left gate + the existing dense path, but needs careful order-conformance
+verification (a merge order bug is data-corruption-adjacent) — a focused session, not a 60m patch. Prototype retained in
+bench_merge2u. Conformance GREEN (bench + docs only).

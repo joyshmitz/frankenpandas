@@ -7494,3 +7494,19 @@ Same-box best-of-6, 2M f64 value by Scalar-backed Utf8 key, pandas rebuilding gr
 | `count` by Utf8 key 2M card=100k | 348.0ms | 68.2ms | 5.10x | 0.62x -> 3.15x (pandas 215.0ms) |
 
 Flips LOSS->WIN. (first()/nunique() by this key kind remain on build_groups — next.) FULL fp-frame suite 3109 / 0 failed.
+
+### 2026-06-29 BlackThrush — SeriesGroupBy.first()/last() dense path: 0.77x LOSS -> 2.72x WIN (all key kinds)
+first()/last() ALWAYS called the SipHash `build_groups` — no dense path at all, even for Int64 keys. For an all-valid
+typed value column, first()/last() of each group is simply the value at the group's first-seen / last-seen row. Added a
+dense path (gated on `as_f64_slice`/`as_i64_slice` value + `dense_group_ids` + `dense_group_labels`): record first_row
+(resp. last_row) per gid in one pass, gather, emit typed. Covers Int64 / contiguous-Utf8 / Scalar-backed-Utf8 keys.
+Bit-identical: all-valid ⇒ first/last row == first/last non-missing; first-seen gid order == build_groups order.
+
+Same-box best-of-6, 2M f64 value by Scalar-backed Utf8 key, pandas rebuilding groupby per call (`bench_gbukey`):
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `first` by Utf8 key 2M card=1000 | 29.2ms  | 22.5ms | 1.30x | 2.13x -> 2.76x (pandas 62.2ms) |
+| `first` by Utf8 key 2M card=100k | 228.3ms | 64.9ms | 3.52x | 0.77x -> 2.72x (pandas 176.7ms) |
+
+Flips the high-card LOSS->WIN (and also speeds first/last for Int64 keys, which had no dense path). nunique() by this
+key kind remains on build_groups (per-group distinct set — next). FULL fp-frame suite 3109 passed / 0 failed.

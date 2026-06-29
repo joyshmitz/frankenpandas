@@ -28,6 +28,10 @@ fn main() {
     timeit("abs", || { std::hint::black_box(s.abs().unwrap().len()); });
     timeit("clip(0,1)", || { std::hint::black_box(s.clip(Some(0.0), Some(1.0)).unwrap().len()); });
     timeit("fillna(0)", || { std::hint::black_box(s.fillna(&Scalar::Float64(0.0)).unwrap().len()); });
+    timeit("dropna(clean)", || { std::hint::black_box(s.dropna().unwrap().len()); });
+    let si = Series::new("si", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).collect())).unwrap();
+    timeit("fillna_i64(0)", || { std::hint::black_box(si.fillna(&Scalar::Int64(0)).unwrap().len()); });
+    timeit("dropna_i64(clean)", || { std::hint::black_box(si.dropna().unwrap().len()); });
     timeit("cumsum", || { std::hint::black_box(s.cumsum().unwrap().len()); });
     timeit("rank(avg)", || { std::hint::black_box(s.rank("average", true, "keep").unwrap().len()); });
     timeit("nlargest100", || { std::hint::black_box(s.nlargest(100).unwrap().len()); });

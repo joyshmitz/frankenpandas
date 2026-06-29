@@ -12128,6 +12128,11 @@ impl Column {
             && let Scalar::Int64(fv) = &cast_fill
             && let Some((data, validity)) = self.as_i64_slice_with_validity()
         {
+            // Nothing-to-fill short-circuit: all slots present (Int64 missing is
+            // validity-bit only, no NaN sentinel) ⇒ output == input, O(1) share.
+            if validity.all() {
+                return Ok(self.clone());
+            }
             let mut out = Vec::with_capacity(data.len());
             for (i, &d) in data.iter().enumerate() {
                 out.push(if validity.get(i) { d } else { *fv });
@@ -12144,9 +12149,12 @@ impl Column {
         // the output is the same all-valid Int64 column. cast_scalar above has
         // already validated/errored on the fill value.
         if self.dtype == DType::Int64
-            && let Some(data) = self.as_i64_slice()
+            && self.as_i64_slice().is_some()
         {
-            return Ok(Self::from_i64_values_owned(data.to_vec()));
+            // `as_i64_slice` is Some only for an all-valid Int64 backing → nothing
+            // to fill, output == input. Share in O(1) instead of `to_vec`-copying
+            // the whole buffer.
+            return Ok(self.clone());
         }
 
         let values = self

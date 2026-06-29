@@ -7388,3 +7388,17 @@ Same-box best-of-6, 5M (`fp-frame/examples/bench_expanding`, `bench_gb_xform`):
 SeriesGroupBy transform mean/sum flip LOSS->WIN; expanding sum/mean go near-parity->2.2x WIN. The remaining ~17
 `from_f64_values(out)` sites are NaN-producing (rolling/min_periods) or group-count-sized (tiny copy) — no benefit
 (owned re-scans + falls back). FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — dt.total_seconds() owned-move output: 0.72x LOSS -> 1.88x WIN
+Same owned-move lever, the Timedelta64 `dt.total_seconds()` typed fast path: it built a full-length `Vec<f64>`
+(`nanos / 1e9`, always finite — the existing comment already proves no-NaN) then emitted it via `from_f64_values`
+(Arc::from(Vec) cold-realloc-copy, ~40MB at 5M). For this trivial-compute op (one divide/elem) the copy DOMINATES
+(sister to the `abs` 0.35x arc-copy floor). Switched to `from_f64_values_owned` (MOVE). Bit-identical: i64-nanos/1e9
+is finite ⇒ owned never hits its NaN fallback; NaT rows still route to the Scalar path (gated by `!contains(NAT)`).
+
+Same-box best-of-6, 5M Timedelta64 (`fp-frame/examples/bench_tdsec`):
+| op | before (copy) | after (move) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `dt.total_seconds()` 5M | 69.3ms | 26.7ms | 2.60x | 0.72x -> 1.88x (pandas 50.1ms) |
+
+Flips LOSS->WIN. FULL fp-frame suite 3109 passed / 0 failed.

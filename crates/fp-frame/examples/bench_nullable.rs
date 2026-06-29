@@ -34,4 +34,7 @@ fn main() {
     timeit("diff", || { std::hint::black_box(s.diff(1).unwrap().len()); });
     timeit("cummax", || { std::hint::black_box(s.cummax().unwrap().len()); });
     timeit("cummin", || { std::hint::black_box(s.cummin().unwrap().len()); });
+    let o = s.clone();
+    timeit("add_col", || { std::hint::black_box(s.add(&o).unwrap().len()); });
+    timeit("mul_col", || { std::hint::black_box(s.mul(&o).unwrap().len()); });
 }

@@ -7834,3 +7834,16 @@ Same-box best-of-6, 5M Float64 10%-null (`bench_nullable`), pandas 2.2.3:
 
 Both FLIP LOSS->WIN. Closes the nullable-f64 elementwise vein opened this session (compare/abs/round/neg/sqrt/exp/log/
 diff/cummax/cummin all now typed-fast). fp-frame 3109/0.
+
+### 2026-06-29 BlackThrush — nullable Float64 binary arithmetic (col OP col): 0.057x LOSS, typed-output REJECTED (parity wall)
+Nullable f64+f64 (and *, -, /) falls to `aligned_binary_f64_same_positions`' per-element Scalar tail: 5M 10%-null
+add_col 419ms / mul_col 411ms vs pandas 24ms (0.057x / 17x slower). Tried a typed output (write apply(l,r), validity =
+lvalid&rvalid). REVERTED — breaks the locked `aligned_binary_f64_same_positions_matches_general_path_for_all_ops_with_nan_inf`
+parity test. The general Scalar tail makes THREE distinct representations the typed constructors can't all reproduce at
+once: both-valid finite ⇒ present Float64(v); both-valid GENERATED NaN (inf-inf, 0/0) ⇒ PRESENT Float64(NaN); either
+operand missing ⇒ Null(NaN) (missing). `from_f64_values` re-derives validity from NaN (makes missing-operand
+Float64(NaN), not Null(NaN)); `from_f64_values_with_validity` with an explicit mask re-marks set-bit NaN as missing
+(makes generated-NaN Null, not present Float64(NaN)). Neither matches `Self::new(Float64,…)`'s exact present-NaN vs
+Null-NaN split. CLEAN FIX needs a constructor mirroring Self::new's NaN handling, OR a two-mask path distinguishing
+input-missing (→Null) from generated-NaN (→present Float64(NaN)) — a focused constructor change, not a 60m reroute.
+(Also confirmed dominant this turn: nullable clip 2.1x WIN, fillna ~parity.) Conformance GREEN (bench+docs only).

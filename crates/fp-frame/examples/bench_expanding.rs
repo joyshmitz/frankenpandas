@@ -26,6 +26,8 @@ fn main() {
         let t = std::time::Instant::now();
         let e = s.expanding(None);
         let r = match op {
+            "sum" => e.sum(),
+            "mean" => e.mean(),
             "std" => e.std(),
             "var" => e.var(),
             "skew" => e.skew(),

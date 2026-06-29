@@ -26,6 +26,8 @@ fn main() {
         let t = Instant::now();
         let gb = value.groupby(&key).unwrap();
         let r = match op {
+            "tmean" => gb.transform("mean"),
+            "tsum" => gb.transform("sum"),
             "rank" => gb.rank("average", true, "keep"),
             "cummin" => gb.cummin(),
             "cumprod" => gb.cumprod(),

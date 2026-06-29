@@ -7367,3 +7367,24 @@ Same-box best-of-6, 5M (`fp-frame/examples/bench_survey2`), `CARGO_TARGET_DIR=/d
 
 where/mask flip LOSS->WIN; clip (already winning vs pandas' slow elementwise clip) improves WIN->bigger WIN. `update`
 f64 (same pattern, not separately benched) fixed for consistency. FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — expanding sum/mean + SeriesGroupBy transform owned-move: transform 0.54x LOSS -> 1.18x WIN
+Same missed-sibling owned-move lever as the where/mask/clip fix above, three more full-length all-valid f64 producers
+that still emitted `from_f64_values` (Arc::from(Vec) cold-realloc-copy of the freshly-built output Vec, ~40MB at 5M):
+`running_sum` (the expanding().sum()/mean() typed fast path) and BOTH SeriesGroupBy.transform fast paths (bounded-Int64
+key + contiguous-Utf8 key, the sum/mean broadcast). Each builds a fresh full-length Vec<f64> then copied it; switched
+to `from_f64_values_owned` (MOVE). Bit-identical: expanding values are finite acc/acc-over-count of all-valid no-NaN
+input (min_periods<=1 ⇒ no below-min NaN); transform broadcasts finite group sums/means; and from_f64_values_owned
+re-scans for NaN + falls back to the copy path if any slipped through.
+
+Same-box best-of-6, 5M (`fp-frame/examples/bench_expanding`, `bench_gb_xform`):
+| op | before (copy) | after (move) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `expanding().sum()` 5M     | 82.1ms | 38.4ms | 2.14x | 1.03x -> 2.21x (pandas 84.9ms) |
+| `expanding().mean()` 5M    | 78.8ms | 39.2ms | 2.01x | 1.08x -> 2.17x (pandas 85.1ms) |
+| SGB `transform("mean")` 5M g=1000 | 76.9ms | 35.5ms | 2.17x | 0.54x -> 1.18x (pandas 41.9ms) |
+| SGB `transform("sum")` 5M g=1000  | 74.3ms | 34.1ms | 2.18x | 0.56x -> 1.21x (pandas 41.5ms) |
+
+SeriesGroupBy transform mean/sum flip LOSS->WIN; expanding sum/mean go near-parity->2.2x WIN. The remaining ~17
+`from_f64_values(out)` sites are NaN-producing (rolling/min_periods) or group-count-sized (tiny copy) — no benefit
+(owned re-scans + falls back). FULL fp-frame suite 3109 passed / 0 failed.

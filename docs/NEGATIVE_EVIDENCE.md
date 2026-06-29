@@ -7309,3 +7309,16 @@ Flips LOSS->WIN; also covers mask_series + where_cond(scalar). NOTE (separate, h
 is 8.3ms vs pandas' 3.3ms (0.40x) — already typed/hoisted/owned, the residual is LLVM autovectorization of
 f64-compare→Vec<bool> vs numpy's hand-tuned SIMD mask (a safe-Rust SIMD ceiling; std::simd/intrinsics would be the
 lever, deferred). FULL fp-columnar suite 467 passed / 0 failed.
+
+### 2026-06-27 TealOsprey — SIMD f64 comparison (a<b): ~0-gain — REVERTED
+Tried the "different primitive" lever for the a<b SIMD ceiling: added `#![feature(portable_simd)]` to fp-columnar
+(safe — no unsafe) and rewrote binary_comparison's f64 path with 8-wide f64x8 simd_lt/gt/eq/… + Mask::to_array →
+copy_from_slice. MEASURED ~0-gain (5M a<b: 8.3ms → 8.0ms, 1.04x) and REVERTED.
+
+CAUSE: the bottleneck is NOT the f64 compare loop (which the scalar version already autovectorizes adequately) — it's
+the bool-mask → byte output. `Mask::to_array()` unpacks the SIMD mask register to 8 bytes per chunk, which costs about
+what the scalar bool store did, so the explicit SIMD compare buys nothing. fp a<b stays 8.3ms vs pandas' 3.3ms (0.40x).
+The residual ~2.5x bandwidth gap is in the Vec<bool> output path (vec![false;n] zeroing + per-elem byte writes +
+from_bool_values), not the comparison — a packed-bitmask Bool representation (1 bit/elem instead of 1 byte) would be
+the real lever, but that's a structural Bool-column change (every Bool consumer), DEFERRED. portable_simd Mask→bytes is
+NOT the answer for this op.

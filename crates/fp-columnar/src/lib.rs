@@ -17014,7 +17014,11 @@ impl Column {
 
     /// Exponential (e^x) of numeric values. Matches numpy's exp ufunc.
     pub fn exp(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary_par(f64::exp) {
+        // Use the nullable-capable helper (mirror of log) so a nullable Float64
+        // input gets the typed path too (the all-valid `typed_float_unary_par`
+        // bailed on any NaN → Scalar loop). Bit-identical for all-valid input
+        // (exp of finite is finite/inf, never NaN ⇒ same all-valid output).
+        if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::exp) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17578,6 +17582,16 @@ impl Column {
             par_map_vec_f64(len, |i| f(data[i]))
         } else if let Some(data) = self.as_i64_slice() {
             par_map_vec_f64(len, |i| f(data[i] as f64))
+        } else if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            // Nullable Float64 INPUT (the all-valid `as_f64_slice` above bails on
+            // any NaN, so nullable sqrt/exp/log fell to the per-element Scalar
+            // loop, ~400ms / 7-16x slower than pandas). Invalid slot ⇒ NaN, which
+            // the validity scan below marks missing — bit-identical to those ops'
+            // Scalar arm (`missing ⇒ Float64(NaN)`); valid slot ⇒ f(v), itself NaN
+            // for e.g. sqrt(negative), also ⇒ missing (same as the Scalar path).
+            par_map_vec_f64(len, |i| if validity.get(i) { f(data[i]) } else { f64::NAN })
         } else {
             return None;
         };

@@ -7793,3 +7793,20 @@ at invalid, re-ingest via from_f64_values). Bit-identical: -x of a present non-N
 floor): sqrt 0.062x (UNSAFE for from_f64_values — sqrt(negative present)=NaN would be wrongly marked missing; needs
 present-NaN preservation), exp 0.139x (safe, not yet done), diff 0.049x / cummax 0.168x / cummin 0.174x (cumulative,
 different pattern). The non-copying nullable-f64 constructor remains the deeper lever for all of them.
+
+### 2026-06-29 BlackThrush — nullable Float64 transcendentals sqrt/exp/log: 0.06-0.14x LOSS -> 1.3-2.5x WIN
+The shared helper `typed_float_unary_nullable_owned_par` (used by sqrt/log; it already handles fn-PRODUCED NaN, e.g.
+sqrt(neg), via an output validity scan) gated on `as_f64_slice` = all-valid INPUT, so a nullable Float64 input fell to
+the per-element Scalar loop (5M 10%-null: sqrt 394ms / exp 408ms / log similar, 7-16x slower than pandas). Added a
+nullable-input branch (invalid slot ⇒ NaN ⇒ marked missing by the same scan, bit-identical to those ops' Scalar
+`missing ⇒ Float64(NaN)` arm) and routed exp through this helper (was on the all-valid-only `typed_float_unary_par`).
+Uses the OWNED constructor (MOVE, no from_f64_values copy) — much faster than the abs/neg from_f64_values path.
+
+Same-box best-of-6, 5M Float64 10%-null (`fp-frame/examples/bench_nullable`), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `sqrt` | 394.2ms | 18.7ms | 21.1x | 0.062x -> 1.32x (pandas 24.6ms) |
+| `exp`  | 407.5ms | 22.8ms | 17.9x | 0.139x -> 2.47x (pandas 56.4ms) |
+
+Both FLIP LOSS->WIN (log shares the helper → same fix). One helper change covers the whole transcendental family on
+nullable input. fp-columnar 467/0, fp-frame 3109/0. Still open in vein: diff 0.049x, cummax/cummin 0.168x (cumulative).

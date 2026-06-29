@@ -5183,7 +5183,7 @@ fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Col
     if keep == "first" && n >= 1 && n <= NKEEP_BOUNDED_SCAN_MAX_K {
         if let Some(data) = col.as_i64_slice() {
             if n < data.len() {
-                return Ok(Column::from_i64_values(nkeep_typed_i64(data, n, ascending)));
+                return Ok(Column::from_i64_values_owned(nkeep_typed_i64(data, n, ascending)));
             }
         } else if let Some(data) = col.as_f64_slice() {
             if n < data.len() {
@@ -5827,11 +5827,11 @@ fn value_counts_i64_typed(
     ascending: bool,
 ) -> (Column, Column) {
     if data.is_empty() {
-        let values = Column::from_i64_values(Vec::new());
+        let values = Column::from_i64_values_owned(Vec::new());
         let counts = if normalize {
             Column::from_f64_values(Vec::new())
         } else {
-            Column::from_i64_values(Vec::new())
+            Column::from_i64_values_owned(Vec::new())
         };
         return (values, counts);
     }
@@ -5881,7 +5881,7 @@ fn value_counts_i64_typed(
         }
     }
 
-    let values = Column::from_i64_values(values);
+    let values = Column::from_i64_values_owned(values);
     let counts = if normalize {
         let total = data.len() as f64;
         Column::from_f64_values(
@@ -5891,7 +5891,7 @@ fn value_counts_i64_typed(
                 .collect(),
         )
     } else {
-        Column::from_i64_values(
+        Column::from_i64_values_owned(
             counts
                 .into_iter()
                 .map(|count| i64::try_from(count).unwrap_or(i64::MAX))
@@ -8274,6 +8274,16 @@ impl Column {
                 certify_int64_dense_cycle(values.as_slice())
             });
         }
+        // Owned move-not-copy variant carries no `dense_cycle` OnceLock (it is built
+        // for op outputs, not as a cached descriptor source), so certify on the fly.
+        // Keeps the dense-cycle join/groupby fast path reachable for columns produced
+        // via `from_i64_values_owned` instead of silently dropping to the generic path.
+        if self.dtype == DType::Int64
+            && self.validity.all()
+            && let ScalarValues::LazyAllValidInt64Vec { data, .. } = &self.values
+        {
+            return certify_int64_dense_cycle(data.as_slice());
+        }
         None
     }
 
@@ -9184,7 +9194,7 @@ impl Column {
             }
 
             if let Some(values) = self.as_i64_slice() {
-                return Self::from_i64_values(values[start..end].to_vec());
+                return Self::from_i64_values_owned(values[start..end].to_vec());
             }
 
             if let Some((src_bytes, src_offsets, src_start)) = self.utf8_arc_view_source() {
@@ -11096,7 +11106,7 @@ impl Column {
         // is_nan branch never fires; -0.0 -> 0.0 (neither >0.0 nor <0.0), exactly
         // as the scalar loop. Bit-identical.
         if let Some(data) = self.as_i64_slice() {
-            return Ok(Self::from_i64_values(
+            return Ok(Self::from_i64_values_owned(
                 data.iter()
                     .map(|&x| {
                         if x > 0 {
@@ -12006,7 +12016,7 @@ impl Column {
                     .zip(mask_bits)
                     .filter_map(|(&v, &m)| m.then_some(v))
                     .collect();
-                return Ok(Self::from_i64_values(gathered));
+                return Ok(Self::from_i64_values_owned(gathered));
             }
             let values = self
                 .values
@@ -12031,7 +12041,7 @@ impl Column {
                 .zip(mask.values.iter())
                 .filter_map(|(&v, m)| matches!(m, Scalar::Bool(true)).then_some(v))
                 .collect();
-            return Ok(Self::from_i64_values(gathered));
+            return Ok(Self::from_i64_values_owned(gathered));
         }
 
         let values = self
@@ -12127,7 +12137,7 @@ impl Column {
         if self.dtype == DType::Int64
             && let Some(data) = self.as_i64_slice()
         {
-            return Ok(Self::from_i64_values(data.to_vec()));
+            return Ok(Self::from_i64_values_owned(data.to_vec()));
         }
 
         let values = self
@@ -14542,7 +14552,7 @@ impl Column {
             // hash-bound with a tiny output). Bit-identical: winners are the
             // max-count values, ascending, same as the generic path.
             if !data.is_empty() {
-                return Ok(Self::from_i64_values(mode_i64_wide(data)));
+                return Ok(Self::from_i64_values_owned(mode_i64_wide(data)));
             }
         }
 
@@ -15430,7 +15440,7 @@ impl Column {
                     pos as i64
                 })
                 .collect();
-            return Ok(Self::from_i64_values(out));
+            return Ok(Self::from_i64_values_owned(out));
         }
         // Datetime64 analogue: all-valid no-NaT sorted ns + all-(non-NaT)-Datetime64
         // needles → partition_point over the raw ns. The generic comparator is now
@@ -15460,7 +15470,7 @@ impl Column {
                     pos as i64
                 })
                 .collect();
-            return Ok(Self::from_i64_values(out));
+            return Ok(Self::from_i64_values_owned(out));
         }
         let positions: Vec<Scalar> = needles
             .iter()
@@ -15884,7 +15894,7 @@ impl Column {
         if n >= 1 && n <= NKEEP_BOUNDED_SCAN_MAX_K {
             if let Some(data) = self.as_i64_slice() {
                 if n < data.len() {
-                    return Ok(Self::from_i64_values(nkeep_typed_i64(data, n, false)));
+                    return Ok(Self::from_i64_values_owned(nkeep_typed_i64(data, n, false)));
                 }
             } else if let Some(data) = self.as_f64_slice() {
                 if n < data.len() {
@@ -15915,7 +15925,7 @@ impl Column {
         if n >= 1 && n <= NKEEP_BOUNDED_SCAN_MAX_K {
             if let Some(data) = self.as_i64_slice() {
                 if n < data.len() {
-                    return Ok(Self::from_i64_values(nkeep_typed_i64(data, n, true)));
+                    return Ok(Self::from_i64_values_owned(nkeep_typed_i64(data, n, true)));
                 }
             } else if let Some(data) = self.as_f64_slice() {
                 if n < data.len() {
@@ -15966,7 +15976,7 @@ impl Column {
             {
                 let o = *o;
                 let out: Vec<i64> = (0..s.len()).map(|i| if cb[i] { o } else { s[i] }).collect();
-                return Ok(Self::from_i64_values(out));
+                return Ok(Self::from_i64_values_owned(out));
             }
         }
         let out: Vec<Scalar> = self
@@ -16680,7 +16690,7 @@ impl Column {
         //   * all-valid Int64 → codes + uniques as Int64.
         if let Some(data) = self.as_i64_slice() {
             let (codes, uniques) = factorize_i64_typed(data, sort);
-            return Ok((Self::from_i64_values(codes), Self::from_i64_values(uniques)));
+            return Ok((Self::from_i64_values_owned(codes), Self::from_i64_values_owned(uniques)));
         }
         //   * all-valid Datetime64 with NO NaT (i64::MIN) → codes as Int64,
         //     uniques re-wrapped as Datetime64. The generic path codes NaT as
@@ -16692,7 +16702,7 @@ impl Column {
         {
             let (codes, uniques) = factorize_i64_typed(data, sort);
             return Ok((
-                Self::from_i64_values(codes),
+                Self::from_i64_values_owned(codes),
                 Self::from_datetime64_values(uniques),
             ));
         }
@@ -16765,7 +16775,7 @@ impl Column {
             uniques = sorted_uniques;
         }
 
-        let codes_col = Self::from_i64_values(codes);
+        let codes_col = Self::from_i64_values_owned(codes);
         let uniques_col = Self::new(self.dtype, uniques)?;
         Ok((codes_col, uniques_col))
     }
@@ -18983,13 +18993,13 @@ impl Column {
                         out.push(v);
                     }
                 }
-                return Ok(Self::from_i64_values(out));
+                return Ok(Self::from_i64_values_owned(out));
             }
             // Wide/sparse all-valid Int64: out of dense-bitset range, but the raw
             // &[i64] avoids Scalar materialization — first-seen dedup via the
             // open-addressing set (breaks the FxHashSet khash floor). Bit-identical
             // to the generic path's first-seen distinct Int64 values.
-            return Ok(Self::from_i64_values(unique_i64_wide(data)));
+            return Ok(Self::from_i64_values_owned(unique_i64_wide(data)));
         }
 
         // Datetime64 is i64-ns-backed: an all-valid column with NO NaT (i64::MIN)
@@ -21444,7 +21454,7 @@ mod tests {
                 Scalar::Int64(5),
             ]
         );
-        assert_eq!(column.clone(), Column::from_i64_values(vec![1, 2, 3, 4, 5]));
+        assert_eq!(column.clone(), Column::from_i64_values_owned(vec![1, 2, 3, 4, 5]));
     }
 
     #[test]
@@ -22428,7 +22438,7 @@ mod tests {
                     .collect();
                 assert_eq!(got.values(), expected.as_slice(), "f64-vs-i64 op {op:?}");
                 // Int64 column vs Int64 scalar (both-Int64 branch).
-                let got = Column::from_i64_values(i64_vals.clone())
+                let got = Column::from_i64_values_owned(i64_vals.clone())
                     .compare_scalar(&Scalar::Int64(0), op)
                     .expect("i64 cmp");
                 let expected: Vec<Scalar> = i64_vals
@@ -23539,7 +23549,7 @@ mod tests {
                         _ => (next() % 100) as i64,
                     })
                     .collect();
-                let typed = Column::from_i64_values(vals.clone());
+                let typed = Column::from_i64_values_owned(vals.clone());
                 let scalar = Column::from_values(vals.iter().map(|&v| Scalar::Int64(v)).collect())
                     .expect("scalar col");
                 // NaN-bit-aware equality: cumprod can overflow to NaN, and
@@ -23771,7 +23781,7 @@ mod tests {
                         expected.push(v);
                     }
                 }
-                let col = Column::from_i64_values(data);
+                let col = Column::from_i64_values_owned(data);
                 let got: Vec<i64> = col
                     .unique()
                     .expect("unique")
@@ -24245,7 +24255,7 @@ mod tests {
             assert_eq!(output.values()[3], Scalar::Float64(0.0));
             assert_eq!(output.values()[4], Scalar::Float64(f64::INFINITY));
 
-            let ints = Column::from_i64_values(vec![9, -1]);
+            let ints = Column::from_i64_values_owned(vec![9, -1]);
             let ints_out = ints.sqrt().expect("int sqrt");
             assert_eq!(ints_out.values()[0], Scalar::Float64(3.0));
             assert!(ints_out.values()[1].is_missing());
@@ -24272,7 +24282,7 @@ mod tests {
             assert_eq!(output.values()[2], Scalar::Float64(f64::NEG_INFINITY));
             assert_eq!(output.values()[3], Scalar::Float64(f64::INFINITY));
 
-            let ints = Column::from_i64_values(vec![1, -1]);
+            let ints = Column::from_i64_values_owned(vec![1, -1]);
             let ints_out = ints.log()?;
             assert_eq!(ints_out.values()[0], Scalar::Float64(0.0));
             assert!(ints_out.values()[1].is_missing());
@@ -25098,7 +25108,7 @@ mod tests {
                 data[0] = i64::MIN;
                 data[1] = i64::MAX;
                 // Confirm the wide path is actually exercised (not dense).
-                let col = Column::from_i64_values(data.clone());
+                let col = Column::from_i64_values_owned(data.clone());
                 assert!(
                     crate::i64_direct_address_range(col.as_i64_slice().unwrap()).is_none(),
                     "trial {trial}: expected wide (non-direct-address) data"
@@ -25174,7 +25184,7 @@ mod tests {
                 };
                 let data: Vec<i64> = (0..n).map(|_| (next() % cardinality) as i64).collect();
 
-                let col = Column::from_i64_values(data.clone());
+                let col = Column::from_i64_values_owned(data.clone());
                 let t0 = Instant::now();
                 let mut chk = 0i64;
                 for _ in 0..iters {
@@ -25302,7 +25312,7 @@ mod tests {
                 };
                 let data: Vec<i64> = (0..n).map(|_| (next() % cardinality) as i64).collect();
 
-                let col = Column::from_i64_values(data.clone());
+                let col = Column::from_i64_values_owned(data.clone());
                 let t0 = Instant::now();
                 let mut chk = 0usize;
                 for _ in 0..iters {
@@ -25358,7 +25368,7 @@ mod tests {
                 state
             };
             let data: Vec<i64> = (0..n).map(|_| next() as i64).collect();
-            let col = Column::from_i64_values(data.clone());
+            let col = Column::from_i64_values_owned(data.clone());
 
             let iters = 10;
             let t0 = Instant::now();
@@ -25414,7 +25424,7 @@ mod tests {
             for _ in 0..200 {
                 let n = (next() % 300) as usize + 1;
                 let ivals: Vec<i64> = (0..n).map(|_| (next() % 1000) as i64 - 500).collect();
-                let ityped = Column::from_i64_values(ivals.clone());
+                let ityped = Column::from_i64_values_owned(ivals.clone());
                 let iscalar =
                     Column::from_values(ivals.iter().map(|&v| Scalar::Int64(v)).collect())
                         .expect("i col");
@@ -25533,7 +25543,7 @@ mod tests {
                 );
                 let mut seen = HashSet::new();
                 let expected: Vec<bool> = data.iter().map(|&v| !seen.insert(v)).collect();
-                let col = Column::from_i64_values(data);
+                let col = Column::from_i64_values_owned(data);
                 let got: Vec<bool> = col
                     .duplicated()
                     .expect("duplicated")
@@ -26268,7 +26278,7 @@ mod tests {
                     .filter_map(|(&k, &c)| (c == max_c).then_some(k))
                     .collect();
                 expected.sort_unstable();
-                let col = Column::from_i64_values(data);
+                let col = Column::from_i64_values_owned(data);
                 let got: Vec<i64> = col
                     .mode()
                     .expect("mode")
@@ -26921,7 +26931,7 @@ mod tests {
             data.push(i64::MIN); // sentinel value, duplicated
             data.push(i64::MAX);
             let expected = data.iter().copied().collect::<HashSet<i64>>().len() as i64;
-            let col = Column::from_i64_values(data);
+            let col = Column::from_i64_values_owned(data);
             assert!(
                 col.as_i64_slice().is_some(),
                 "from_i64_values must expose a typed slice so the wide path runs"
@@ -27023,7 +27033,7 @@ mod tests {
                     (0..n).map(|_| (next() % 9) as f64 - 4.0).collect();
                 let ivals: Vec<i64> = fvals.iter().map(|&v| v as i64).collect();
                 let fcol = Column::from_f64_values(fvals.clone());
-                let icol = Column::from_i64_values(ivals.clone());
+                let icol = Column::from_i64_values_owned(ivals.clone());
                 for p in [1i64, 2, -1, -2] {
                     let abs = p.unsigned_abs() as usize;
                     let oracle = |get: &dyn Fn(usize) -> f64| -> Vec<Scalar> {
@@ -28269,7 +28279,7 @@ mod tests {
                 let len = (next() % 500) as usize + 1;
                 // small value range => many ties
                 let data: Vec<i64> = (0..len).map(|_| (next() % 20) as i64 - 10).collect();
-                let col = Column::from_i64_values(data);
+                let col = Column::from_i64_values_owned(data);
                 for &k in &[1usize, 3, 10, len.saturating_sub(1).max(1)] {
                     let large = col.nlargest(k).expect("nlargest");
                     let small = col.nsmallest(k).expect("nsmallest");
@@ -28903,7 +28913,7 @@ mod tests {
             for _ in 0..200 {
                 let n = (next() % 300) as usize + 1;
                 let data: Vec<i64> = (0..n).map(|_| (next() % 10) as i64).collect();
-                let col = Column::from_i64_values(data.clone());
+                let col = Column::from_i64_values_owned(data.clone());
                 let k = (next() % 4) as usize + 1;
                 let targets: Vec<i64> = (0..k).map(|_| (next() % 12) as i64).collect();
                 let reps: Vec<i64> = (0..k).map(|_| (next() % 100) as i64 - 50).collect();
@@ -29376,7 +29386,7 @@ mod tests {
                 let mut vals: Vec<i64> =
                     (0..n).map(|_| (next() % 40) as i64 - 20).collect();
                 vals.sort_unstable(); // searchsorted requires sorted input
-                let col = Column::from_i64_values(vals.clone());
+                let col = Column::from_i64_values_owned(vals.clone());
                 // Scalar-backed twin forces the generic path (Vec<Scalar> has no
                 // as_i64_slice typed view).
                 let scalar_col =
@@ -29668,7 +29678,7 @@ mod tests {
 
         #[test]
         fn value_counts_all_valid_int64_keeps_typed_outputs() {
-            let col = Column::from_i64_values(vec![10, -3, 10, 7, -3, 10]);
+            let col = Column::from_i64_values_owned(vec![10, -3, 10, 7, -3, 10]);
 
             let (values, counts) = col.value_counts().expect("value_counts");
             assert_eq!(values.as_i64_slice(), Some(&[10, -3, 7][..]));
@@ -30466,7 +30476,7 @@ mod tests {
 
     #[test]
     fn typed_all_valid_constructors_keep_single_typed_backing() {
-        let ints = Column::from_i64_values(vec![1, 2, 3]);
+        let ints = Column::from_i64_values_owned(vec![1, 2, 3]);
         assert_eq!(ints.dtype(), DType::Int64);
         assert!(ints.validity.all());
         assert!(ints.data.is_none());
@@ -30565,7 +30575,7 @@ mod tests {
             vec![10, 11, 12, 20, 21],
             vec![(0, 3), (3, 2), (0, 3)],
         );
-        let eager = Column::from_i64_values(vec![10, 11, 12, 20, 21, 10, 11, 12]);
+        let eager = Column::from_i64_values_owned(vec![10, 11, 12, 20, 21, 10, 11, 12]);
 
         assert_eq!(lazy.dtype(), DType::Int64);
         assert!(lazy.validity.all());
@@ -30747,8 +30757,8 @@ mod tests {
 
     #[test]
     fn dense_cycle_probe_repeat_int64_preserves_probe_order_yq96z() {
-        let probe = Column::from_i64_values(vec![0, 1, 2, 0, 1]);
-        let build = Column::from_i64_values(vec![1, 2, 1, 2]);
+        let probe = Column::from_i64_values_owned(vec![0, 1, 2, 0, 1]);
+        let build = Column::from_i64_values_owned(vec![1, 2, 1, 2]);
         let probe_witness = probe
             .int64_dense_cycle_witness()
             .expect("probe dense cycle");
@@ -30785,8 +30795,8 @@ mod tests {
 
     #[test]
     fn nullable_dense_cycle_probe_build_int64_preserves_build_ties_yq96z() {
-        let probe = Column::from_i64_values(vec![0, 1, 2, 0, 1]);
-        let build = Column::from_i64_values(vec![1, 2, 1, 2]);
+        let probe = Column::from_i64_values_owned(vec![0, 1, 2, 0, 1]);
+        let build = Column::from_i64_values_owned(vec![1, 2, 1, 2]);
         let probe_witness = probe
             .int64_dense_cycle_witness()
             .expect("probe dense cycle");

@@ -13661,7 +13661,38 @@ impl Column {
     /// Matches `pd.Series.skew()`. Requires at least 3 non-missing
     /// values; returns `Null(NaN)` otherwise.
     #[must_use]
+    /// Collect the non-missing values of an all-valid typed numeric column as
+    /// f64, exactly as `collect_finite` would over the Scalar view (Float64: drop
+    /// NaN, keep ±inf; Int64: all values as f64) — but straight off the contiguous
+    /// buffer, with no Scalar materialization. `None` for other backings.
+    fn typed_collect_finite_f64(&self) -> Option<Vec<f64>> {
+        if let Some(data) = self.as_f64_slice() {
+            return Some(data.iter().copied().filter(|x| !x.is_nan()).collect());
+        }
+        if let Some(data) = self.as_i64_slice() {
+            return Some(data.iter().map(|&x| x as f64).collect());
+        }
+        None
+    }
+
     pub fn skew(&self) -> Scalar {
+        // Typed fast path: same `nums` (collect_finite) + verbatim nanskew math,
+        // off the raw buffer (no Scalar materialization). Bit-identical.
+        if let Some(nums) = self.typed_collect_finite_f64() {
+            let n = nums.len() as f64;
+            if n < 3.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = nums.iter().sum::<f64>() / n;
+            let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+            let m3: f64 = nums.iter().map(|x| (x - mean).powi(3)).sum();
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            let s3 = s2.powf(1.5);
+            return Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3));
+        }
         nanskew(&self.values)
     }
 
@@ -13671,6 +13702,23 @@ impl Column {
     /// values; returns `Null(NaN)` otherwise.
     #[must_use]
     pub fn kurt(&self) -> Scalar {
+        // Typed fast path (see skew): verbatim nankurt math over the raw buffer.
+        if let Some(nums) = self.typed_collect_finite_f64() {
+            let n = nums.len() as f64;
+            if n < 4.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = nums.iter().sum::<f64>() / n;
+            let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+            let m4: f64 = nums.iter().map(|x| (x - mean).powi(4)).sum();
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+            return Scalar::Float64(adj * (m4 / (s2 * s2)) - sub);
+        }
         nankurt(&self.values)
     }
 

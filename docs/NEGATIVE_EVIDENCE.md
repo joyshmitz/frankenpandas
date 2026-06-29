@@ -7183,3 +7183,20 @@ Same-box best-of-3, 5M hourly datetimes (`fp-frame/examples/bench_dt3`),
 All strong WINS (~5x core scaling over the serial civil path). The ENTIRE dt-accessor surface (year/month/day/
 dayofweek/dayofyear/weekofyear/hour/minute/second/is_leap_year/is_month_start/…) is now parallel + wins 4-8x.
 Bit-identical: fp-frame 55+ dt tests green.
+
+### 2026-06-27 TealOsprey — skew/kurt typed moment path: 2.4-2.5x -> 3.1-3.3x WIN vs pandas
+skew/kurt called nanskew/nankurt over &self.values (collect_finite materializes the lazy column to Scalars). Added a
+typed path (`typed_collect_finite_f64`: drop NaN / keep ±inf for Float64, all values for Int64 — straight off the
+buffer) + VERBATIM nanskew/nankurt moment math. Bit-identical (same nums Vec, same serial-sum order, same formula).
+
+Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_skew`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (Scalar) | typed | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `skew` 5M | 45.6ms | 34.5ms | 1.32x | 2.51x -> 3.31x (pandas 114.3ms) |
+| `kurt` 5M | 45.9ms | 35.1ms | 1.31x | 2.36x -> 3.09x (pandas 108.3ms) |
+
+Modest fp-side (the powi(2)/(3)/(4) moment passes are also compute) but already-win -> bigger-win, bit-identical.
+NOTE: parallelizing the moment SUMS would break bit-identity (nanskew's serial left-fold vs a tree reduction round
+differently), so the typed-serial path is the bit-identical ceiling here. (Other reductions sum/mean/std already win
+1.2-8x.) FULL fp-columnar suite 467 passed / 0 failed.

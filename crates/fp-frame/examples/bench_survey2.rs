@@ -39,6 +39,9 @@ fn main() {
     let other_i = Series::new("o", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).collect())).unwrap();
     let mi = si.gt_scalar(&Scalar::Int64(500)).unwrap();
     timeit("where_series_i64", || { std::hint::black_box(si.where_cond_series(&mi, &other_i).unwrap().len()); });
+    let oth_i = Series::new("o", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).map(|i| i % 777).collect())).unwrap();
+    timeit("update_i64", || { std::hint::black_box(si.update(&oth_i).unwrap().len()); });
+    timeit("combine_first_i64", || { std::hint::black_box(si.combine_first(&oth_i).unwrap().len()); });
     let lo_f = Series::new("lo", Index::from_range(0, n as i64, 1), Column::from_f64_values((0..n).map(|i| (i % 100) as f64 * 0.001).collect())).unwrap();
     let hi_f = Series::new("hi", Index::from_range(0, n as i64, 1), Column::from_f64_values((0..n).map(|i| 0.5 + (i % 100) as f64 * 0.001).collect())).unwrap();
     timeit("clip_series_f64", || { std::hint::black_box(s.clip_with_series(Some(&lo_f), Some(&hi_f)).unwrap().len()); });

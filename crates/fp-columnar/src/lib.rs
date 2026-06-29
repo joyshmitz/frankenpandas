@@ -10684,15 +10684,34 @@ impl Column {
             return Ok(Self::from_f64_values(data));
         }
 
-        let mut values = Vec::with_capacity(out_len);
+        // Typed nullable output via the LazyNullableFloat64 backing, which renders
+        // a cleared-bit-with-NaN-datum as a PRESENT `Float64(NaN)` and a
+        // cleared-bit-with-non-NaN-datum as `Null(NaN)`. So: both-valid ⇒ store
+        // `apply(l,r)` and SET the bit ONLY when the result is non-NaN (a generated
+        // NaN like inf-inf keeps a cleared bit but its NaN datum ⇒ present
+        // `Float64(NaN)`, matching the Scalar tail's `Self::new([Float64(NaN)])`);
+        // either operand missing ⇒ 0.0 datum + cleared bit ⇒ `Null(NaN)`. Replaces
+        // the per-element Scalar boxing + Self::new revalidation (~419ms / 17x
+        // slower on nullable f64+f64). Bit-identical (value bits AND validity),
+        // locked by `aligned_binary_f64_same_positions_matches_general_path`.
+        let mut data = vec![0.0_f64; out_len];
+        let mut valid_words = vec![0_u64; out_len.div_ceil(64)];
         for i in 0..out_len {
             if lvalid.get(i) && rvalid.get(i) {
-                values.push(Scalar::Float64(apply(lsrc[i], rsrc[i])));
-            } else {
-                values.push(Scalar::Null(NullKind::NaN));
+                let r = apply(lsrc[i], rsrc[i]);
+                data[i] = r;
+                if !r.is_nan() {
+                    valid_words[i / 64] |= 1_u64 << (i % 64);
+                }
             }
         }
-        Self::new(DType::Float64, values)
+        let validity = ValidityMask::from_words(valid_words, out_len);
+        Ok(Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_nullable_float64(data, validity.clone()),
+            validity,
+            data: None,
+        })
     }
 
     fn cached_float64_data(&self) -> Option<&[f64]> {

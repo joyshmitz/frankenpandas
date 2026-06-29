@@ -7864,3 +7864,21 @@ data, validity)` that emits `Null(NaN)` for cleared bits and a PRESENT `Float64(
 NaN re-derivation — then col+col uses validity=lvalid&rvalid, and scalar uses from_f64_values (its general path already
 marks generated-NaN missing). Verified blocked, not landed (parity test
 `aligned_binary_f64_same_positions_matches_general_path_for_all_ops_with_nan_inf` enforces it). Conformance GREEN (docs only).
+
+### 2026-06-29 BlackThrush — nullable Float64 binary arithmetic SOLVED: 0.057x -> 0.44x (7.7x fp-side) via LazyNullableFloat64
+The constructor pinned as "missing" in the entry above ALREADY EXISTS: `ScalarValues::lazy_nullable_float64(data,
+validity)`. Its materialization renders a cleared-bit-with-NaN-datum as a PRESENT `Float64(NaN)` and a
+cleared-bit-with-non-NaN-datum as `Null(NaN)` — exactly the three-way representation the general path needs. Rewrote
+`aligned_binary_f64_same_positions`' nullable Scalar tail: both-valid ⇒ store apply(l,r), SET the bit only when the
+result is non-NaN (generated NaN ⇒ cleared bit + NaN datum ⇒ present Float64(NaN)); missing-operand ⇒ 0.0 + cleared ⇒
+Null(NaN). Bit-identical (value bits AND validity) — PASSES the locked
+`aligned_binary_f64_same_positions_matches_general_path_for_all_ops_with_nan_inf` parity test.
+
+Same-box best-of-6, 5M Float64 10%-null (`bench_nullable`), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `add` (s+o) f64+f64 | 419.3ms | 54.2ms | 7.74x | 0.057x -> 0.44x (pandas 23.9ms) |
+| `mul` (s*o) f64+f64 | 410.6ms | 56.3ms | 7.30x | 0.059x -> 0.43x (pandas 24.3ms) |
+
+Covers add/sub/mul/div/mod/pow/floordiv col+col on nullable f64 (the most common op family). fp-columnar 467/0,
+fp-frame 3109/0. (Scalar-arith path, apply_scalar_op_inner, can use the same backing next — same representation.)

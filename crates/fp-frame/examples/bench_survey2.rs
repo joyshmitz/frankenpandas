@@ -34,6 +34,9 @@ fn main() {
     let m = s.gt_scalar(&Scalar::Float64(0.5)).unwrap();
     timeit("where(prebuilt)", || { std::hint::black_box(s.where_cond(&m, Some(&Scalar::Float64(0.0))).unwrap().len()); });
     timeit("mask(prebuilt)", || { std::hint::black_box(s.mask(&m, Some(&Scalar::Float64(0.0))).unwrap().len()); });
+    let mi = si.gt_scalar(&Scalar::Int64(500)).unwrap();
+    timeit("where_i64(prebuilt)", || { std::hint::black_box(si.where_cond(&mi, Some(&Scalar::Int64(0))).unwrap().len()); });
+    timeit("mask_i64(prebuilt)", || { std::hint::black_box(si.mask(&mi, Some(&Scalar::Int64(0))).unwrap().len()); });
     timeit("value_counts_i64", || { std::hint::black_box(si.value_counts().unwrap().len()); });
     timeit("duplicated_i64", || { std::hint::black_box(si.duplicated().unwrap().len()); });
     timeit("nunique_i64", || { std::hint::black_box(si.nunique()); });

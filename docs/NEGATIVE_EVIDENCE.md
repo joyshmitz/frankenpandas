@@ -7547,3 +7547,20 @@ Same-box best-of-6, 2M rows × 2 f64 value cols by Scalar-backed Utf8 key, panda
 Flips the low-card case to parity/WIN; high-card improves 1.8x fp-side but stays a partial loss — the residual is the
 cache-cold 100k-entry FxHashMap<&[u8]> over 2M spans (the high-card string-hashtable floor, distinct from this fix).
 FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — string-groupby u128 inline-key pack for 9..=16-byte keys: ~10-20% high-card gain
+Follow-up on the high-card string-groupby floor: `aggregate_str_dense`'s low-cardinality hash-group had a `u64` pack
+fast path (inline-key FxHashMap) only for keys ≤8 bytes; wider fixed-width keys (e.g. `group_key_00042`, 15B) fell to
+`FxHashMap<&[u8]>`, which re-hashes the cache-cold byte span on every probe and byte-compares on collision. Added a
+`u128` pack path for fixed-width 9..=16-byte keys (`pack_utf8_span_u128` + `fixed_width_utf8_spans_le16`): the pack is
+bijective for a fixed width, so grouping by the packed value is identical to grouping by the span. Bit-identical.
+
+Same-box best-of-6, 2M rows × 2 f64 value cols by Scalar-backed 15-byte Utf8 key (`bench_dfgbu`):
+| op | before (u128) | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.groupby(Utf8).sum()` 2M card=100k | 313.8ms | 286.0ms | 1.10x | 0.74x -> 0.81x (pandas 231.3ms) |
+| `df.groupby(Utf8).std()` 2M card=100k | 382.6ms | 317.2ms | 1.21x | 0.51x -> 0.61x (pandas 194.2ms) |
+
+A modest, bit-identical high-card gain (neutral at low card) that generalizes to all fixed-width ≤16-byte string keys.
+The residual high-card gap is the cache-cold 100k-entry hashmap itself (open-addressing / radix grouping would be the
+next primitive). FULL fp-frame suite 3109 passed / 0 failed.

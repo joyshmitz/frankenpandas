@@ -7698,3 +7698,21 @@ i64, and feed the EXISTING dense Int64 composite CSR — matching on codes, outp
 position. Replaces 4M String clones + 2M SmallVec spills with 2 factorize passes + i64 packing. NOT attempted here:
 intricate fp-join change (null/Missing class, duplicate-cardinality multiplication, sort/outer ordering) — too risky to
 land half-tested in the time box. Surfaced with bench + lever for a focused session. (Conformance GREEN; no source change.)
+
+### 2026-06-29 BlackThrush — DataFrameGroupBy head/tail (+nth) by Utf8 key dense path: 0.91x LOSS -> 3.6-5.1x WIN
+`dense_group_positions` (the per-group row-position selector behind df.groupby(k).head()/tail()/nth()) gated the single
+key on `as_i64_slice` — so ANY Utf8 key (contiguous OR Scalar-backed) fell to build_groups + per-group index Vec. Routed
+the single Utf8 key through `single_utf8_key_dense_grouping` (it only needs gid_per_row + ng; labels/order unused — the
+output gathers original rows by position). Bit-identical: same per-group row-order positions, same ascending kept-row
+set as the build_groups path.
+
+Same-box best-of-6, 2M rows by Scalar-backed Utf8 key (`bench_dfgbu3`), pandas 2.2.3 per-call:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.groupby(Utf8).head(5)` 2M card=100k | 420.6ms | 105.6ms | 3.98x | 0.91x -> 3.61x (pandas 381.0ms) |
+| `df.groupby(Utf8).tail(5)` 2M card=100k | 598.8ms | 107.9ms | 5.55x | 0.92x -> 5.11x (pandas 551.2ms) |
+| `df.groupby(Utf8).nth(0)`  2M card=100k | 367.8ms | 305.4ms | 1.20x | 0.92x -> 1.11x (pandas 337.6ms) |
+
+head/tail flip to strong WINs; nth improves to a slight win (it does extra non-dense_group_positions work — a deeper
+nth path is the residual). Also confirmed dominant this turn (no gap): DataFrame numeric rank 27.6x / corr 16.4x /
+nlargest 28x / nunique 12.3x WINS; groupby transform already handles Scalar-backed Utf8. FULL fp-frame suite 3109 / 0.

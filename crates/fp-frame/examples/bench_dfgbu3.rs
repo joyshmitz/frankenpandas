@@ -34,4 +34,7 @@ fn main() {
     timeit("all", || { std::hint::black_box(df.groupby(&["k"]).unwrap().all().unwrap().shape()); });
     timeit("any", || { std::hint::black_box(df.groupby(&["k"]).unwrap().any().unwrap().shape()); });
     timeit("sem", || { std::hint::black_box(df.groupby(&["k"]).unwrap().sem().unwrap().shape()); });
+    timeit("head", || { std::hint::black_box(df.groupby(&["k"]).unwrap().head(5).unwrap().shape()); });
+    timeit("tail", || { std::hint::black_box(df.groupby(&["k"]).unwrap().tail(5).unwrap().shape()); });
+    timeit("nth", || { std::hint::black_box(df.groupby(&["k"]).unwrap().nth(0).unwrap().shape()); });
 }

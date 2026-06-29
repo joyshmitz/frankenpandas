@@ -7457,3 +7457,25 @@ Same-box best-of-6, 2M Utf8 value column grouped by bounded-i64 key (`fp-frame/e
 | Utf8 `groupby(i64).count()` 2M card=100k | 183.1ms | 8.77ms | 20.9x | 0.60x -> 12.5x (pandas 110.1ms) |
 
 Flips the high-card LOSS->WIN (and the low-card marginal win into domination). FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — groupby-by-Scalar-backed-Utf8-key reductions dense path: 0.52x LOSS -> 2.4-3.7x WIN
+Grouping a numeric value BY a Scalar-materialized Utf8 key (`from_values` key, NOT LazyContiguousUtf8) made every
+reduction fall to the slow generic SipHash `build_groups` path. The dense reduction folds (`dense_group_fold` for
+sum/mean/max/min, `dense_group_var_std` for var/std) ALREADY obtained a dense gid layout from `dense_group_ids` (which
+handles Scalar-backed Utf8) but then BAILED on `ki.is_none() && ku.is_none()` because their inline label construction
+only knew Int64 (`as_i64_slice`) and contiguous-Utf8 (`as_utf8_contiguous`) keys. Added a shared `dense_group_labels`
+helper that builds first-seen group labels for all three key kinds dense_group_ids supports (Int64 / contiguous-Utf8 /
+Scalar-backed-Utf8) and routed both folds through it, dropping the bail. Bit-identical: same gids, same first-seen
+label order, same value-order folds; the only change is that a Scalar-backed Utf8 key now produces labels instead of
+returning None.
+
+Same-box best-of-6, 2M f64 value grouped by Scalar-backed Utf8 key, pandas 2.2.3 rebuilding the groupby per call
+(matching fp's per-call grouping) (`fp-frame/examples/bench_gbukey`):
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `sum` by Utf8 key 2M card=1000  | 59.7ms  | 25.9ms | 2.30x | 0.91x -> 2.52x (pandas 65.4ms) |
+| `sum` by Utf8 key 2M card=100k  | 364.5ms | 84.5ms | 4.31x | 0.56x -> 2.42x (pandas 204.5ms) |
+| `max` by Utf8 key 2M card=100k  | 424.2ms | 58.3ms | 7.28x | 0.52x -> 3.70x (pandas 216.0ms) |
+
+Flips LOSS->WIN for sum/mean/max/min/var/std (all share the two folds). Still on the build_groups path for THIS key
+kind: count() / first() / nunique() (separate dense paths — next). FULL fp-frame suite 3109 passed / 0 failed.

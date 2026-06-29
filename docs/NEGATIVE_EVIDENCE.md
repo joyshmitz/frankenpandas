@@ -7618,3 +7618,21 @@ prior behavior — the fp-side ratio is the clean grouping measure), pandas 2.2.
 Flips the high-card LOSS->WIN; skew/kurt share the engine. This closes the single-Utf8-key DataFrameGroupBy surface
 (sum/mean/std/var/min/max/count/first/last/all/any/nunique/idxmax/idxmin/sem/skew/kurt all dense). FULL fp-frame suite
 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — multi-key DataFrameGroupBy with Scalar-backed Utf8 keys: 0.08x LOSS -> 4.5x WIN (low-group) / 3x fp-side (high-group)
+`multi_mixed_dense_grouping` (the dense product-table grouping for mixed Int64/Utf8 multi-keys) handled each Utf8 key
+only via `as_utf8_contiguous()`, so a single Scalar-backed (from_values) Utf8 key in the by-list made the WHOLE
+multi-key grouping fall to the SipHash build_groups path (per-row Vec<ScalarKey> + composite SipHash) — catastrophic at
+high group counts. Changed the Utf8 branch to factorize via `pivot_utf8_key_strs` (covers both backings). Bit-identical:
+same first-seen factorize codes/inverse ⇒ same product-table gids, sorted group order, and MultiIndex labels.
+
+Same-box best-of-6, 2M rows, TWO Scalar-backed Utf8 keys + f64 value (`bench_dfgb2u`), pandas 2.2.3 per-call:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.groupby([u8,u8]).sum()` 2M ~10k groups  | 167.0ms  | 58.0ms   | 2.88x | 1.56x -> 4.48x (pandas 260.1ms) |
+| `df.groupby([u8,u8]).count()` 2M ~10k groups | 151.1ms  | 56.0ms   | 2.70x | 1.12x -> 3.03x (pandas 169.6ms) |
+| `df.groupby([u8,u8]).sum()` 2M ~1M groups   | 4214.2ms | 1398.3ms | 3.01x | 0.08x -> 0.25x (pandas 353.2ms) |
+
+Low-group flips to a strong WIN; ~1M-group improves 3x fp-side but stays a LOSS — the residual is the 1M-group output
+assembly (key_of_gid's per-group Vec<MixedKey> String materialization + MultiIndex build), a separate output-bound
+issue from the grouping. FULL fp-frame suite 3109 passed / 0 failed.

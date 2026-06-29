@@ -27,6 +27,9 @@ fn main() {
     cols.insert("a".to_string(), Column::from_f64_values((0..n).map(|i| (sm(i, 7) % 100000) as f64).collect()));
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     let df = DataFrame::new_with_column_order(Index::new(labels), cols, vec!["k".into(), "a".into()]).unwrap();
+    let subset = vec!["k".to_string()];
     timeit("sort_values_utf8", || { std::hint::black_box(df.sort_values("k", true).unwrap().shape()); });
     timeit("set_index_utf8", || { std::hint::black_box(df.set_index("k", true).unwrap().shape()); });
+    timeit("drop_dup_utf8", || { std::hint::black_box(df.drop_duplicates(Some(&subset), fp_index::DuplicateKeep::First, false).unwrap().shape()); });
+    timeit("duplicated_utf8", || { std::hint::black_box(df.duplicated(Some(&subset), fp_index::DuplicateKeep::First).unwrap().len()); });
 }

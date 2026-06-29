@@ -7651,3 +7651,17 @@ Same-box best-of-6, 2M rows, sort by a Scalar-backed Utf8 column (`bench_dfu`), 
 | `df.sort_values(Utf8)` 2M card=10000 | 2319.6ms | 387.2ms | 5.99x | 0.59x -> 3.55x (pandas 1376.1ms) |
 
 Flips a big LOSS->WIN. FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — DataFrame dedup by single Scalar-backed Utf8 subset: 0.60x LOSS, all levers REJECTED (~0-gain/regression)
+`duplicated_mask` gates its single-Utf8 fast path on `as_utf8_contiguous()`, so a Scalar-backed (from_values) Utf8
+subset falls to the generic per-cell Scalar digest path: `df.drop_duplicates(["k"])` 51ms / `df.duplicated(["k"])` 38ms
+vs pandas 30.4ms / 29.7ms (0.60x / 0.78x) at 2M rows, 10k distinct. Tried THREE levers, all measured and reverted:
+1. Materialize key to contiguous + reuse `duplicated_single_utf8` → 51->90ms (REGRESSION; the 40MB span copy is pure
+   overhead the existing generic digest avoids).
+2. Direct `FxHashMap<&str>` dedup, pre-sized to n (mirror of duplicated_single_utf8) → 51->84ms (REGRESSION; a 2M-cap
+   hashmap is cache-cold at 10k distinct).
+3. Direct `FxHashMap<&str>` dedup, grow-from-small → 51->47.7ms / 38->35.5ms (only ~7%, does NOT flip the loss).
+None beat the loss vs pandas. The residual is the string-dedup hashtable itself (2M short-string probes into a cache-
+cold map) — pandas' khash is faster; closing it needs an open-addressing string table / radix dedup, not a fast-path
+reroute. REVERTED per ~0-gain. (Distinct from the sort_values/groupby Utf8 wins, which rerouted to an EXISTING fast
+kernel; here the generic path already is the hash dedup.) FULL fp-frame suite green at HEAD (unchanged).

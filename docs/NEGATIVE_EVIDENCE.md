@@ -7716,3 +7716,16 @@ Same-box best-of-6, 2M rows by Scalar-backed Utf8 key (`bench_dfgbu3`), pandas 2
 head/tail flip to strong WINs; nth improves to a slight win (it does extra non-dense_group_positions work — a deeper
 nth path is the residual). Also confirmed dominant this turn (no gap): DataFrame numeric rank 27.6x / corr 16.4x /
 nlargest 28x / nunique 12.3x WINS; groupby transform already handles Scalar-backed Utf8. FULL fp-frame suite 3109 / 0.
+
+### 2026-06-29 BlackThrush — DataFrameGroupBy nth() by Utf8 key dense path: 0.92x -> 3.12x WIN
+Follow-up to head/tail: nth() has its OWN inline dense path (not dense_group_positions) gated on `as_i64_slice`, so a
+Utf8 key still fell to build_groups. Routed the single Utf8 key through `single_utf8_key_dense_grouping` (needs
+gid_per_row + ng + order — nth emits one row per group in group order). Bit-identical: same nth-row-per-group + same
+group order as build_groups.
+
+Same-box best-of-6, 2M rows by Scalar-backed Utf8 key (`bench_dfgbu3`), pandas 2.2.3 per-call:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.groupby(Utf8).nth(0)` 2M card=100k | 305.4ms | 108.1ms | 2.82x | 0.92x -> 3.12x (pandas 337.6ms) |
+
+Completes the head/tail/nth row-selection trio for Utf8 keys. FULL fp-frame suite 3109 passed / 0 failed.

@@ -7200,3 +7200,20 @@ Modest fp-side (the powi(2)/(3)/(4) moment passes are also compute) but already-
 NOTE: parallelizing the moment SUMS would break bit-identity (nanskew's serial left-fold vs a tree reduction round
 differently), so the typed-serial path is the bit-identical ceiling here. (Other reductions sum/mean/std already win
 1.2-8x.) FULL fp-columnar suite 467 passed / 0 failed.
+
+### 2026-06-27 TealOsprey — str op parallelism: ~0-gain (overhead-bound, NOT compute-bound) — REVERTED
+Tried extending the compute-bound-parallelism lever to the contiguous-Utf8 str ops (str.len / str.contains / is*
+predicates) via a scoped-thread `par_map_str_windows` over the offset-windows. MEASURED ~0-gain and REVERTED.
+
+Same-box best-of-3, 2M short strings ("Hello_World_<n>", ~15 chars):
+| op | serial | parallel | fp-side |
+| --- | ---: | ---: | ---: |
+| `str.contains` 2M | 46.8ms | 43.7ms | 1.07x |
+| `str.len` 2M | 25.5ms | 25.3ms | 1.01x |
+
+CAUSE: for TYPICAL short strings the per-string work (a few-byte substring scan / char count) is tiny; the cost is the
+per-row `from_utf8` validation + offset indexing + output Vec build, which is overhead/bandwidth-bound — so the loop is
+NOT compute-bound and threads don't help (cf. dt civil-conversion / libm transcendentals, which ARE ~12-30ns/elem
+compute and scale 3-10x). REGIME BOUNDARY: compute-bound parallelism pays only when per-element work >> the per-element
+memory/overhead; short-string ops fall on the wrong side. (Very long strings could differ, but str.* already WINS
+8-12x vs pandas' object-dtype loop, so this is not a gap.) Don't re-attempt str-op parallelism for short strings.

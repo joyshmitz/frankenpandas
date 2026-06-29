@@ -7261,3 +7261,20 @@ Same-box best-of-3, 5M i64 (`fp-columnar/examples/bench_imod`),
 
 Both flip LOSS->WIN — integer idiv is genuinely compute-bound (unlike pipelined fdiv/add). The mod/floordiv family
 (f64 AND i64) is now parallel + wins 3-6x. FULL fp-columnar suite 467 passed / 0 failed.
+
+### 2026-06-27 TealOsprey — PARALLEL scalar pow/mod (df ** s, df % s): 1.01x/2.47x -> 4.5x/7.6x WIN
+apply_scalar_op spreads COLUMNS across par_map_columns workers but is SERIAL within each column — so a single-column
+Series ** scalar (the common case) left 7 cores idle on the compute-bound powf. Added an opt-in compute_bound path
+(apply_scalar_op_inner) that parallelizes WITHIN each column (par_map_f64_buf) when there are <=2 columns (so outer×inner
+thread nesting stays <=16; >2 columns already saturate par_map_columns). pow_scalar/mod_scalar opt in. Bit-identical.
+
+Same-box best-of-3, 5M f64 single-col DataFrame (`fp-frame/examples/bench_powscalar`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | serial | parallel | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df ** 2.5` 5M | 70.2ms | 15.73ms | 4.46x | 1.01x -> 4.51x (pandas 71.0ms) |
+| `df % 3.0` 5M | 28.2ms | 9.20ms | 3.07x | 2.47x -> 7.59x (pandas 69.8ms) |
+
+This resolves BlackThrush's 2026-06-20 note ("threading apply_scalar_op was ~0-gain") — that was for CHEAP ops
+(add/neg, bandwidth-bound); pow/mod are COMPUTE-bound so within-column parallelism pays. add/sub/mul/div keep the
+serial wrapper. fp-frame 14 scalar-arith + 8 pow/mod tests green.

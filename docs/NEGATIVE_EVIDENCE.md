@@ -7479,3 +7479,18 @@ Same-box best-of-6, 2M f64 value grouped by Scalar-backed Utf8 key, pandas 2.2.3
 
 Flips LOSS->WIN for sum/mean/max/min/var/std (all share the two folds). Still on the build_groups path for THIS key
 kind: count() / first() / nunique() (separate dense paths — next). FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — SeriesGroupBy.count() by Scalar-backed Utf8 key dense path: 0.62x LOSS -> 3.15x WIN
+Follow-up to the reductions fix: count()'s two dense blocks gate the KEY on `as_i64_slice` / `as_utf8_contiguous`, so a
+Scalar-backed Utf8 key (from_values) still fell to the SipHash build_groups path. Added a third block before the generic
+fallback driven by `dense_group_ids` + the new `dense_group_labels` helper: all-valid value ⇒ every row counts ⇒ a
+group's count is its size, tallied in one pass over the gids. Bit-identical (same first-seen order/labels; size ==
+non-missing count for an all-valid column).
+
+Same-box best-of-6, 2M f64 value by Scalar-backed Utf8 key, pandas rebuilding groupby per call (`bench_gbukey`):
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `count` by Utf8 key 2M card=1000 | 78.2ms  | 24.8ms | 3.15x | 0.75x -> 2.36x (pandas 58.6ms) |
+| `count` by Utf8 key 2M card=100k | 348.0ms | 68.2ms | 5.10x | 0.62x -> 3.15x (pandas 215.0ms) |
+
+Flips LOSS->WIN. (first()/nunique() by this key kind remain on build_groups — next.) FULL fp-frame suite 3109 / 0 failed.

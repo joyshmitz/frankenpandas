@@ -28,4 +28,10 @@ fn main() {
     timeit("clip", || { std::hint::black_box(s.clip(Some(0.1), Some(0.9)).unwrap().len()); });
     timeit("fillna0", || { std::hint::black_box(s.fillna(&Scalar::Float64(0.0)).unwrap().len()); });
     timeit("gt_scalar", || { std::hint::black_box(s.gt_scalar(&Scalar::Float64(0.5)).unwrap().len()); });
+    timeit("neg", || { std::hint::black_box(s.neg().unwrap().len()); });
+    timeit("sqrt", || { std::hint::black_box(s.sqrt().unwrap().len()); });
+    timeit("exp", || { std::hint::black_box(s.exp().unwrap().len()); });
+    timeit("diff", || { std::hint::black_box(s.diff(1).unwrap().len()); });
+    timeit("cummax", || { std::hint::black_box(s.cummax().unwrap().len()); });
+    timeit("cummin", || { std::hint::black_box(s.cummin().unwrap().len()); });
 }

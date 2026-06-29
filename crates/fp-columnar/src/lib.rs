@@ -16928,6 +16928,18 @@ impl Column {
             let out: Vec<f64> = data.iter().map(|&x| -x).collect();
             return Ok(Self::from_f64_all_valid_with_finite_opt(out, witness));
         }
+        // Nullable Float64 fast path (mirror of abs): negate present slots over the
+        // raw &[f64], NaN at invalid slots, re-ingest via `from_f64_values`.
+        // Bit-identical: -x of a present (non-NaN) value is never NaN, so the NaN
+        // set == the original missing set (~584ms / 26x slower than pandas before).
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let out: Vec<f64> = (0..data.len())
+                .map(|i| if validity.get(i) { -data[i] } else { f64::NAN })
+                .collect();
+            return Ok(Self::from_f64_values(out));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {

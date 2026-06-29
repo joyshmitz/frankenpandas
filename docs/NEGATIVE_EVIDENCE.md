@@ -7784,3 +7784,12 @@ Catastrophic LOSS -> moderate (gt_scalar fixes the whole compare family lt/eq/ne
 validity rebuild (from_f64_values' NaN scan + Arc::from copy) — pandas does NaN ops in-place with no validity model.
 A non-copying nullable-f64 constructor (fixing from_f64_values_owned_with_validity's backing) is the next lever.
 fp-columnar 467/0, fp-frame 3109/0.
+
+### 2026-06-29 BlackThrush — nullable Float64 neg typed path: 0.038x -> 0.27x (7.2x fp-side)
+Continuation of the nullable-f64 vein: neg() on a 10%-null Float64 column fell to the per-element Scalar loop (5M neg
+584ms / 26x slower than pandas). Added the same nullable typed path as abs (negate present slots over raw &[f64], NaN
+at invalid, re-ingest via from_f64_values). Bit-identical: -x of a present non-NaN value is never NaN. 584->80.6ms,
+0.038x -> 0.27x (pandas 22.1ms). fp-columnar 467/0, fp-frame 3109/0. STILL OPEN in this vein (all measured, same Scalar
+floor): sqrt 0.062x (UNSAFE for from_f64_values — sqrt(negative present)=NaN would be wrongly marked missing; needs
+present-NaN preservation), exp 0.139x (safe, not yet done), diff 0.049x / cummax 0.168x / cummin 0.174x (cumulative,
+different pattern). The non-copying nullable-f64 constructor remains the deeper lever for all of them.

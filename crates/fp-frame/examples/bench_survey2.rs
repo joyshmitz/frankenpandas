@@ -39,6 +39,12 @@ fn main() {
     let other_i = Series::new("o", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).collect())).unwrap();
     let mi = si.gt_scalar(&Scalar::Int64(500)).unwrap();
     timeit("where_series_i64", || { std::hint::black_box(si.where_cond_series(&mi, &other_i).unwrap().len()); });
+    let lo_f = Series::new("lo", Index::from_range(0, n as i64, 1), Column::from_f64_values((0..n).map(|i| (i % 100) as f64 * 0.001).collect())).unwrap();
+    let hi_f = Series::new("hi", Index::from_range(0, n as i64, 1), Column::from_f64_values((0..n).map(|i| 0.5 + (i % 100) as f64 * 0.001).collect())).unwrap();
+    timeit("clip_series_f64", || { std::hint::black_box(s.clip_with_series(Some(&lo_f), Some(&hi_f)).unwrap().len()); });
+    let lo_i = Series::new("lo", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).map(|i| i % 200).collect())).unwrap();
+    let hi_i = Series::new("hi", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).map(|i| 500 + i % 200).collect())).unwrap();
+    timeit("clip_series_i64", || { std::hint::black_box(si.clip_with_series(Some(&lo_i), Some(&hi_i)).unwrap().len()); });
     timeit("mask_series_f64", || { std::hint::black_box(s.mask_series(&m, &other_f).unwrap().len()); });
     timeit("mask_series_i64", || { std::hint::black_box(si.mask_series(&mi, &other_i).unwrap().len()); });
     timeit("where_i64(prebuilt)", || { std::hint::black_box(si.where_cond(&mi, Some(&Scalar::Int64(0))).unwrap().len()); });

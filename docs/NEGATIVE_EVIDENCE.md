@@ -7932,3 +7932,21 @@ Same-box best-of-6, 5M Float64 10%-null (`bench_nullable`), pandas 2.2.3:
 
 where/mask FLIP LOSS->WIN; where_series 0.018x->0.77x (44x fp-side, near parity). The LazyNullableFloat64 lever now
 spans the full nullable-f64 select surface. fp-frame 3109/0.
+
+### 2026-06-29 BlackThrush — DataFrame axis=1 reductions on nullable f64: 0.34x LOSS -> 2.2-4.1x WIN (one reduce_rows change)
+df.sum/mean/max/std(axis=1) on an all-Float64 frame WITH NaN: the all-valid axis=1 accumulators (reduce_rows_f64 /
+reduce_rows_func_f64) bail on any NaN, so it fell to reduce_rows' per-cell `values()[idx]` Scalar materialization (k*n
+boxings): 1M x 20 10%-null sum 627ms / mean 630ms / max 614ms / std 646ms (2.6-2.9x slower than pandas; std 0.74x).
+Added a typed Float64 fast path at the TOP of reduce_rows: gather each row's PRESENT values (validity-set AND not-NaN ==
+the is_missing skipna filter) from the raw &[f64] + validity, then the same empty-row -> `empty` / Float64(func(present))
+emit. Bit-identical (fp-frame 3109/0). Serves ALL axis=1 reducers uniformly.
+
+Same-box best-of-6, 1M x 20 Float64 10%-null (`bench_axis1n`), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `sum(axis=1)`  | 626.7ms | 94.3ms  | 6.65x | 0.34x -> 2.29x (pandas 215.7ms) |
+| `mean(axis=1)` | 629.7ms | 102.2ms | 6.16x | 0.36x -> 2.21x (pandas 226.3ms) |
+| `max(axis=1)`  | 613.7ms | 97.1ms  | 6.32x | 0.38x -> 2.37x (pandas 230.4ms) |
+| `std(axis=1)`  | 646.2ms | 116.0ms | 5.57x | 0.74x -> 4.11x (pandas 477.1ms) |
+
+All FLIP LOSS->WIN. fp-frame 3109/0.

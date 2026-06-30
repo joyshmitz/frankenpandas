@@ -7914,3 +7914,21 @@ Added a nullable-value + all-valid-f64-bounds + same-index path: clip present sl
 re-ingest via from_f64_values. Bit-identical (present ⇒ Float64(r.max(lo).min(hi)); missing ⇒ Float64(NaN) == val.clone()
 of a missing f64; max/min of a present finite value never yields NaN). 463->95.9ms, 0.33x -> 1.60x WIN (pandas 154ms).
 fp-frame 3109/0. (Also confirmed this turn: nullable isin 1.49x WIN — no gap.)
+
+### 2026-06-29 BlackThrush — nullable Float64 where/mask/where_series: 0.018-0.17x -> 0.77-1.10x (up to 44x fp-side)
+Conditional-select on a nullable Float64 column fell to the per-element Scalar map / generic align path (the all-valid
+as_f64_slice select bails on ANY NaN): 5M 10%-null where 183ms, mask 186ms, where_series (where_cond_series) 1674ms —
+6x/6x/55x slower than pandas. Added nullable typed selects over `as_f64_slice_with_validity` emitting via the
+LazyNullableFloat64-backed `from_f64_values_nullable`: out[i] = select(cond, ...), validity bit set iff the SELECTED
+operand is valid there, CARRYING the selected operand's raw datum at a cleared slot so it renders EXACTLY as that
+operand's `val.clone()` (Float64(NaN) or Null). Bit-identical (fp-frame 3109/0).
+
+Same-box best-of-6, 5M Float64 10%-null (`bench_nullable`), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `where(cond, fill)`        | 182.6ms  | 28.6ms | 6.38x  | 0.17x -> 1.10x WIN (pandas 31.5ms) |
+| `mask(cond, fill)`         | 186.2ms  | 29.8ms | 6.25x  | 0.16x -> 1.03x WIN (pandas 30.7ms) |
+| `where(cond, other_series)`| 1673.9ms | 39.2ms | 42.7x  | 0.018x -> 0.77x (pandas 30.3ms) |
+
+where/mask FLIP LOSS->WIN; where_series 0.018x->0.77x (44x fp-side, near parity). The LazyNullableFloat64 lever now
+spans the full nullable-f64 select surface. fp-frame 3109/0.

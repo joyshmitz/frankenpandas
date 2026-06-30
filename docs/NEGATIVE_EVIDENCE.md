@@ -7899,3 +7899,10 @@ Same-box best-of-6, 5M Float64 10%-null, df + 1.0 (`bench_dfscalar`), pandas 2.2
 Completes the nullable-f64 arithmetic surface (col+col AND col+scalar). The reusable
 `from_f64_values_nullable` constructor is now available for any other typed nullable-f64 op output. fp-columnar 467/0,
 fp-frame 3109/0.
+
+### 2026-06-29 BlackThrush — nullable Float64 between(): 0.018x -> 0.25x (14.1x fp-side)
+between() on a nullable Float64 column fell to the per-element Scalar loop (5M 10%-null: 287ms, 56x slower than pandas).
+The output is an ALL-VALID Bool (the Scalar path emits Bool(false) for a missing value, not a missing Bool), so added a
+typed nullable path over `as_f64_slice_with_validity`: present ⇒ the same hoisted-per-mode f64 predicate; missing ⇒
+false. Emit via from_bool_values. Bit-identical to the Scalar loop. 287->20.4ms, 0.018x -> 0.25x (pandas 5.1ms).
+fp-frame 3109/0. (Also confirmed this turn: nullable ffill 1.16x WIN, interpolate 7.6x WIN, bfill ~parity — no gap.)

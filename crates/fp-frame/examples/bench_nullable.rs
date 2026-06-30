@@ -37,4 +37,8 @@ fn main() {
     let o = s.clone();
     timeit("add_col", || { std::hint::black_box(s.add(&o).unwrap().len()); });
     timeit("mul_col", || { std::hint::black_box(s.mul(&o).unwrap().len()); });
+    timeit("ffill", || { std::hint::black_box(s.ffill(None).unwrap().len()); });
+    timeit("bfill", || { std::hint::black_box(s.bfill(None).unwrap().len()); });
+    timeit("interpolate", || { std::hint::black_box(s.interpolate().unwrap().len()); });
+    timeit("between", || { std::hint::black_box(s.between(&Scalar::Float64(0.1), &Scalar::Float64(0.9), "both").unwrap().len()); });
 }

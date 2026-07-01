@@ -15873,6 +15873,40 @@ impl Column {
             // all-valid output → MOVE (no Arc::from realloc).
             return Ok(Self::from_i64_values_owned(out));
         }
+        // Utf8 -> Float64: parse each field's bytes straight from the contiguous
+        // buffer into a typed Vec<f64>, skipping the per-cell Scalar map +
+        // cast_scalar dispatch + Self::new revalidation the generic tail pays
+        // (astype(f64) on a string column was ~3.3x slower than to_numeric on the
+        // same data). cast_scalar(Utf8(s), Float64) is exactly `s.parse::<f64>()`
+        // (NO trim — Rust f64::from_str rejects surrounding whitespace, matching),
+        // so this is bit-identical. `as_utf8_contiguous` is all-valid, so every
+        // cell is present; a value parsing to NaN (e.g. "nan") or a parse failure
+        // BAILS to the generic Scalar path, which reproduces the exact
+        // NaN-is-missing / raise-error behavior. All-valid non-NaN output ⇒
+        // from_f64_values_owned MOVEs (no realloc). (br-frankenpandas utf8-f64-astype)
+        if target == DType::Float64
+            && let Some((bytes, offsets)) = self.as_utf8_contiguous()
+        {
+            let n = offsets.len() - 1;
+            let mut out: Vec<f64> = Vec::with_capacity(n);
+            let mut ok = true;
+            for i in 0..n {
+                let Ok(s) = std::str::from_utf8(&bytes[offsets[i]..offsets[i + 1]]) else {
+                    ok = false;
+                    break;
+                };
+                match s.parse::<f64>() {
+                    Ok(v) if !v.is_nan() => out.push(v),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                return Ok(Self::from_f64_values_owned(out));
+            }
+        }
         // Int64 -> Utf8: hand-rolled decimal itoa straight into a contiguous
         // byte buffer (br-frankenpandas-itoa). cast_scalar(Int64(v), Utf8) is
         // exactly `v.to_string()` (pandas spells ints plainly — unlike floats

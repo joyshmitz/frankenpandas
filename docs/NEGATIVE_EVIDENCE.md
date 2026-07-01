@@ -8101,3 +8101,28 @@ Utf8-rebuild round-trip (the ~193ms floor with raw removed is still 1.35x pandas
 remaining cost). Bailing the numeric fast path to the Scalar generic path is the structural issue; a Utf8-promoting
 typed path needs verbatim text for already-parsed numeric cells (can't stringify losslessly after the fact), so it
 requires either two-pass type classification or per-cell raw offsets — a focused fp-io parser session, not a 60m reroute.
+
+### 2026-07-01 BlackThrush — astype(Float64) on a Utf8 column: 0.70x LOSS -> 2.97x WIN (typed parse path in Column::astype)
+Re-survey found `Series.astype(Float64)` on a string column a LOSS (1M f64-strings: fp 84ms vs pandas 60.7ms = 0.70x)
+— striking because `to_numeric` on the SAME data was 26ms (5.9x WIN). fp's astype was 3.3x slower than its OWN
+to_numeric: `Column::astype` had typed fast paths for Int64<->Float64 and *->Utf8 but NONE for Utf8->numeric, so a
+string column fell to the generic `values().map(cast_scalar).collect() -> Self::new` per-cell Scalar path (Scalar
+materialization + cast_scalar dispatch + revalidation).
+
+FIX: a typed Utf8->Float64 path in Column::astype — parse each field's bytes straight from the contiguous buffer into a
+Vec<f64>, then from_f64_values_owned (MOVE). `cast_scalar(Utf8(s), Float64)` is exactly `s.parse::<f64>()` (NO trim —
+Rust f64::from_str rejects surrounding whitespace, matching), so bit-identical. `as_utf8_contiguous` gates all-valid, so
+every cell is present; a cell parsing to NaN ("nan") OR a parse failure BAILS to the generic Scalar path, which
+reproduces the exact NaN-present / raise-error behavior (verified: the generic path keeps "nan" as a PRESENT Float64(NaN),
+NOT missing — so bailing on NaN, rather than routing through from_f64_values which would mark it missing, is what keeps
+bit-identity). Verified vs pandas 2.2.3: clean [1.5,42,-3.25,1e3,inf,-inf,0,000123,3.0] EXACT, "nan"->NaN, "hello"->raise.
+
+bench 1M f64-strings, best-of-6 (stable ×3), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `astype(Float64)` on Utf8 | 84.0ms | 20.5ms | 4.10x | 0.70x -> 2.97x WIN (pandas 60.7ms) |
+
+FLIPS LOSS->WIN. fp-columnar 467/0. (Utf8->Int64 astype has the same generic-path shape — a natural follow-up sibling;
+cast_scalar(Utf8,Int64) tries i64 then f64-with-fract==0, so a typed path would gate on that. Not landed this session.)
+Also confirmed dominant this survey (no gap): to_csv 6.0x, read_json 1.4x/read_jsonl 1.7x, to_datetime 4.5x, to_numeric
+5.9x, merge_inner 3.3x, pivot_table mean/sum/std/median/min/max/count all 1.6-4.5x, df rank/corr/nlargest/nunique 11-25x.

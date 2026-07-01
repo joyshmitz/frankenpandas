@@ -8169,3 +8169,22 @@ FLIPS LOSS->WIN. fp-frame lib 3109/0; conformance 1596 packets green. (Float64 s
 same Scalar-dispatch shape — a natural sibling, not landed this session.) Also confirmed dominant this survey (no gap):
 map(dict) 2.2x, df.replace(dict) 14.6x, str.extract 3.1x, astype(datetime) parity; astype(Utf8->Bool) is a correctness
 parity item (fp raises, pandas gives all-True), not perf.
+
+### 2026-07-01 BlackThrush — searchsorted(many needles) on a sorted Float64 column: 0.55x LOSS -> 1.19x WIN (typed primitive binary search, f64 sibling)
+The documented follow-up to the Int64 searchsorted fix: `Series.searchsorted(f64_needles)` into a sorted Float64 array
+was also a LOSS (2M f64 needles into 2M sorted f64: fp 1030ms vs pandas 562ms = 0.55x) — same cause (per-step
+compare_scalar_values dispatch over a materialized Vec<Scalar>). FIX: the f64 sibling — when the column is all-valid
+Float64 (as_f64_slice) AND ascending-sorted AND every needle is a non-NaN Float64, binary-search the raw &[f64] with
+primitive `partition_point(x < k)` [left] / `(x <= k)` [right]. compare_scalar_values orders Float64 via
+`partial_cmp().unwrap_or(Equal)`, which for a no-NaN column + non-NaN needles is EXACTLY primitive `<`/`<=` (incl.
+-0.0 == 0.0, which partial_cmp treats equal); a NaN/non-Float64 needle OR a stray present-NaN (which fails the `windows`
+sorted check) keeps the general path. Bit-identical. Verified vs pandas 2.2.3 ([1,3,3,3,5.5,7,7,9], needles incl.
+dups/boundary/OOR/-0.0/exact — left AND right EXACT).
+
+bench 2M f64 needles into 2M sorted f64, best-of-6 (×3), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `searchsorted(many)` f64 | 1030ms | 471ms | 2.19x | 0.55x -> 1.19x WIN (pandas 562ms) |
+
+FLIPS LOSS->WIN. The searchsorted typed-slice surface (Int64 + Float64) is now covered. fp-frame lib 3109/0;
+conformance 1596 packets green.

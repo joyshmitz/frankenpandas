@@ -52,6 +52,7 @@ fn main() {
     timeit("cummax_i64", || { std::hint::black_box(siq.cummax().unwrap().len()); });
     timeit("mode_i64", || { std::hint::black_box(si.mode().unwrap().len()); });
     timeit("cut_i64", || { std::hint::black_box(fp_frame::cut(&siq, 10).unwrap().len()); });
+    timeit("cut_f64", || { std::hint::black_box(fp_frame::cut(&s, 10).unwrap().len()); });
     let oth_i = Series::new("o", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).map(|i| i % 777).collect())).unwrap();
     timeit("update_i64", || { std::hint::black_box(si.update(&oth_i).unwrap().len()); });
     timeit("combine_first_i64", || { std::hint::black_box(si.combine_first(&oth_i).unwrap().len()); });

@@ -8041,3 +8041,36 @@ Residual loss is STRUCTURAL, same class as to_numpy/transpose (l4vzc): pandas re
 conformance contract is a materialized Utf8 interval-string column. Closing it fully would require cut to return
 `DType::Categorical` (codes+categories) — a return-dtype change that breaks the strict FP-P2D-081 Utf8 parity gate, so
 NOT pursued. fp-frame lib green, cut/qcut conformance green.
+
+### 2026-07-01 BlackThrush — rolling + expanding cov/corr: 0.53-0.87x LOSS -> 2.45-4.1x WIN (identity-align bypass + expanding typed path)
+Re-survey (bench_rolling/bench_expanding, 1M, best-of-6, pandas 2.2.3) found the rolling/expanding pairwise moments the
+only remaining losses (everything else dominates — str 1.5-16x, dt 7-16x, reshape 2-4.6x, ewm cov/corr already win,
+factorize wide-i64 2.24x). Two distinct causes, both fixed:
+
+(a) ROLLING cov/corr — `rolling_pairwise_moment` opened with `self.series.align(other, AlignMode::Left)`
+UNCONDITIONALLY, even for co-indexed series (the overwhelmingly common `s.rolling(w).cov(other)` case). `align` builds an
+n-entry `FxHashMap<i64,usize>` + n probes then `reindex_by_positions`-clones BOTH columns into two fresh Series — an
+O(n) hashmap + 2 column copies that turned out to be ~70ms of the 88ms (the sliding power-sum recurrence itself is only
+~17ms). FIX: identity fast path — when `*self.index() == *other.index() && !other.index().has_duplicates()`, a Left-align
+is the identity, so use `other` directly (no hashmap, no reindex clones, no Series construction). Bit-identical (same
+positions/values/union-index).
+
+(b) EXPANDING cov/corr — `expanding_bivariate` had NO typed fast path: it materialized BOTH series to `Vec<Scalar>` and
+dispatched `is_missing()`/`to_f64()` per element. FIX: an `as_f64_slice` all-valid fast path running the same online
+bivariate Welford recurrence over the two raw &[f64] (sister to the rolling typed path), emitting a typed `Vec<f64>`
+(NaN for pre-min_pairs / zero-std rows → `from_f64_values` renders `Null(NaN)`, matching the Scalar arm). Bit-identical.
+
+Verified bit-identical vs pandas 2.2.3 (8-element probe, rolling w=3 AND expanding, cov AND corr — every value matched
+incl. the NaN warmup rows). fp-frame lib green.
+
+bench 1M, best-of-6 (stable across 3 runs), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `rolling(100).cov`  | 88.0ms | 17.2ms | 5.1x | 0.66x -> 3.36x WIN (pandas 57.9ms) |
+| `rolling(100).corr` | 90.8ms | 22.3ms | 4.1x | 0.87x -> 3.54x WIN (pandas 78.9ms) |
+| `expanding().cov`   | 73.4ms | 15.7ms | 4.7x | 0.53x -> 2.45x WIN (pandas 38.5ms) |
+| `expanding().corr`  | 80.2ms | 15.8ms | 5.1x | 0.82x -> 4.14x WIN (pandas 65.4ms) |
+
+All four FLIP LOSS->WIN. The identity-align bypass is the higher-leverage of the two (align was the entire rolling gap);
+the expanding typed path mirrors the pattern already used by rolling. NOTE: ewm cov/corr already used `other.column()`
+directly (no align) — no change needed there. window-independent (w=100 and w=1000 both ~17ms) confirms O(n) online.

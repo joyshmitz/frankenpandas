@@ -8074,3 +8074,30 @@ bench 1M, best-of-6 (stable across 3 runs), pandas 2.2.3:
 All four FLIP LOSS->WIN. The identity-align bypass is the higher-leverage of the two (align was the entire rolling gap);
 the expanding typed path mirrors the pattern already used by rolling. NOTE: ewm cov/corr already used `other.column()`
 directly (no align) — no change needed there. window-independent (w=100 and w=1000 both ~17ms) confirms O(n) online.
+
+### 2026-07-01 BlackThrush — read_csv (mixed CSV) generic-path raw-text capture: 0.47x -> 0.59x (1.24x fp-side); residual is a typed-parser gap
+Re-survey found read_csv the biggest remaining gap vs pandas (cold parse of a mixed 500k×3 CSV — i64/f64/utf8, 17.8MB:
+fp 304ms vs pandas 143ms = 0.47x). (Everything else dominates: to_csv 6.0x, df rank 18.5x / corr 15x / nlargest 25x /
+nunique 11.7x, str 1.5-16x, dt 7-16x, reshape 2-4.6x.) A mixed CSV bails BOTH numeric fast paths on row 0 (cheap) and
+falls to the generic per-cell path, which did `parse_scalar(field)` AND `field.to_owned()` for EVERY cell — ~1.5M
+small-string mallocs into `raw_columns: Vec<Vec<String>>`, kept purely for the object-fallback verbatim rebuild.
+
+Attribution: skipping the raw clone entirely dropped 304ms -> 193ms (the clone = ~36% of the parse). But `raw` IS needed
+for a Utf8-result column with numeric-coerced cells (e.g. a "1.5"/"2.5"/"x" column must keep "1.5" verbatim, not a
+reformat) — verified vs pandas 2.2.3 (mixed col preserved exactly; all-numeric "05"/"10"/"007" column stays Int64
+[5,10,7] like pandas). FIX (safe, bit-identical): capture raw into ONE contiguous byte buffer + offsets per column
+(`Vec<u8>`+`Vec<usize>`) instead of n `String` allocs; `build_csv_object_aware_column` indexes the contiguous form for
+the Utf8 rebuild. Recovers ~60ms of the 110ms (the residual is the inherent 18MB byte copy). Options-path callers adapt
+their `&[String]` raw via a small `strings_to_contiguous_raw` shim (unchanged behavior).
+
+bench cold parse, 500k×3 mixed CSV (17.8MB), best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `read_csv` (mixed) | 304ms | 245ms | 1.24x | 0.47x -> 0.59x (pandas 143ms) |
+
+Still a partial LOSS. The deeper lever (deferred): a single-pass TYPED-PER-COLUMN parser with a Utf8 variant, so a
+mixed CSV parses each column directly into a typed/contiguous column WITHOUT the `Vec<Scalar>` + `from_values` +
+Utf8-rebuild round-trip (the ~193ms floor with raw removed is still 1.35x pandas — that round-trip, not raw, is the
+remaining cost). Bailing the numeric fast path to the Scalar generic path is the structural issue; a Utf8-promoting
+typed path needs verbatim text for already-parsed numeric cells (can't stringify losslessly after the fact), so it
+requires either two-pass type classification or per-cell raw offsets — a focused fp-io parser session, not a 60m reroute.

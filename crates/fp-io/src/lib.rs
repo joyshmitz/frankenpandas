@@ -613,7 +613,27 @@ pub fn read_fwf_str(input: &str, options: &FwfReadOptions) -> Result<DataFrame, 
 /// options reader (which honors a configurable na/keep_default_na token set):
 /// a cell is null in the rebuilt column iff it parsed to a missing scalar.
 /// `raw` must be positionally aligned with `values` (same length).
-fn build_csv_object_aware_column(values: Vec<Scalar>, raw: &[String]) -> Result<Column, IoError> {
+/// Adapt a `&[String]` raw-text column (the options-path representation) to the
+/// contiguous `(bytes, offsets)` form that [`build_csv_object_aware_column`]
+/// consumes. Keeps a single object-aware builder without converting the whole
+/// options path to contiguous capture.
+fn strings_to_contiguous_raw(raw: &[String]) -> (Vec<u8>, Vec<usize>) {
+    let total: usize = raw.iter().map(String::len).sum();
+    let mut bytes = Vec::with_capacity(total);
+    let mut offsets = Vec::with_capacity(raw.len() + 1);
+    offsets.push(0usize);
+    for s in raw {
+        bytes.extend_from_slice(s.as_bytes());
+        offsets.push(bytes.len());
+    }
+    (bytes, offsets)
+}
+
+fn build_csv_object_aware_column(
+    values: Vec<Scalar>,
+    raw_bytes: &[u8],
+    raw_offsets: &[usize],
+) -> Result<Column, IoError> {
     let column = Column::from_values(values)?;
     if column.dtype() == DType::Float64 {
         let normalized = column
@@ -626,16 +646,24 @@ fn build_csv_object_aware_column(values: Vec<Scalar>, raw: &[String]) -> Result<
             .collect();
         return Ok(Column::new(DType::Float64, normalized)?);
     }
-    if column.dtype() == DType::Utf8 && column.values().len() == raw.len() {
+    // Only a Utf8-result column consults the verbatim raw text (to preserve the
+    // original literal of numeric-coerced cells, e.g. "05" / "5.0"). `raw_offsets`
+    // has one more entry than the row count; a mismatch means the raw buffer is
+    // absent/short, so fall back to the parsed column unchanged.
+    let raw_len = raw_offsets.len().saturating_sub(1);
+    if column.dtype() == DType::Utf8 && column.values().len() == raw_len {
         let rebuilt: Vec<Scalar> = column
             .values()
             .iter()
-            .zip(raw)
-            .map(|(parsed, field)| {
+            .enumerate()
+            .map(|(i, parsed)| {
                 if parsed.is_missing() {
                     Scalar::Null(NullKind::Null)
                 } else {
-                    Scalar::Utf8(field.clone())
+                    let field = &raw_bytes[raw_offsets[i]..raw_offsets[i + 1]];
+                    // Fields originate from a `&str` CSV input, so every slice is
+                    // valid UTF-8 on ASCII delimiter/quote boundaries.
+                    Scalar::Utf8(String::from_utf8_lossy(field).into_owned())
                 }
             })
             .collect();
@@ -1405,9 +1433,21 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         .map(|_| Vec::with_capacity(row_hint))
         .collect();
     // Keep each cell's original text so an object-fallback column can preserve
-    // the verbatim literal like pandas (see build_csv_object_aware_column).
-    let mut raw_columns: Vec<Vec<String>> = (0..header_count)
-        .map(|_| Vec::with_capacity(row_hint))
+    // the verbatim literal like pandas (see build_csv_object_aware_column). Stored
+    // as ONE contiguous byte buffer + offsets per column rather than a
+    // `Vec<String>` — the per-cell `field.to_owned()` was ~1.5M small-string
+    // mallocs on a mixed 500k×3 CSV (~36% of the parse). `raw` is consulted ONLY
+    // for a Utf8-result column (numeric/bool columns never read it), and the
+    // contiguous form is indexed identically there. (br-frankenpandas csv-raw-contig)
+    let mut raw_bytes: Vec<Vec<u8>> = (0..header_count)
+        .map(|_| Vec::with_capacity(row_hint * 8))
+        .collect();
+    let mut raw_offsets: Vec<Vec<usize>> = (0..header_count)
+        .map(|_| {
+            let mut v = Vec::with_capacity(row_hint + 1);
+            v.push(0usize);
+            v
+        })
         .collect();
 
     let mut row_count: i64 = 0;
@@ -1416,7 +1456,8 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         for idx in 0..header_count {
             let field = record.get(idx).unwrap_or_default();
             columns[idx].push(parse_scalar(field));
-            raw_columns[idx].push(field.to_owned());
+            raw_bytes[idx].extend_from_slice(field.as_bytes());
+            raw_offsets[idx].push(raw_bytes[idx].len());
         }
         row_count += 1;
     }
@@ -1425,7 +1466,8 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     let mut column_order = Vec::with_capacity(header_count);
     for (idx, values) in columns.into_iter().enumerate() {
         let name = headers.get(idx).cloned().unwrap_or_default();
-        let column = build_csv_object_aware_column(values, &raw_columns[idx])?;
+        let column =
+            build_csv_object_aware_column(values, &raw_bytes[idx], &raw_offsets[idx])?;
         out_columns.insert(name.clone(), column);
         column_order.push(name);
     }
@@ -5054,7 +5096,8 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             }
             let name = headers.get(orig_idx).cloned().unwrap_or_default();
             let column = if preserve_object_text && !dtype_forced(&name) {
-                build_csv_object_aware_column(columns[col_idx].clone(), &raw_columns[orig_idx])?
+                let (rb, ro) = strings_to_contiguous_raw(&raw_columns[orig_idx]);
+                build_csv_object_aware_column(columns[col_idx].clone(), &rb, &ro)?
             } else {
                 Column::from_values(columns[col_idx].clone())?
             };
@@ -5073,7 +5116,8 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         for (idx, values) in columns.into_iter().enumerate() {
             let name = headers.get(idx).cloned().unwrap_or_default();
             let column = if preserve_object_text && !dtype_forced(&name) {
-                build_csv_object_aware_column(values, &raw_columns[idx])?
+                let (rb, ro) = strings_to_contiguous_raw(&raw_columns[idx]);
+                build_csv_object_aware_column(values, &rb, &ro)?
             } else {
                 Column::from_values(values)?
             };

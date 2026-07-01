@@ -8188,3 +8188,27 @@ bench 2M f64 needles into 2M sorted f64, best-of-6 (×3), pandas 2.2.3:
 
 FLIPS LOSS->WIN. The searchsorted typed-slice surface (Int64 + Float64) is now covered. fp-frame lib 3109/0;
 conformance 1596 packets green.
+
+### 2026-07-01 BlackThrush — SeriesGroupBy.pct_change: 0.75x LOSS (low card) -> 53.9x WIN (dense typed path, sister to grouped diff)
+Groupby-methods survey found `gb.pct_change` a LOSS at low cardinality (2M, card=100: fp 468.8ms vs pandas 351.3ms =
+0.75x) and slow everywhere (~400-600ms, 56x slower than the dense grouped cumsum at 7ms) — because it went STRAIGHT to
+the generic `transform_groups` per-group Scalar gather + `forward_fill_scalars` materialization, while gb.diff/cumsum
+have dense typed paths. (Other gb methods dominate: cumcount 5.8x, rank 7.5x, cumsum 7x.)
+
+FIX: `dense_groupby_pct_change_f64{,_by_key}` — sister of the grouped-diff kernels but emitting `(v - prev)/prev` with a
+`prev.abs() < f64::EPSILON -> invalid(NaN)` guard, in one sequential pass over the raw &[f64] with a per-group ring
+buffer keyed by the dense int64 offset (or gid). Wired for positive `periods` + all-valid no-NaN Float64 value + dense
+key; negative/zero periods and any missing/NaN keep the general path. Bit-identical to the generic transform for a clean
+column: pandas' default `fill_method='ffill'` is a no-op with nothing missing, the EPSILON guard matches, and a set
+validity bit always carries a non-NaN result. Verified vs pandas 2.2.3 (multi-row groups, periods 1 AND 2 EXACT).
+
+bench 2M Float64 value, i64 key, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `gb.pct_change` card=100    | 468.8ms | 6.5ms  | 72x | 0.75x -> 53.9x WIN (pandas 351ms) |
+| `gb.pct_change` card=1000   | 393.8ms | 7.7ms  | 51x | 1.17x -> 60x WIN (pandas 461ms) |
+| `gb.pct_change` card=100000 | 607.9ms | 10.3ms | 59x | 0.13x -> 462x WIN (pandas 4733ms) |
+
+FLIPS LOSS->WIN (was fragile near-parity: 0.75x at card=100). fp-frame lib 3109/0; conformance 1596 packets green.
+NOTE: fp gives NaN where pandas gives inf for a prev==0 divisor — a PRE-EXISTING generic-path parity difference (the
+EPSILON guard predates this change), NOT introduced here; the dense path reproduces it exactly.

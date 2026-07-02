@@ -8622,3 +8622,13 @@ bench 2M rows, nullable Int64 (20%-null), best-of-6, pandas 2.2.3:
 | `Series.cummin` nullable-i64 | 8.4ms | ~0.28x -> 3.9x WIN (pandas 32.5ms) |
 
 FLIPS LOSS->WIN. Completes the nullable-Int64 cumulative surface except cumprod (deferred — inf*0->NaN overflow bit-clear needs the acc.is_nan() guard the nullable-f64 cumprod path carries).
+
+### 2026-07-02 BlackThrush — Series.cumprod on NULLABLE Int64: typed skipna running-product (0.27x -> 2.7x WIN)
+Completes the nullable-Int64 cumulative surface (cumsum/cummax/cummin already done). cumprod on a nullable Int64 column fell to the generic per-row `.values()` Scalar loop (all-valid `as_i64_slice` bails on missing; nullable path Float64-only). The generic fallback runs the skipna running product over `val.to_f64()` and emits a FLOAT64 column (present -> `Float64(acc)`, missing -> `Null(NaN)`; pandas cumprod on int-with-NaN is float64). Added a typed path off the raw `(&[i64], &ValidityMask)` cast to f64 — mirror of the nullable-Float64 cumprod path INCLUDING its `acc.is_nan()` bit-clear (a running acc that overflows to `inf` then hits a 0 gives `inf*0 == NaN`, which must materialize missing). Bit-identical: `acc *= data[i] as f64` matches the generic `to_f64()` product exactly, seeded 1.0. Verified BIT-EXACT vs pandas 2.2.3 (raw f64 bit-pattern compare): case A (5000-row random 0..12 nullable — overflow to inf, present-0 -> 0) and case B (crafted 400x900 overflow-to-inf, then a present 0 -> inf*0=NaN propagating) BOTH 0 diffs. fp-frame 3109/0, fp-conformance 418/1 (pre-existing where/mask only).
+
+bench 2M rows, nullable Int64 (20%-null), best-of-6, pandas 2.2.3:
+| op | after | vs pandas 2.2.3 |
+| --- | ---: | ---: |
+| `Series.cumprod` nullable-i64 | 12.0ms | ~0.27x -> 2.7x WIN (pandas 32.7ms) |
+
+FLIPS LOSS->WIN. nullable-Int64 CUMULATIVE surface now COMPLETE (cumsum 1.97x / cummax 3.5x / cummin 3.9x / cumprod 2.7x). All four: the all-valid typed path gated on `as_i64_slice` (no missing) with a Float64-only nullable sibling — the i64-with-validity path was the missing rung.

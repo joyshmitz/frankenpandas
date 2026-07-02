@@ -8611,3 +8611,14 @@ bench 2M rows, nullable Int64 (20%-null), best-of-6, pandas 2.2.3:
 | `Series.cumsum` nullable-i64 | 122ms | 8.5ms | 0.14x -> 1.97x WIN (pandas 16.8ms) |
 
 FLIPS LOSS->WIN. Prefix-sum's sequential dependency means pandas isn't bandwidth-trivial (unlike the REJECTED non-grouped diff), so the typed pass wins. cumprod/cummax/cummin nullable-i64 are the sibling follow-ups (same all-valid-gate gap).
+
+### 2026-07-02 BlackThrush — Series.cummax/cummin on NULLABLE Int64: typed skipna running-extreme (0.28x -> 3.5-3.9x WIN)
+Siblings of the nullable-Int64 cumsum win: cummax/cummin on a nullable Int64 column fell to the generic per-row `.values()` Scalar loop (all-valid `as_i64_slice` bails on missing; the nullable path is Float64-only). The generic fallback runs the skipna running max/min over `val.to_f64()` and emits a FLOAT64 column (present -> `Float64(acc)`, missing -> `Null(NaN)`; pandas cummax/cummin on int-with-NaN is float64 too). Added typed paths running the same running extreme off the raw `(&[i64], &ValidityMask)` cast to f64 (mirror of the existing nullable-Float64 paths). Bit-identical: the f64 compare over `data[i] as f64` matches the generic `to_f64()` compare exactly (any i64->f64 precision loss is identical on both sides), missing slots materialize `Null(NaN)`, seeded +/-inf. Verified vs pandas 2.2.3 (5000-row, leading + interior missing, dtype Float64, 0 diffs). fp-frame 3109/0, fp-conformance 418/1 (pre-existing where/mask only).
+
+bench 2M rows, nullable Int64 (20%-null), best-of-6, pandas 2.2.3:
+| op | after | vs pandas 2.2.3 |
+| --- | ---: | ---: |
+| `Series.cummax` nullable-i64 | 9.1ms | ~0.28x -> 3.5x WIN (pandas 31.9ms) |
+| `Series.cummin` nullable-i64 | 8.4ms | ~0.28x -> 3.9x WIN (pandas 32.5ms) |
+
+FLIPS LOSS->WIN. Completes the nullable-Int64 cumulative surface except cumprod (deferred — inf*0->NaN overflow bit-clear needs the acc.is_nan() guard the nullable-f64 cumprod path carries).

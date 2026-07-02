@@ -8234,3 +8234,22 @@ bench 2M Float64 20%-null value, i64 key, best-of-6, pandas 2.2.3:
 
 FLIPS a 18.8x LOSS -> WIN. fp-frame lib 3109/0; conformance 1596 packets green. OPEN (same category, next lever):
 gb.ffill/bfill on nullable f64 (0.53x) — need forward/backward-fill dense kernels carrying validity.
+
+### 2026-07-01 BlackThrush — SeriesGroupBy.ffill/bfill on nullable Float64: 0.53x LOSS -> 9.2x/9.9x WIN (nullable dense fill kernels)
+The documented follow-up to the grouped-shift nullable fix: gb.ffill/bfill on a nullable Float64 column were LOSSES (2M
+20%-null f64, card=100: ffill fp 283ms vs pandas 149ms = 0.53x; bfill 299ms vs 159ms = 0.53x) — both on the generic
+`transform_groups` per-group Scalar gather. FIX: `dense_groupby_fill_nullable_f64{,_by_key}` (one `forward` flag selects
+ffill ascending / bfill descending) — per group, carry the last present datum + a `consecutive_fills` counter over the
+raw &[f64] + validity, filling a missing slot unless > `limit` consecutive fills. A shared `try_dense_fill(limit,
+forward)` gates both on a Float64 value + dense key. Bit-identical to the generic path (filled slot = last present
+datum; present slot = its datum; unfilled gap stays missing; the `consecutive_fills` reset-on-present / increment-on-gap
+logic matches, incl. `limit`). Verified vs pandas 2.2.3 (ffill/bfill + ffill(limit=1); leading/trailing gaps EXACT).
+
+bench 2M Float64 20%-null value, i64 key, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `gb.ffill` card=100 | 283.5ms | 16.2ms | 17.5x | 0.53x -> 9.2x WIN (pandas 149ms) |
+| `gb.bfill` card=100 | 298.8ms | 16.2ms | 18.5x | 0.53x -> 9.9x WIN (pandas 159ms) |
+
+Both FLIP LOSS->WIN. With grouped shift (07ab7a033), the nullable-f64 SeriesGroupBy transform surface (shift/ffill/bfill)
+is now dense. fp-frame lib 3109/0; conformance 1596 packets green.

@@ -8632,3 +8632,15 @@ bench 2M rows, nullable Int64 (20%-null), best-of-6, pandas 2.2.3:
 | `Series.cumprod` nullable-i64 | 12.0ms | ~0.27x -> 2.7x WIN (pandas 32.7ms) |
 
 FLIPS LOSS->WIN. nullable-Int64 CUMULATIVE surface now COMPLETE (cumsum 1.97x / cummax 3.5x / cummin 3.9x / cumprod 2.7x). All four: the all-valid typed path gated on `as_i64_slice` (no missing) with a Float64-only nullable sibling — the i64-with-validity path was the missing rung.
+
+### 2026-07-02 BlackThrush — SeriesGroupBy sum/mean/max/min NULLABLE value + contiguous-Utf8 (categorical) key: dense skipna bucket (0.59x -> 1.4x WIN)
+Extends the nullable agg_numeric skipna-bucket fix to the CONTIGUOUS-Utf8 key path (the categorical `df.groupby("cat").sum()` shape). agg_numeric's Utf8-contiguous dense path gated its value bucket on `as_f64_slice`/`as_i64_slice` (all-valid), so a nullable value column keyed by a contiguous Utf8 column fell to generic build_groups (~0.6x pandas). Added the sister nullable branch (bucket present values only — skipna, `Null(NaN)` for all-missing group, else `Float64(func(nums))`). Bit-identical to the generic path — VERIFIED with the branch actually exercised (the key gathered to a `lazy_contiguous_utf8` backing via identity take_positions, since a from_values Utf8 key is Eager and would otherwise skip this path): sum/mean/max/min vs pandas 2.2.3, all EXACT (raw f64 bit compare, incl. an all-missing category). fp-frame 3109/0, fp-conformance 418/1 (pre-existing where/mask only).
+
+bench 2M rows, ~1000 categories, nullable Int64 (20%-null) value, CONTIGUOUS Utf8 key, best-of-6, pandas 2.2.3:
+| op | before (generic) | after | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `sgb.sum`  Utf8-key nullable | 142ms | 61.0ms | 0.59x -> 1.36x WIN (pandas 83.2ms) |
+| `sgb.mean` Utf8-key nullable | 136ms | 59.8ms | 0.68x -> 1.54x WIN (pandas 91.9ms) |
+| `sgb.max`  Utf8-key nullable | 130ms | 60.2ms | 0.63x -> 1.37x WIN (pandas 82.6ms) |
+
+FLIPS LOSS->WIN for the contiguous-Utf8-key case (CSV/parquet-loaded categoricals — the shape the all-valid Utf8-contiguous path already targets). REMAINING GAP: an EAGER Utf8 key (in-memory from_values) has `as_utf8_contiguous()==None` so agg_numeric skips ALL its Utf8 dense paths (all-valid AND this nullable one) and uses build_groups — the real fix there is a scalar-backed-Utf8-key dense path in agg_numeric (dense_group_ids has one; agg_numeric doesn't), a separate bigger lever for BOTH all-valid and nullable values. Also sparse/wide-i64-key nullable still generic (same template, not yet added).

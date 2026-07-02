@@ -12949,6 +12949,42 @@ impl Column {
         Some(s)
     }
 
+    /// Product of an all-valid Float64 concat output, folding each chunk slice
+    /// in place with a 1.0-seeded `*` in 0..n order — bit-identical to
+    /// `as_f64_slice().iter().product()` (also a 1.0-seeded sequential left-fold)
+    /// — without materializing the cold concat buffer.
+    #[must_use]
+    pub fn all_valid_f64_chunk_product(&self) -> Option<f64> {
+        if self.dtype != DType::Float64 || !self.validity.all() {
+            return None;
+        }
+        let chunks = self.values.float64_chunks_ref()?;
+        let mut p = 1.0_f64;
+        for chunk in chunks {
+            for &v in chunk.as_slice() {
+                p *= v;
+            }
+        }
+        Some(p)
+    }
+
+    /// Int64 product sibling (`wrapping_mul`, associative mod 2^64 ⇒ grouping-
+    /// invariant, bit-identical to the materialized `fold(1, wrapping_mul)`).
+    #[must_use]
+    pub fn all_valid_i64_chunk_product(&self) -> Option<i64> {
+        if self.dtype != DType::Int64 || !self.validity.all() {
+            return None;
+        }
+        let chunks = self.values.int64_chunks_ref()?;
+        let mut p = 1_i64;
+        for chunk in chunks {
+            for &v in chunk.as_slice() {
+                p = p.wrapping_mul(v);
+            }
+        }
+        Some(p)
+    }
+
     /// Matches `pd.Series.sum()` in skipna=True mode via fp-types::nansum.
     /// Empty column returns 0.0 (matching pandas).
     #[must_use]

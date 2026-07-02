@@ -8558,3 +8558,13 @@ bench 2M rows, card=1000 dense i64 key, best-of-6, pandas 2.2.3:
 
 FLIPS LOSS->WIN. fp-frame lib 3109/0. (Also surfaced: `gb.fillna` Utf8 0.77x — but SeriesGroupBy.fillna is DEPRECATED in
 pandas 2.2, so left alone; `gb.fillna` Int64 already 1.33x WIN.)
+
+### 2026-07-02 BlackThrush — SeriesGroupBy.shift(periods) on Int64: dense ring kernel (0.18x -> 5.4x WIN, all-valid)
+Probe found grouped `shift` a big LOSS for Int64 (the Float64 dense `shift` paths — `dense_groupby_shift{,_nullable}_f64{,_by_key}` — had no Int64 sibling, so an Int64 value column fell to the generic `transform_groups` per-group `Vec<Scalar>` clone + scatter + `from_values` rescan). A grouped shift is a within-group POSITIONAL lag; added `dense_groupby_shift_nullable_i64{,_by_key}` — EXACT structural mirrors of the proven f64 ring kernels: ONE sequential pass carrying each group's last `periods` present values through a per-key (dense i64-key histogram offset) or per-gid ring, so output row `r` copies the `periods`-back value in its group (missing at a group head or when that source slot was missing). Only `periods >= 1` (pandas forward shift; negative/zero fall to generic). Gated to `DType::Int64` (`as_i64_slice_with_validity`). Bit-identical to the generic Scalar shift in VALUES + VALIDITY — verified vs a public-API reimplementation of the exact generic path (5000-row differential, ffill/negative also covered): every value + validity bit identical; the only delta is at group-head missing slots, where the typed backing emits `missing_for_dtype(Int64)` = `Null(Null)` (the canonical Int64 missing every typed Int64 path — take/dedup/... — emits) while the generic `vec![Null(NaN)]` initializer left a NON-canonical `Null(NaN)` there (same `is_missing()`, same validity). Full fp-frame suite 3109/0 confirms no golden pins the NaN kind.
+
+bench 2M rows, card=1000 dense i64 key, best-of-6, pandas 2.2.3:
+| op | fp | vs pandas 2.2.3 |
+| --- | ---: | ---: |
+| `gb.shift(1)` Int64 all-valid | 9.17ms | 0.18x -> 5.4x WIN (pandas 49.9ms) |
+
+FLIPS LOSS->WIN. The CSR-scatter first attempt (per-group appearance-order layout + gather) was REJECTED — cache-hostile scatter made it 0.22x (93ms); the sequential ring kernel (mirroring f64) is 10x tighter. FOLLOW-UP: a nullable Int64 column sourced THROUGH a DataFrame drops its `data: ColumnData::Int64` backing so `as_i64_slice_with_validity` returns None and it stays generic (a raw nullable column engages the fast path fine) — separate backing-preservation fix; also Utf8 grouped shift stays generic (nullable Utf8 is eager Vec<Scalar>, String-clone-bound vs pandas object-pointer copy — structural).

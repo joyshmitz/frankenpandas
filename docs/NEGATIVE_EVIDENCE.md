@@ -8441,3 +8441,21 @@ bench 2M×2 Float64 20%-null cols, i64 key, best-of-6, pandas 2.2.3:
 FLIPS LOSS->WIN (cumprod/cummin/cummax share try_cum_dense). This CLOSES the grouped-transform residual: the ENTIRE
 nullable-f64 groupby transform surface (SeriesGroupBy + DataFrameGroupBy shift/diff/cumsum/cumprod/cummin/cummax/ffill/
 bfill/pct_change) is now dense AND by-key where a single bounded-Int64 key applies.
+
+### 2026-07-01 BlackThrush — Series.sort_values on nullable Float64: 0.27x LOSS (3.6x slower) -> 1.25x WIN (typed present-subset argsort)
+Fresh-area probe found sort_values on a nullable Float64 column a big LOSS (2M 20%-null: fp 1118ms vs pandas 307ms =
+0.27x). The typed radix path gates on all-valid (`as_i64_slice`/`as_f64_slice`), so a nullable column fell to the
+O(n log n) generic comparator (`compare_scalars_with_na_position` over per-position `self.values()` Scalar boxes). FIX:
+a nullable Float64 path — partition present/missing off `(&[f64], &ValidityMask)`, gather present values into a Column
+and argsort them via the fast typed `Column::argsort_with` (comparison-free radix / stable), then place the missing
+block at `na_position`. Bit-identical to the generic sort INCLUDING the output index order (verified vs pandas 2.2.3:
+asc/desc × na_first/na_last with duplicate + missing values — idx AND vals EXACT; descending preserves ties in original
+order too, matching the stable comparator).
+
+bench 2M Float64 20%-null, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `Series.sort_values` nullable | 1118ms | 246ms | 4.5x | 0.27x -> 1.25x WIN (pandas 307ms) |
+
+FLIPS LOSS->WIN. fp-frame lib 3109/0; conformance 1596 packets green. (Also surfaced this probe: drop_duplicates nullable
+0.63x and idxmax nullable 0.74x — smaller losses, follow-ups; value_counts 1.9x / nunique 3.2x WIN.)

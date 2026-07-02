@@ -8298,3 +8298,23 @@ bench 2M×2 Float64 20%-null cols, i64 key, best-of-6, pandas 2.2.3:
 diff FLIPS to WIN; shift/cumsum go from catastrophic loss to near-parity (removes a 10-26x-slower defect; residual is the
 DataFrame multi-column + gid_per_row build vs pandas' fused Cython — a smaller follow-up, e.g. a by-key path avoiding
 gid_per_row). fp-frame lib 3109/0; conformance 1596 packets green.
+
+### 2026-07-01 BlackThrush — Series.shift (non-groupby) on nullable Float64: 0.091x LOSS (11x slower) -> 1.01x parity
+Probing plain (non-groupby) Series transforms on a nullable column found `Series.shift` a CATASTROPHIC loss (5M
+20%-null f64: fp 440ms vs pandas 40ms = 0.091x, 11x slower). The all-valid `as_f64_slice` fast path bails on any
+missing, so a nullable Float64 column fell to the generic `self.column.values()` Scalar materialization + rebuild.
+(Series.diff already had a nullable typed path at 0.49x — its residual 2x is per-bit validity, a micro-opt, not touched;
+cumsum/cummax already WIN 2.2x/2.3x.)
+
+FIX: a nullable Float64 fast path in `shift_with_fill_value` — a validity-carrying memmove over the raw &[f64] +
+validity: carry `data[src]` + `validity[src]` into each shifted position, write the (datum, valid) `fill` into vacated
+ones. Handles a present-numeric or missing fill; a non-numeric non-missing fill keeps the generic path. Bit-identical to
+the generic `vals[src].clone()` shift for a Float64 column. Verified vs pandas 2.2.3 (shift(2)/shift(-2)/shift(1,fill=0)/
+shift(10) on a nullable Series — ALL EXACT, incl. missing-carry, negative periods, valued fill, periods>n).
+
+bench 5M Float64 20%-null, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `Series.shift` nullable | 440.2ms | 39.7ms | 11.1x | 0.091x -> 1.01x parity (pandas 39.9ms) |
+
+Removes an 11x-slower catastrophic defect (flip to parity). fp-frame lib 3109/0; conformance 1596 packets green.

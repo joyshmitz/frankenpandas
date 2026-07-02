@@ -3682,6 +3682,15 @@ impl ScalarValues {
         None
     }
 
+    /// Int64 sibling of `float64_chunks_ref` — borrow the concat chunk views
+    /// without materializing the concatenated `Vec<i64>`.
+    fn int64_chunks_ref(&self) -> Option<&[Int64Chunk]> {
+        if let Self::LazyAllValidInt64Chunks { chunks, .. } = self {
+            return Some(chunks);
+        }
+        None
+    }
+
     fn materialize_int64_chunks(chunks: &[Int64Chunk], len: usize) -> Vec<i64> {
         let mut out = Vec::with_capacity(len);
         for chunk in chunks {
@@ -12818,6 +12827,52 @@ impl Column {
             return None;
         }
         Some(s / count as f64)
+    }
+
+    /// Sum an all-valid Int64 `concat(...)` output by folding each chunk slice
+    /// in place with `wrapping_add` (0-seeded, 0..n order) — BIT-IDENTICAL to the
+    /// materialized `as_i64_slice` wrapping sum (wrapping_add is associative mod
+    /// 2^64, so chunk grouping can't change the result) — without the cold Vec.
+    #[must_use]
+    pub fn all_valid_i64_chunk_sum(&self) -> Option<i64> {
+        if self.dtype != DType::Int64 || !self.validity.all() {
+            return None;
+        }
+        let chunks = self.values.int64_chunks_ref()?;
+        let mut total: i64 = 0;
+        for chunk in chunks {
+            for &x in chunk.as_slice() {
+                total = total.wrapping_add(x);
+            }
+        }
+        Some(total)
+    }
+
+    /// Min/max of an all-valid Int64 concat output via in-place chunk fold
+    /// (order-independent — `i64::min`/`max` is associative+commutative — so
+    /// bit-identical to the materialized reduction). `None` if empty/non-chunked.
+    #[must_use]
+    pub fn all_valid_i64_chunk_extreme(&self, want_max: bool) -> Option<i64> {
+        if self.dtype != DType::Int64 || !self.validity.all() {
+            return None;
+        }
+        let chunks = self.values.int64_chunks_ref()?;
+        let mut best: Option<i64> = None;
+        for chunk in chunks {
+            for &x in chunk.as_slice() {
+                best = Some(match best {
+                    None => x,
+                    Some(b) => {
+                        if want_max {
+                            b.max(x)
+                        } else {
+                            b.min(x)
+                        }
+                    }
+                });
+            }
+        }
+        best
     }
 
     /// Matches `pd.Series.sum()` in skipna=True mode via fp-types::nansum.

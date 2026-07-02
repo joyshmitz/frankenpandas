@@ -12171,12 +12171,29 @@ impl Column {
             if validity.all() && !data.iter().any(|d| d.is_nan()) {
                 return Ok(self.clone());
             }
-            let mut out = Vec::with_capacity(data.len());
-            for (i, &d) in data.iter().enumerate() {
-                if validity.get(i) && !d.is_nan() {
-                    out.push(d);
+            // Iterate the PACKED validity words instead of `validity.get(i)` per
+            // element (a ~4-branch, non-inlined call ×n): an all-invalid word fills
+            // 64 slots with `fv` outright; an all-valid word copies its 64 data
+            // slots (still NaN-checked — a valid-bit NaN counts as missing per
+            // Scalar::is_missing, so it takes `fv`); a partial word tests only its
+            // bits. Bit-identical to the `validity.get(i) && !d.is_nan()` select.
+            let n = data.len();
+            let words = validity.packed_words_for_scan();
+            let mut out = Vec::with_capacity(n);
+            for (w, &word) in words.iter().enumerate() {
+                let base = w * 64;
+                let upto = 64.min(n - base);
+                if word == 0 {
+                    out.extend(std::iter::repeat(*fv).take(upto));
                 } else {
-                    out.push(*fv);
+                    for b in 0..upto {
+                        let d = data[base + b];
+                        if (word >> b) & 1 == 1 && !d.is_nan() {
+                            out.push(d);
+                        } else {
+                            out.push(*fv);
+                        }
+                    }
                 }
             }
             // Output is all-valid and NaN-free (present non-NaN values or the

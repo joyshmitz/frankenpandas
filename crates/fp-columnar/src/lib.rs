@@ -12912,6 +12912,43 @@ impl Column {
         }
     }
 
+    /// Σ(v−mean)² over an all-valid Float64 concat output, folding each chunk
+    /// slice in place in 0..n order — bit-identical to the materialized
+    /// `Σ(v−mean)²` second pass in `Series::var` (same values, order, 0.0 seed),
+    /// without the cold materialization. Completes the concat→reduce vein (var/std).
+    #[must_use]
+    pub fn all_valid_f64_chunk_sq_dev_sum(&self, mean: f64) -> Option<f64> {
+        if self.dtype != DType::Float64 || !self.validity.all() {
+            return None;
+        }
+        let chunks = self.values.float64_chunks_ref()?;
+        let mut s = 0.0_f64;
+        for chunk in chunks {
+            for &v in chunk.as_slice() {
+                let d = v - mean;
+                s += d * d;
+            }
+        }
+        Some(s)
+    }
+
+    /// Int64 sibling of `all_valid_f64_chunk_sq_dev_sum` (`(v as f64 − mean)²`).
+    #[must_use]
+    pub fn all_valid_i64_chunk_sq_dev_sum(&self, mean: f64) -> Option<f64> {
+        if self.dtype != DType::Int64 || !self.validity.all() {
+            return None;
+        }
+        let chunks = self.values.int64_chunks_ref()?;
+        let mut s = 0.0_f64;
+        for chunk in chunks {
+            for &v in chunk.as_slice() {
+                let d = v as f64 - mean;
+                s += d * d;
+            }
+        }
+        Some(s)
+    }
+
     /// Matches `pd.Series.sum()` in skipna=True mode via fp-types::nansum.
     /// Empty column returns 0.0 (matching pandas).
     #[must_use]

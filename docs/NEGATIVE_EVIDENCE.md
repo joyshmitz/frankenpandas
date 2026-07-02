@@ -8318,3 +8318,23 @@ bench 5M Float64 20%-null, best-of-6, pandas 2.2.3:
 | `Series.shift` nullable | 440.2ms | 39.7ms | 11.1x | 0.091x -> 1.01x parity (pandas 39.9ms) |
 
 Removes an 11x-slower catastrophic defect (flip to parity). fp-frame lib 3109/0; conformance 1596 packets green.
+
+### 2026-07-01 BlackThrush — Series.cumprod (non-groupby) on nullable Float64: 0.103x LOSS (9.7x slower) -> 1.35x WIN
+Odd asymmetry: non-groupby Series cumsum/cummin/cummax on a nullable f64 column WIN (2.0-2.3x) but `cumprod` was a
+LOSS (2M 20%-null: fp 165ms vs pandas 17ms = 0.103x, 9.7x slower). CAUSE: cumsum has a nullable Float64 typed path
+(s2i37) but cumprod, cummin, cummax only had all-valid Int64/Float64 paths — a nullable f64 column fell to cumprod's
+generic `.values()` Scalar loop. FIX: added the nullable Float64 fast path to cumprod (skipna prefix product over
+&[f64]+validity; present multiplies acc and outputs it, missing outputs missing without advancing acc). Crucially, since
+cumprod's acc can overflow to inf then a present 0.0 gives `inf*0 = NaN`, the bit is cleared when acc goes NaN — matching
+the generic `Float64(NaN)`->from_values->missing. Bit-identical, verified vs pandas 2.2.3 (missing-skip AND the
+inf/NaN overflow tail EXACT: [1e200, inf, NaN, NaN]).
+
+bench 2M Float64 20%-null, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `Series.cumprod` nullable | 164.9ms | 12.6ms | 13x | 0.103x -> 1.35x WIN (pandas 17.0ms) |
+
+FLIPS LOSS->WIN. fp-frame lib 3109/0; conformance 1596 packets green. (cummin nullable confirmed already WIN 2.0x.)
+OPEN (surfaced, next lever): NON-groupby whole-DataFrame df.shift/df.diff/df.cumsum on nullable f64 cols are LOSSES
+(2M×3: 0.12x/0.16x/0.45x) — the DataFrame-level per-column path materializes Scalars; needs per-column typed dispatch to
+the nullable kernels (df.shift -> the Series nullable shift path; df.diff/cumsum -> nullable typed).

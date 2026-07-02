@@ -16978,12 +16978,20 @@ impl Column {
         // turns a present (non-NaN, valid) value into NaN, so the NaN set == the
         // original missing set.
         if self.dtype == DType::Float64
-            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+            && let Some((data, _)) = self.as_f64_slice_with_validity()
         {
-            let out: Vec<f64> = (0..data.len())
-                .map(|i| if validity.get(i) { data[i].abs() } else { f64::NAN })
-                .collect();
-            return Ok(Self::from_f64_values(out));
+            // abs PRESERVES missingness exactly (|present| is never NaN —
+            // |finite|=finite, |±inf|=+inf — and a missing slot stays missing), so
+            // OUTPUT validity == INPUT validity. Like the round fix: (1) drop the
+            // per-element `validity.get(i)` branch — abs EVERY slot over the raw
+            // &[f64] (a masked slot's datum abs's to a finite value the mask then
+            // hides), giving a branch-free vectorizable + parallel map; (2) reuse
+            // the input mask via `from_f64_values_with_validity` instead of writing
+            // NaN and having `from_f64_values` RE-SCAN the output to rebuild it.
+            // Bit-identical: valid slots use the SAME `data[i].abs()`; missing
+            // slots view as `missing_for_dtype(Float64)` either way.
+            let out = par_map_vec_f64(data.len(), |i| data[i].abs());
+            return Ok(Self::from_f64_values_with_validity(out, self.validity.clone()));
         }
 
         let mut out = Vec::with_capacity(self.values.len());

@@ -8406,3 +8406,20 @@ FLIPS LOSS->WIN. The full NON-groupby DataFrame nullable-f64 transform surface (
 is now dense. The surfaced Column::clone de-typing blocker is fully worked around at the DataFrame transform layer without
 touching clone. fp-frame lib 3109/0. Remaining nullable-transform gap: grouped DataFrameGroupBy (already 0.8-1.35x from
 7aa978dec; residual is the transform_dense_gids gid_per_row build).
+
+### 2026-07-01 BlackThrush — DataFrameGroupBy shift/diff by-key path: shift 0.50x LOSS -> 1.19-2.23x WIN (skip gid_per_row)
+The residual on grouped DataFrame transforms (my 7aa978dec fix left dfgb.shift at 0.50x @card=1000 / 0.94x @card=100):
+`try_shift_dense`/`try_diff_dense` always called `transform_dense_gids()`, building+reading an n-element `gid_per_row`
+Vec. FIX: a by-key fast path for a SINGLE bounded-Int64 key — index each per-group ring by the key's dense offset
+`(key-min)` DIRECTLY (reusing the SeriesGroupBy `dense_groupby_{shift,diff}{,_nullable}_f64_by_key` kernels), skipping
+`gid_per_row` entirely; multi-key / non-bounded keys keep the gid layout. Bit-identical (verified vs pandas 2.2.3:
+grouped shift(1) on a nullable-col frame EXACT). fp-frame lib 3109/0; conformance 1596 packets green.
+
+bench 2M×2 Float64 20%-null cols, i64 key, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `dfgb.shift` card=1000 | 53.7ms | 22.4ms | 2.4x | 0.50x -> 1.19x WIN (pandas 26.6ms) |
+| `dfgb.shift` card=100  | 52.4ms | 22.0ms | 2.4x | 0.94x -> 2.23x WIN (pandas 49.1ms) |
+
+dfgb.shift FLIPS LOSS->WIN; dfgb.diff (already 1.33x via gid) also now skips gid_per_row. Remaining grouped residual:
+dfgb.cumsum (0.73-0.84x — try_cum_dense still uses gid_per_row; needs a by-key cum kernel, a small follow-up).

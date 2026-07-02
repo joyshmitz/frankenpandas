@@ -8856,9 +8856,19 @@ impl Column {
             }
 
             if let Some(data) = self.take_cached_all_valid_float64_positions(positions) {
+                // MOVE the freshly-gathered Vec<f64> into the owned backing instead
+                // of `Arc::<[f64]>::from(Vec)` (a 16 MB copy-on-produce — the
+                // [[f64-arc-copy-on-produce]] tax; col-level take of a 2M f64 was
+                // ~21 ms of which the copy + Vec churn dominated a 5 ms gather).
+                // Bit-identical: `LazyAllValidFloat64Vec` is all-valid Float64 and
+                // `as_f64_slice`/`values()` materialize the same slice + Scalars as
+                // `LazyAllValidFloat64`. Only the SCATTERED gather switches — the
+                // contiguous `float64_arc_view_source` / strided views above keep the
+                // `Arc<[f64]>` backing (their zero-copy row-range views need it, and a
+                // scattered result can't be viewed anyway).
                 return Self {
                     dtype: self.dtype,
-                    values: ScalarValues::lazy_all_valid_float64(data),
+                    values: ScalarValues::lazy_all_valid_float64_owned(data),
                     validity: ValidityMask::all_valid(n),
                     data: None,
                 };
@@ -20119,11 +20129,14 @@ mod tests {
         let positions = [2, 0, 1, 2];
         let gathered = column.take_positions(&positions);
 
+        // A scattered Float64 gather now MOVES its freshly-built Vec into the
+        // owned `LazyAllValidFloat64Vec` backing (no `Arc::<[f64]>::from` copy —
+        // [[f64-arc-copy-on-produce]]); it still defers Scalar materialization.
         assert!(
-            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64 { .. }),
-            "Float64 gather should defer scalar materialization"
+            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64Vec { .. }),
+            "Float64 scattered gather should defer scalar materialization (owned-move backing)"
         );
-        if let ScalarValues::LazyAllValidFloat64 { data, values, .. } = &gathered.values {
+        if let ScalarValues::LazyAllValidFloat64Vec { data, values, .. } = &gathered.values {
             assert_eq!(
                 data.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
                 vec![
@@ -20152,10 +20165,10 @@ mod tests {
 
         assert_eq!(gathered.values(), expected.values());
         assert!(
-            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64 { .. }),
-            "Float64 gather should stay lazy after read"
+            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64Vec { .. }),
+            "Float64 gather should stay lazy (owned-move backing) after read"
         );
-        if let ScalarValues::LazyAllValidFloat64 { values, .. } = &gathered.values {
+        if let ScalarValues::LazyAllValidFloat64Vec { values, .. } = &gathered.values {
             assert!(values.get().is_some());
         }
         assert_eq!(gathered.validity(), expected.validity());
@@ -20428,11 +20441,13 @@ mod tests {
             .reindex_by_positions(&positions)
             .expect("all-present reindex should gather");
 
+        // Scattered all-present reindex gathers through the same owned-move path
+        // as take_positions (no Arc<[f64]> copy); still defers materialization.
         assert!(
-            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64 { .. }),
-            "all-present Float64 reindex should defer scalar materialization"
+            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64Vec { .. }),
+            "all-present Float64 reindex should defer scalar materialization (owned-move backing)"
         );
-        if let ScalarValues::LazyAllValidFloat64 { data, values, .. } = &gathered.values {
+        if let ScalarValues::LazyAllValidFloat64Vec { data, values, .. } = &gathered.values {
             assert_eq!(
                 data.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
                 vec![

@@ -8212,3 +8212,25 @@ bench 2M Float64 value, i64 key, best-of-6, pandas 2.2.3:
 FLIPS LOSS->WIN (was fragile near-parity: 0.75x at card=100). fp-frame lib 3109/0; conformance 1596 packets green.
 NOTE: fp gives NaN where pandas gives inf for a prev==0 divisor — a PRE-EXISTING generic-path parity difference (the
 EPSILON guard predates this change), NOT introduced here; the dense path reproduces it exactly.
+
+### 2026-07-01 BlackThrush — SeriesGroupBy.shift on a NULLABLE Float64 column: 0.053x LOSS (18.8x slower) -> 1.28x WIN (nullable dense path)
+Nullable-value groupby-transform survey (20%-null f64, 2M) found gb.shift a CATASTROPHIC loss (card=100: fp 295ms vs
+pandas 15.7ms = 0.053x, 18.8x slower) — the dense `dense_groupby_shift_f64_by_key` fast path gates on `as_f64_slice`
+(no-missing), so a column WITH nulls fell to the generic per-group Scalar gather. (gb.ffill/bfill are also losses on
+nullable — 0.53x — same generic path; separate follow-up, different fill semantics.)
+
+FIX: `dense_groupby_shift_nullable_f64{,_by_key}` — shift the raw &[f64] + validity `periods` rows back within each group
+via a per-group ring buffer carrying (datum, valid), CARRYING the source's missing-ness (a shifted-in first-`periods`
+position is missing; a shifted value that was itself missing stays missing). Wired for positive periods + Float64 (via
+as_f64_slice_with_validity, which the all-valid path's as_f64_slice gate misses) + dense key. Bit-identical to the
+generic `vals[src].clone()` shift for a Float64 column (present source → its datum; missing source → missing; valid
+slots non-NaN by construction). Verified vs pandas 2.2.3 (nullable groups, periods 1 AND 2 EXACT).
+
+bench 2M Float64 20%-null value, i64 key, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `gb.shift` card=100  | 295.4ms | 12.3ms | 24x | 0.053x -> 1.28x WIN (pandas 15.7ms) |
+| `gb.shift` card=1000 | 309.5ms | 12.1ms | 26x | 0.060x -> 1.52x WIN (pandas 18.4ms) |
+
+FLIPS a 18.8x LOSS -> WIN. fp-frame lib 3109/0; conformance 1596 packets green. OPEN (same category, next lever):
+gb.ffill/bfill on nullable f64 (0.53x) — need forward/backward-fill dense kernels carrying validity.

@@ -12875,6 +12875,43 @@ impl Column {
         best
     }
 
+    /// Min/max of an all-valid Float64 concat output via in-place chunk fold,
+    /// replicating `Series::max`/`min`'s EXACT reduction — `if v > result`
+    /// (seed −∞) / `if v < result` (seed +∞), NOT `f64::max`/`min` (which would
+    /// flip ±0.0) — in 0..n order, so the ±0.0-first-seen tie is preserved
+    /// bit-for-bit. Chunks are all-valid (no NaN), so no missing/NaN branch.
+    /// `None` when empty/non-chunked (caller keeps its normal empty handling).
+    #[must_use]
+    pub fn all_valid_f64_chunk_extreme(&self, want_max: bool) -> Option<f64> {
+        if self.dtype != DType::Float64 || !self.validity.all() {
+            return None;
+        }
+        let chunks = self.values.float64_chunks_ref()?;
+        let mut result = if want_max {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        let mut any = false;
+        for chunk in chunks {
+            for &v in chunk.as_slice() {
+                any = true;
+                if want_max {
+                    if v > result {
+                        result = v;
+                    }
+                } else if v < result {
+                    result = v;
+                }
+            }
+        }
+        if any {
+            Some(result)
+        } else {
+            None
+        }
+    }
+
     /// Matches `pd.Series.sum()` in skipna=True mode via fp-types::nansum.
     /// Empty column returns 0.0 (matching pandas).
     #[must_use]

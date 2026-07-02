@@ -12985,6 +12985,64 @@ impl Column {
         Some(p)
     }
 
+    /// Argmax/argmin (first-occurrence index) over an all-valid Float64 concat
+    /// output, folding chunks in place. BIT-IDENTICAL to running
+    /// `f64_argmax_first_index`/`_min` on the materialized buffer: that routine
+    /// keeps an 8-lane running extreme where `lane = position % 8`, so iterating
+    /// the chunks in 0..n order and updating `lane[pos % 8]` reproduces the exact
+    /// same per-lane state, and the identical cross-lane reduction (max value,
+    /// smallest index on ties = first occurrence) yields the same index — without
+    /// materializing the cold buffer. `None` for empty/non-chunked.
+    #[must_use]
+    pub fn all_valid_f64_chunk_argextreme(&self, want_max: bool) -> Option<usize> {
+        if self.dtype != DType::Float64 || !self.validity.all() {
+            return None;
+        }
+        let chunks = self.values.float64_chunks_ref()?;
+        let seed = if want_max {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        let mut lane_values = [seed; 8];
+        let mut lane_indices = [0_usize; 8];
+        let mut pos = 0_usize;
+        for chunk in chunks {
+            for &v in chunk.as_slice() {
+                let lane = pos & 7;
+                let better = if want_max {
+                    v > lane_values[lane]
+                } else {
+                    v < lane_values[lane]
+                };
+                if better {
+                    lane_values[lane] = v;
+                    lane_indices[lane] = pos;
+                }
+                pos += 1;
+            }
+        }
+        if pos == 0 {
+            return None;
+        }
+        let mut best_value = lane_values[0];
+        let mut best_index = lane_indices[0];
+        for lane in 1..8 {
+            let value = lane_values[lane];
+            let index = lane_indices[lane];
+            let better = if want_max {
+                value > best_value
+            } else {
+                value < best_value
+            };
+            if better || (value == best_value && index < best_index) {
+                best_value = value;
+                best_index = index;
+            }
+        }
+        Some(best_index)
+    }
+
     /// Matches `pd.Series.sum()` in skipna=True mode via fp-types::nansum.
     /// Empty column returns 0.0 (matching pandas).
     #[must_use]

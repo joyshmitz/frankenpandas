@@ -18979,6 +18979,25 @@ impl Column {
             return Ok(Self::from_f64_values_owned(out));
         }
 
+        // Nullable Float64 fast path (corr/round/abs reuse-validity vein): the
+        // all-valid `as_f64_slice` above bails on ANY missing, so a nullable
+        // Float64 column fell to the per-element `values()` Scalar loop below.
+        // clip PRESERVES missingness exactly (clamp of a present finite/inf value
+        // is never NaN — bounds are NaN-filtered — and a missing slot stays
+        // missing), so OUTPUT validity == INPUT validity: clamp EVERY slot over the
+        // raw &[f64] (a masked slot's datum clamps harmlessly, the mask hides it)
+        // in parallel, and reuse the input mask via `from_f64_values_with_validity`
+        // — no `Vec<Scalar>` materialization, no NaN rescan. Bit-identical to the
+        // loop: present ⇒ same lower-then-upper clamp on `data[i]`; missing ⇒
+        // `missing_for_dtype(Float64)` either way. Unlike abs/round, pandas' clip is
+        // itself bandwidth-bound (~8.7ms/2M), so this flips a 0.93× near-loss.
+        if self.dtype == DType::Float64
+            && let Some((data, _)) = self.as_f64_slice_with_validity()
+        {
+            let out = par_map_vec_f64(data.len(), |i| clamp(data[i]));
+            return Ok(Self::from_f64_values_with_validity(out, self.validity.clone()));
+        }
+
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {

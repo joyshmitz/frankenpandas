@@ -8423,3 +8423,21 @@ bench 2M×2 Float64 20%-null cols, i64 key, best-of-6, pandas 2.2.3:
 
 dfgb.shift FLIPS LOSS->WIN; dfgb.diff (already 1.33x via gid) also now skips gid_per_row. Remaining grouped residual:
 dfgb.cumsum (0.73-0.84x — try_cum_dense still uses gid_per_row; needs a by-key cum kernel, a small follow-up).
+
+### 2026-07-01 BlackThrush — DataFrameGroupBy cumsum/cumprod/cummin/cummax by-key path: 0.73-0.84x LOSS -> 1.40-1.58x WIN (skip gid_per_row)
+The last grouped-transform residual (dfgb.cumsum 0.73x @card=100 / 0.84x @card=1000): `try_cum_dense` always built the
+n-element `gid_per_row` Vec via `transform_dense_gids`. FIX: a by-key fast path (sister of the shift/diff by-key) — a
+single bounded-Int64 key folds each per-group accumulator by the key's dense offset `(key-min)` directly (nullable via
+the new `dense_groupby_cum_nullable_f64_by_key`, all-valid via the inline fold + `build` MOVE), skipping gid_per_row;
+multi-key / non-bounded keys keep the gid layout. Bit-identical (verified vs pandas 2.2.3: grouped cumsum on a nullable
+frame EXACT). fp-frame lib 3109/0; conformance 1596 packets green.
+
+bench 2M×2 Float64 20%-null cols, i64 key, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `dfgb.cumsum` card=100  | 39.5ms | 20.6ms | 1.9x | 0.73x -> 1.40x WIN (pandas 28.8ms) |
+| `dfgb.cumsum` card=1000 | 38.7ms | 20.6ms | 1.9x | 0.84x -> 1.58x WIN (pandas 32.4ms) |
+
+FLIPS LOSS->WIN (cumprod/cummin/cummax share try_cum_dense). This CLOSES the grouped-transform residual: the ENTIRE
+nullable-f64 groupby transform surface (SeriesGroupBy + DataFrameGroupBy shift/diff/cumsum/cumprod/cummin/cummax/ffill/
+bfill/pct_change) is now dense AND by-key where a single bounded-Int64 key applies.

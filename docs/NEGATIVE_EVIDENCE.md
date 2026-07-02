@@ -8338,3 +8338,28 @@ FLIPS LOSS->WIN. fp-frame lib 3109/0; conformance 1596 packets green. (cummin nu
 OPEN (surfaced, next lever): NON-groupby whole-DataFrame df.shift/df.diff/df.cumsum on nullable f64 cols are LOSSES
 (2M×3: 0.12x/0.16x/0.45x) — the DataFrame-level per-column path materializes Scalars; needs per-column typed dispatch to
 the nullable kernels (df.shift -> the Series nullable shift path; df.diff/cumsum -> nullable typed).
+
+### 2026-07-01 BlackThrush — BLOCKER SURFACED: DataFrame nullable numeric-column transforms slow (0.12-0.45x) — Column::clone de-types via a deliberate NullKind-preserving invariant
+Non-groupby whole-DataFrame df.shift/diff/cumsum/cumprod on nullable Float64 columns are LOSSES (2M×3, vs pandas 2.2.3):
+df.shift 245ms/0.119x, df.diff 253ms/0.155x, df.cumsum 235ms/0.449x (the Series-level ops are ALL fast — the DataFrame
+path is the overhead).
+
+ROOT CAUSE (pinned): `DataFrame` transforms go through `apply_per_column` -> `column_as_series` which does
+`col.clone()`. `Column::clone` sets `data: None`, DROPPING the cached `ColumnData::Float64` Arc buffer. A nullable
+Float64 column from `from_values` carries its typed-ness in `self.data` (with `values: Eager`), NOT in a lazy `values`
+variant — so after clone `as_f64_slice_with_validity` returns None and the per-column Series op falls to the generic
+per-element Scalar path (~10x). Verified: orig column `as_f64_slice_with_validity` Some=true, its `.clone()` Some=false.
+
+WHY NOT A SIMPLE FIX (attempted + REVERTED): carrying the Arc-backed `data` through clone (cheap bump) DID fix it
+(df.cumsum 0.449x -> 2.79x WIN, df.shift/diff 6x fp-side) BUT broke 3 fp-columnar unit tests that pin the intended
+invariant: clone drops `data`, and `clone_dense_values_from_cache` keeps NULLABLE columns EAGER on purpose — to preserve
+the distinction between `Null(NullKind::NaN)` and `Null(NullKind::Null)` (and NaT), which the only nullable typed backing
+(`LazyNullableFloat64`, carrying just (f64 data, validity)) would COLLAPSE. So a nullable Float64 column genuinely cannot
+be represented typed without losing NullKind. Reverted (fp-columnar 467/0 restored).
+
+SAFE FIX DIRECTION (next session, not landed): give the DataFrame transforms a DIRECT-column-access path that reads
+`self.columns[name].as_f64_slice_with_validity()` on the STORED (still-typed) column and runs the kernel WITHOUT the
+de-typing `column_as_series` clone. Safe for cum*/diff (their generic path already NORMALIZES every missing to
+`Null(NullKind::NaN)`, so a typed output matches bit-for-bit); shift is the exception (it CARRIES the source NullKind via
+`vals[src].clone()`, so a typed shift would need to preserve NullKind — or accept the Float64-missing==NaN convention).
+Alternatively: a NullKind-preserving nullable typed backing. Series-level ops are unaffected (already fast).

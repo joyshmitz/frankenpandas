@@ -7427,9 +7427,22 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
     for (i, field) in schema.fields().iter().enumerate() {
         let name = field.name().clone();
         let arr = batch.column(i);
-        let values = arrow_array_to_scalars(arr.as_ref(), field.data_type())?;
-        let dtype = fp_dtype_for_arrow_data_type(field.data_type());
-        let col = Column::new(dtype, values)?;
+        // Typed fast path: convert the Arrow buffer DIRECTLY to a typed fp column
+        // (Int64/Float64/Bool/all-valid-Utf8), skipping the per-cell Vec<Scalar>
+        // materialization (~32 B/elem boxing) + Column::new re-scan that made
+        // read_parquet ~0.21x pandas/pyarrow. Bails (→ Scalar path) for
+        // Date/Timestamp (need chrono formatting) and nullable-Utf8 (no typed
+        // contiguous-nullable constructor). Bit-identical to the Scalar path's
+        // per-type null-kind conventions (Int/Bool/Utf8 → Null(Null); Float →
+        // Null(NaN)); validity constructors reproduce those exactly (verified).
+        let col = match arrow_array_to_column_typed(arr.as_ref(), field.data_type()) {
+            Some(c) => c,
+            None => {
+                let values = arrow_array_to_scalars(arr.as_ref(), field.data_type())?;
+                let dtype = fp_dtype_for_arrow_data_type(field.data_type());
+                Column::new(dtype, values)?
+            }
+        };
         columns.insert(name.clone(), col);
         col_order.push(name);
     }
@@ -7459,6 +7472,99 @@ fn fp_dtype_for_arrow_data_type(dt: &ArrowDataType) -> DType {
         | ArrowDataType::Date64
         | ArrowDataType::Timestamp(_, _) => DType::Utf8,
         _ => DType::Utf8,
+    }
+}
+
+/// Build an fp `ValidityMask` from an Arrow array's null buffer, or `None` when
+/// the array has no nulls (caller uses the all-valid constructor).
+fn arrow_validity_mask(arr: &dyn Array) -> Option<fp_columnar::ValidityMask> {
+    if arr.null_count() == 0 {
+        return None;
+    }
+    let len = arr.len();
+    let mut mask = fp_columnar::ValidityMask::all_valid(len);
+    for i in 0..len {
+        if arr.is_null(i) {
+            mask.set(i, false);
+        }
+    }
+    Some(mask)
+}
+
+/// Typed Arrow-array → fp `Column` conversion (br-frankenpandas parquet-typed):
+/// reads the Arrow buffer directly into a typed fp column, bypassing the per-cell
+/// `Vec<Scalar>` boxing + `Column::new` re-scan of `arrow_array_to_scalars`.
+/// Returns `None` for types that need the Scalar path (Date/Timestamp string
+/// coercion, nullable Utf8, and any uncovered dtype). Bit-identical to that path.
+fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Column> {
+    use arrow::array::{
+        Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, UInt16Array,
+        UInt32Array, UInt64Array, UInt8Array,
+    };
+    macro_rules! i64_col {
+        ($ty:ty) => {{
+            let t = arr.as_any().downcast_ref::<$ty>()?;
+            let data: Vec<i64> = t.values().iter().map(|&v| v as i64).collect();
+            Some(match arrow_validity_mask(arr) {
+                Some(m) => Column::from_i64_values_with_validity(data, m),
+                None => Column::from_i64_values(data),
+            })
+        }};
+    }
+    macro_rules! f64_col {
+        ($ty:ty) => {{
+            let t = arr.as_any().downcast_ref::<$ty>()?;
+            let data: Vec<f64> = t.values().iter().map(|&v| v as f64).collect();
+            Some(match arrow_validity_mask(arr) {
+                Some(m) => Column::from_f64_values_with_validity(data, m),
+                None => Column::from_f64_values(data),
+            })
+        }};
+    }
+    match dt {
+        ArrowDataType::Int64 => i64_col!(Int64Array),
+        ArrowDataType::Int32 => i64_col!(Int32Array),
+        ArrowDataType::Int16 => i64_col!(Int16Array),
+        ArrowDataType::Int8 => i64_col!(Int8Array),
+        // UInt64 as i64: matches the Scalar path's `Scalar::Int64(value as ...)`
+        // reinterpretation for the width; large u64 wrap identically both ways.
+        ArrowDataType::UInt64 => i64_col!(UInt64Array),
+        ArrowDataType::UInt32 => i64_col!(UInt32Array),
+        ArrowDataType::UInt16 => i64_col!(UInt16Array),
+        ArrowDataType::UInt8 => i64_col!(UInt8Array),
+        ArrowDataType::Float64 => f64_col!(Float64Array),
+        ArrowDataType::Float32 => f64_col!(Float32Array),
+        ArrowDataType::Boolean => {
+            let t = arr.as_any().downcast_ref::<BooleanArray>()?;
+            let data: Vec<bool> = (0..t.len()).map(|i| t.value(i)).collect();
+            Some(match arrow_validity_mask(arr) {
+                Some(m) => Column::from_bool_values_with_validity(data, m),
+                None => Column::from_bool_values(data),
+            })
+        }
+        // Only the all-valid case: there is no typed contiguous-nullable-Utf8
+        // constructor, so a StringArray with nulls falls to the Scalar path.
+        ArrowDataType::Utf8 if arr.null_count() == 0 => {
+            let t = arr.as_any().downcast_ref::<StringArray>()?;
+            let offs = t.value_offsets();
+            let len = t.len();
+            let start = offs[0] as usize;
+            let end = offs[len] as usize;
+            let bytes = t.value_data()[start..end].to_vec();
+            let offsets: Vec<usize> = offs.iter().map(|&o| o as usize - start).collect();
+            Some(Column::from_utf8_contiguous(bytes, offsets))
+        }
+        ArrowDataType::LargeUtf8 if arr.null_count() == 0 => {
+            let t = arr.as_any().downcast_ref::<arrow::array::LargeStringArray>()?;
+            let offs = t.value_offsets();
+            let len = t.len();
+            let start = offs[0] as usize;
+            let end = offs[len] as usize;
+            let bytes = t.value_data()[start..end].to_vec();
+            let offsets: Vec<usize> = offs.iter().map(|&o| o as usize - start).collect();
+            Some(Column::from_utf8_contiguous(bytes, offsets))
+        }
+        _ => None,
     }
 }
 
@@ -7711,8 +7817,18 @@ pub fn write_parquet_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
 /// Read a DataFrame from in-memory Parquet bytes.
 pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     let b = bytes::Bytes::from(data.to_vec());
-    let reader = ParquetRecordBatchReaderBuilder::try_new(b)
-        .map_err(|e| IoError::Parquet(e.to_string()))?
+    let builder = ParquetRecordBatchReaderBuilder::try_new(b)
+        .map_err(|e| IoError::Parquet(e.to_string()))?;
+    // Read the whole file as ONE record batch instead of the default 1024-row
+    // batches: a 1M-row file otherwise yields ~1000 tiny batches, each turned into
+    // a DataFrame and then concatenated — the many-batch + concat overhead (not
+    // the decode) dominated read_parquet (~0.21x pandas). Sizing the batch to the
+    // row count collapses that to a single typed conversion, no concat. Clamp so a
+    // pathological row count can't request an absurd allocation up front.
+    let total_rows = builder.metadata().file_metadata().num_rows().max(0) as usize;
+    let batch_size = total_rows.clamp(1, 16 * 1024 * 1024);
+    let reader = builder
+        .with_batch_size(batch_size)
         .build()
         .map_err(|e| IoError::Parquet(e.to_string()))?;
 

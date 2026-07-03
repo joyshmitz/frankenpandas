@@ -8872,3 +8872,13 @@ bench 1M rows, 5 Float64 cols, aligned bool cond, best-of-6, pandas 2.2.3:
 | `df.where(cond_df, other_df)` | 333ms | 8.85ms | 0.12x -> 4.59x WIN (pandas 40.7ms) |
 
 FLIPS LOSS->WIN. mask_df_other (the inverse) has the identical Scalar per-cell loop and is the queued sibling.
+
+### 2026-07-03 BlackThrush — df.mask(cond_df, other_df) typed select (LOSS -> 4.58x WIN)
+mask_df_other (df.mask with DataFrame cond + DataFrame other) is the inverse of where_cond_df and had the identical per-cell Scalar select (333ms class). Added the same typed select fast path with the branch swapped (cond True -> other, False -> self). Bit-identical: VERIFIED vs pandas 2.2.3 on a 3000-row df.mask with NULLS in self+other + bool cond, a/b EXACT. fp-frame 3109/0.
+
+bench 1M rows, 5 Float64 cols, aligned bool cond, best-of-6, pandas 2.2.3:
+| op | before (Scalar per-cell) | after (typed select) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `df.mask(cond_df, other_df)` | ~330ms | 8.34ms | ~0.12x -> 4.58x WIN (pandas 38.2ms) |
+
+FLIPS LOSS->WIN. Completes the where/mask DataFrame-other typed-select pair (with 4.59x where sibling d8399b1b7).

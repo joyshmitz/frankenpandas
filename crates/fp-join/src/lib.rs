@@ -8961,6 +8961,18 @@ impl MergeAsofOptions {
 }
 
 fn asof_numeric_values(column: &Column, side: &str, on: &str) -> Result<Vec<f64>, JoinError> {
+    // Typed fast path: an all-valid Int64/Float64 key column reads the raw slice
+    // directly, skipping the per-cell values() Scalar materialization + to_f64
+    // dispatch (merge_asof key extraction was ~0.83x pandas). Bit-identical:
+    // as_i64_slice/as_f64_slice are all-valid (no missing → no NaN-fill branch),
+    // and Scalar::Int64(v).to_f64() == v as f64, Scalar::Float64(v).to_f64() == v.
+    // Nullable / Timedelta64 / Datetime64 keys fall through to the Scalar loop.
+    if let Some(data) = column.as_i64_slice() {
+        return Ok(data.iter().map(|&v| v as f64).collect());
+    }
+    if let Some(data) = column.as_f64_slice() {
+        return Ok(data.to_vec());
+    }
     let mut out = Vec::with_capacity(column.len());
     for value in column.values() {
         // pandas merge_asof accepts Timedelta64 (and datetime) `on` columns

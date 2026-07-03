@@ -9040,3 +9040,12 @@ FAIR bench (df.index().len(), no Scalar boxing), min-of-10, load ~12-13:
 | --- | ---: | ---: | ---: | ---: |
 | read_parquet 1M x 6 numeric | 75.3ms | 62.1ms | 32ms | 0.43x -> 0.52x |
 ~17% fp-side. Mixed (2 numeric + bool + str) measured ~48→51ms build-to-build but that is measurement/build jitter, NOT a regression: the change only makes the 2 numeric columns cheaper (move<copy) and leaves bool/str code byte-identical, so mixed cannot slow from it. Residual numeric 0.52x = the last copy (Arrow buffer -> Vec gather, unavoidable in fp's owned-buffer model) vs pyarrow zero-copy Arrow->numpy. read_parquet mixed stays a WIN (~1.0-1.1x). See [[read-parquet-scalar-batch]].
+
+### 2026-07-03 BlackThrush — merge_asof typed key extraction — LOSS 0.83x -> 1.44x WIN
+merge_asof (ordered time-series join) extracted its `on` key columns via asof_numeric_values, which iterated column.values() (a per-cell Vec<Scalar> materialization) + to_f64() per element — for BOTH left and right keys. Added a typed fast path: an all-valid Int64/Float64 key reads the raw &[i64]/&[f64] slice directly (Int64 -> v as f64, Float64 -> v — exactly what to_f64() yields for those all-valid dtypes). Nullable / Timedelta64 / Datetime64 keys keep the Scalar loop. Bit-identical: VERIFIED vs pandas 2.2.3 on backward/forward/nearest directions (5x5, incl. the leading unmatched null-fill) EXACT; fp-join 138/0.
+
+bench 1M left / 1M right, sorted i64 keys (left *3, right *2), backward, min-of-15, load ~15, pandas 2.2.3:
+| op | before (Scalar keys) | after (typed keys) | vs pandas |
+| --- | ---: | ---: | ---: |
+| `merge_asof(backward)` 1M/1M | 19.1ms | 11.1ms | 0.83x -> 1.44x WIN (pandas 15.9ms) |
+FLIPS LOSS->WIN. The 2x-1M-key Scalar materialization was ~8ms of the 19ms. Covers backward/forward/nearest (all via merge_asof_simple -> asof_numeric_values).

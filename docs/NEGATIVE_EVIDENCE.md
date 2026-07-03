@@ -8770,3 +8770,13 @@ bench 2M rows, single wide-i64 column (~n distinct), best-of-5, quiet box, panda
 | `df.drop_duplicates` 1col wide-i64 | 109.8ms | ~80ms | 0.80x -> 1.10x WIN (pandas 87.7ms) |
 
 FLIPS PARITY/LOSS->WIN. Sixth reuse of the open-addressing i64 table (duplicated/unique/nunique/isin/now df-dedup). NOTE: multi-column df.duplicated/drop_duplicates on wide-i64 ALREADY dominate pandas massively (2col dup 19x, drop 6.5x — pandas row-tuple hashing is very slow); only the single-Int64-column path had the khash floor.
+
+### 2026-07-02 BlackThrush — Series.value_counts on WIDE/high-cardinality Int64: fully-typed open-addressing tally + direct sort (LOSS -> 1.15x WIN)
+Closes the last known wide-i64 khash-floor loss. value_counts_int64_direct's dense table bails on a wide range, dropping to the generic `.values()` + ScalarKey + SipHash tally + Scalar sort/output (0.41x pandas). A first typed attempt (open-addr tally + u32-PERM stable sort) only reached 0.76x — PROFILING revealed the perm sort's cache-random `pairs[perm[i]].count` indirection cost ~50ms (NOT Index::new, which is lazy/0ms). Fix: open-addressing i64 tally (typed `(i64,u32)`, slot->payload-index, hit bumps count) + a DIRECT contiguous stable descending sort of the pairs (~6ms vs ~50ms) + direct Int64 index/counts build — no Scalar anywhere. Bit-identical: first-seen order + stable descending sort == the generic ScalarKey path (counts-dict AND descending count-sequence match pandas 2.2.3 EXACT; tie-order is fp's first-seen convention, unchanged). fp-frame 3109/0.
+
+bench 2M rows, wide-i64 (~865k distinct, *7919), best-of-5/8, quiet box, pandas 2.2.3:
+| op | before (Scalar) | typed+perm-sort | typed+direct-sort | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `Series.value_counts` wide-i64 | 327ms | 163ms (0.76x) | ~105ms | 0.41x -> ~1.15x WIN (pandas 121.7ms) |
+
+FLIPS LOSS->WIN. Phase profile (typed+direct): tally ~85ms (dominant, 2M random probes — the irreducible memory-latency floor, on par with khash), sort ~6ms, build ~10ms, Index::new ~0ms (lazy). Seventh reuse of the open-addressing i64 table. This closes the ENTIRE wide-i64 hash surface: duplicated/unique/nunique/isin/df-dedup/value_counts all now WIN (factorize/searchsorted/Index-set-ops/groupby-keys already did).

@@ -10563,6 +10563,29 @@ impl Column {
                 ValidityMask::from_words(words, n),
             ));
         }
+        // Bool null-introducing gather (sibling of the Int64 arm): a missing slot
+        // (None / out-of-range) materializes Null(NullKind::Null) = missing_for_dtype
+        // (via from_bool_values_with_validity's cleared bit), present slots the raw
+        // bool — skipping the per-row Scalar clone. Bit-identical.
+        if self.validity.all()
+            && let Some(slice) = self.as_bool_slice()
+        {
+            let mut data = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, slot) in positions.iter().enumerate() {
+                match slot {
+                    Some(idx) if *idx < slice.len() => {
+                        data.push(slice[*idx]);
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    _ => data.push(false),
+                }
+            }
+            return Ok(Self::from_bool_values_with_validity(
+                data,
+                ValidityMask::from_words(words, n),
+            ));
+        }
         // Datetime64 / Timedelta64 null-introducing gather (temporal sibling of the
         // Int64 arm): gather the raw ns by position into a typed nullable backing,
         // skipping the per-row Scalar clone + Column::new revalidation. Missing slots

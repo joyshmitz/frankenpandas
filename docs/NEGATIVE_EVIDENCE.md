@@ -9133,3 +9133,11 @@ Last untyped dtype in the scattered take_positions (behind take/iloc/sort/merge-
 | --- | ---: | ---: | ---: | ---: |
 | bool take 2M scattered | 104.9ms | 26.7ms | 6.3ms | 0.06x -> 0.24x |
 3.9x fp-side, broad. Still sub-parity: pandas numpy bool take is 1 B/elem (2 MB, 6.3ms) vs fp's scattered Vec<bool> gather + lazy backing. scattered take_positions is now typed for f64/i64/utf8/datetime/timedelta/bool — full dtype coverage.
+
+### 2026-07-03 BlackThrush — Bool typed null-fill gather in reindex_by_positions — 0.17x -> 0.52x (3.0x)
+Parallel to the bool take_positions arm: reindex_by_positions (null-introducing gather behind outer join / align / where on differing indexes / reindex) had i64/f64/utf8/datetime/timedelta arms but no Bool — a bool value column fell to the per-row Vec<Scalar::Bool> (32 B/elem). Added the Bool arm (as_bool_slice -> gather, missing -> cleared validity bit -> Null(Null), via from_bool_values_with_validity). No new variant needed. Bit-identical (in-bench value check + reindex tests 3/0 + fp-columnar 467/0).
+2M reindex half-miss, min-of-8, pandas(numpy):
+| op | before (Scalar) | after (typed) | pandas | ratio |
+| --- | ---: | ---: | ---: | ---: |
+| bool reindex 2M half-miss | 151.2ms | 50.0ms | 26.0ms | 0.17x -> 0.52x |
+3.0x fp-side. Still sub-parity (numpy bool is 1 B/elem). BOTH gather primitives (take_positions + reindex_by_positions) now typed for the FULL dtype set: f64/i64/utf8/datetime/timedelta/bool. Columnar gather surface fully typed.

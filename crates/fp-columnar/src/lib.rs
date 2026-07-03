@@ -1901,6 +1901,15 @@ enum ScalarValues {
         data: Arc<[i64]>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Owned (move-not-copy) sibling of `LazyAllValidDatetime64` — boxes a
+    /// `Vec<i64>` of nanos in an `Arc` without the `Arc::from(Vec)` alloc+memcpy,
+    /// the datetime mirror of `LazyAllValidInt64Vec`. Semantically identical (all
+    /// valid; `as_datetime64_slice`/`values()` read `&data[..]`), used by scattered
+    /// datetime gathers so `take_positions` doesn't triple memory traffic.
+    LazyAllValidDatetime64Vec {
+        data: Arc<Vec<i64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyAllValidFloat64 {
         data: Arc<[f64]>,
         all_finite: OnceLock<bool>,
@@ -2352,6 +2361,16 @@ impl ScalarValues {
 
     fn lazy_all_valid_datetime64(data: Vec<i64>) -> Self {
         Self::lazy_all_valid_datetime64_arc(Arc::from(data))
+    }
+
+    /// Move-not-copy datetime backing (the datetime sibling of
+    /// `lazy_all_valid_int64_owned`): box the owned `Vec<i64>` nanos in an `Arc`
+    /// with no element copy. Used by the scattered Datetime64 gather.
+    fn lazy_all_valid_datetime64_owned(data: Vec<i64>) -> Self {
+        Self::LazyAllValidDatetime64Vec {
+            data: Arc::new(data),
+            values: OnceLock::new(),
+        }
     }
 
     fn lazy_all_valid_datetime64_arc(data: Arc<[i64]>) -> Self {
@@ -3790,6 +3809,9 @@ impl ScalarValues {
             Self::LazyAllValidDatetime64 { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Datetime64).collect())
                 .as_slice(),
+            Self::LazyAllValidDatetime64Vec { data, values } => values
+                .get_or_init(|| data.iter().copied().map(Scalar::Datetime64).collect())
+                .as_slice(),
             Self::LazyAllValidFloat64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
                 .as_slice(),
@@ -4452,6 +4474,7 @@ impl ScalarValues {
             Self::LazyAllValidInt64Vec { data, .. } => data.len(),
             Self::LazyAllValidInt64Chunks { len, .. } => *len,
             Self::LazyAllValidDatetime64 { data, .. } => data.len(),
+            Self::LazyAllValidDatetime64Vec { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64Vec { data, .. } => data.len(),
             Self::LazyAllValidFloat64Chunks { len, .. } => *len,
@@ -4704,6 +4727,10 @@ impl Clone for ScalarValues {
             Self::LazyAllValidDatetime64 { data, .. } => {
                 Self::lazy_all_valid_datetime64_arc(Arc::clone(data))
             }
+            Self::LazyAllValidDatetime64Vec { data, .. } => Self::LazyAllValidDatetime64Vec {
+                data: Arc::clone(data),
+                values: OnceLock::new(),
+            },
             Self::LazyAllValidFloat64 {
                 data, all_finite, ..
             } => Self::lazy_all_valid_float64_arc_with_finite(
@@ -8283,6 +8310,9 @@ impl Column {
         if let ScalarValues::LazyAllValidDatetime64 { data, .. } = &self.values {
             return Some(data.as_ref());
         }
+        if let ScalarValues::LazyAllValidDatetime64Vec { data, .. } = &self.values {
+            return Some(data.as_slice());
+        }
         if let Some(ColumnData::Datetime64(data)) = &self.data {
             return Some(data.as_slice());
         }
@@ -8955,7 +8985,12 @@ impl Column {
                 for &pos in positions {
                     data.push(src[pos]);
                 }
-                return Self::from_datetime64_values(data);
+                return Self {
+                    dtype: DType::Datetime64,
+                    values: ScalarValues::lazy_all_valid_datetime64_owned(data),
+                    validity: ValidityMask::all_valid(n),
+                    data: None,
+                };
             }
 
             // Zero-copy contiguous-range view (br-frankenpandas-jbyuc.1.1.1):

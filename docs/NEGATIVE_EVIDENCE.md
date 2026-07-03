@@ -9080,3 +9080,11 @@ Column::take_positions (the gather behind Series.take / df.iloc / merge output /
 | --- | ---: | ---: | ---: | ---: |
 | datetime take 2M scattered | 146ms | 49ms | 17.3ms | 0.12x -> 0.35x |
 3x fp-side, broad (all datetime-column gathers). RESIDUAL to reach ~parity (i64 is 15ms): lazy_all_valid_datetime64 does Arc::from(Vec) = a 16MB copy (TRIPLES memory traffic: gather-write + copy-read + copy-write) where the i64 path MOVES via lazy_all_valid_int64_owned. Needs a LazyAllValidDatetime64Vec owned variant (substantial — touches every ScalarValues match arm), deferred. Timedelta64 has the same gap (no from_timedelta64_values ctor).
+
+### 2026-07-03 BlackThrush — Datetime64 gather owned (move) variant — 0.35x -> 0.84x (~parity)
+Closed the residual from 34e4374b8. The Datetime64 take arm used from_datetime64_values -> lazy_all_valid_datetime64 which does Arc::from(Vec) = a 16MB alloc+memcpy (TRIPLES traffic: gather-write + copy-read + copy-write), so datetime take was 49ms vs the i64 sibling's ~18ms despite identical gather code. Added a LazyAllValidDatetime64Vec ScalarValues variant (Arc<Vec<i64>>, the datetime mirror of LazyAllValidInt64Vec) + lazy_all_valid_datetime64_owned constructor that MOVES the gathered Vec (one Arc::new, no copy). Rust's exhaustive match flagged exactly 3 arms to extend (values/len/clone) + as_datetime64_slice; compile-safe. Bit-identical (datetime take value check + fp-columnar 467/0 + fp-frame 3109/0).
+2M scattered take, min-of-8, pandas(numpy):
+| op | copy (34e4374b8) | move (owned) | pandas | ratio |
+| --- | ---: | ---: | ---: | ---: |
+| datetime take 2M scattered | 49ms | 20.5ms | 17.3ms | 0.35x -> 0.84x |
+Now ~parity with the i64 sibling (18.2ms). Full arc: 146ms (0.12x) -> 49ms (typed gather) -> 20.5ms (move) = 0.84x. Broad — every datetime-column gather (take/iloc/merge-output/sort/loc). Timedelta64 still has the original Scalar-gather gap (no owned ctor / from_timedelta64_values).

@@ -8837,3 +8837,8 @@ bench 1M x 1M rows, 5 Float64 cols, indexes offset by 500k (1.5M union), best-of
 | `df.add` UNALIGNED (5col,1M) | 1596ms | 101.8ms | 0.07x -> 1.15x WIN (pandas 116.7ms) |
 
 FLIPS LOSS->WIN (aligned df.add was already ~parity, unchanged). Covers add/sub/mul/div/etc (all route through binary_df_op).
+
+### 2026-07-03 BlackThrush — OPEN: df.combine_first on UNALIGNED indexes 0.25x + df comparison unaligned CORRECTNESS divergence
+Two findings from probing the alignment surface after the df-arithmetic fix (9ac3bab60):
+(1) PERF (winnable, queued): df.combine_first (fp-frame ~59530) on frames with DIFFERING row indexes is 636ms vs pandas 160ms = 0.25x (4x). Same family as the df-arithmetic Scalar-align tax — combine_first aligns outer then coalesces first-non-null. FIX: mirror the binary_df_op typed unaligned path — align_union_sorted_plan + reindex_by_positions TYPED per column, then a typed first-non-null coalesce (left valid ? left : right) over the nullable slices, bypassing the Scalar align_on_index round-trip. Should flip 0.25x -> >1x.
+(2) CORRECTNESS (not perf; NOT fixed — bit-breaking): df.gt/eq/lt/etc on UNALIGNED indexes emits Null at UNMATCHED rows, but pandas .gt(other) fills the missing side with NaN and returns FALSE (bool dtype) at those rows. Verified: fp `0=NA|1=NA|2=T|3=F|4=NA|5=NA` vs pandas `0=F|1=F|2=T|3=F|4=F|5=F`. So df-comparison-unaligned is NOT a clean perf comparison (results differ); pandas' `>` operator raises on unaligned (only the .gt() method aligns). Fixing to match pandas (False at unmatched) is a golden-regen correctness change, out of scope for a perf pass. fp binary_cmp_op unaligned is ~1600ms vs pandas .gt() 85ms but the semantic mismatch makes the ratio moot until correctness is reconciled.

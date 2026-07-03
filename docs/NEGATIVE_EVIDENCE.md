@@ -8693,3 +8693,14 @@ bench 2M rows, ~1000 cats, EAGER Utf8 key, 2 nullable-Float64 value cols, best-o
 | `dfgb.mean` | 153.3ms | 46.5ms | 0.58x -> 1.89x WIN (pandas 88.2ms) |
 
 FLIPS LOSS->WIN. bounded-Int64 key + nullable-Float64 was ALREADY fast (18ms, the int64-dense path handles nullable-f64); this closes the Utf8-key sibling. REMAINING: nullable-Int64 value columns still fall to generic on ALL dense paths (dense_aggregate_emit has no as_i64_slice_with_validity branch, and the gates exclude it) — a follow-up needing an emit branch + the Int64-sum output-dtype question (Int64 vs Float64 vs the generic path).
+
+### 2026-07-02 BlackThrush — DataFrameGroupBy.count with NULLABLE numeric value columns: per-column present-count (LOSS -> 2.2-2.9x WIN)
+try_count_dense bailed on `!value_cols.iter().all(|c| !c.has_nulls())` — ANY nullable value column sent the whole `df.groupby(k).count()` to the generic build_groups path (bounded-Int64 key 0.37x pandas, eager-Utf8 key 0.57x). count is Int64-valued (no output-dtype question, unlike sum), so it's the cleanest nullable dfgb lever. Relaxed the gate to admit nullable NUMERIC columns (`as_i64_slice_with_validity` / `as_f64_slice_with_validity`; a nullable non-numeric col like Utf8/Bool still bails), then compute a PER-COLUMN count off the dense grouping try_count_dense already builds: all-valid col ⇒ group size (shared vec, as before); nullable ⇒ tally present per group (`validity.get` for Int64; `validity.get && !is_nan` for Float64, matching the generic per-row `!is_missing()`). Bit-identical: VERIFIED vs pandas 2.2.3 on bounded-Int64 AND eager-Utf8 key differentials (6000 rows, card 30, mixed nullable-Int64 + nullable-Float64 cols, group-4 fully-missing) — all 30 per-key counts EXACT both columns both keys. fp-frame 3109/0.
+
+bench 2M rows, ~1000 groups, 2 nullable value cols (Int64 + Float64), best-of-6, pandas 2.2.3:
+| op | before (generic) | after | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `dfgb.count` bounded-Int64 key | 133.8ms | 17.2ms | 0.37x -> 2.86x WIN (pandas 49.3ms) |
+| `dfgb.count` eager-Utf8 key    | 144.0ms | 36.7ms | 0.57x -> 2.22x WIN (pandas 81.7ms) |
+
+FLIPS LOSS->WIN. Complements the str-dense sum/mean nullable-f64 fix (prior entry). REMAINING dfgb nullable gap: sum/mean/etc. on nullable-INT64 value columns (dense_aggregate_emit has no as_i64_slice_with_validity branch; needs the Int64-sum output-dtype decision).

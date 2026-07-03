@@ -9117,6 +9117,24 @@ impl Column {
                 };
             }
 
+            // Bool sibling of the Int64 gather: gather the raw &[bool] by position
+            // into a typed all-valid Bool backing instead of the generic per-row
+            // Vec<Scalar::Bool> materialization (32 B/elem enum boxing vs 1 B/elem).
+            // Bit-identical: lazy_all_valid_bool materializes Scalar::Bool(data[i])
+            // exactly as the primitive path would, same all-valid mask.
+            if let Some(src) = self.as_bool_slice() {
+                let mut data = Vec::with_capacity(n);
+                for &pos in positions {
+                    data.push(src[pos]);
+                }
+                return Self {
+                    dtype: DType::Bool,
+                    values: ScalarValues::lazy_all_valid_bool(data),
+                    validity: ValidityMask::all_valid(n),
+                    data: None,
+                };
+            }
+
             // Datetime64 sibling of the Int64 gather: a Datetime64 column stores
             // its ns as an i64 backing (`as_datetime64_slice`), so gather the raw
             // ns by position into a typed Datetime64 column instead of the generic

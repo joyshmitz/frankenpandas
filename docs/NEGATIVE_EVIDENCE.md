@@ -9125,3 +9125,11 @@ df.dropna 2M (datetime + f64 @5% NaN), min-of-8: 51.8ms -> 48.3ms = ~7% (MARGINA
 
 ### 2026-07-03 BlackThrush — REJECTED (zero-gain): cut/qcut Int64 typed-input arm — cut is OUTPUT-bound
 Found an uncommitted cut/qcut Int64 typed-input fast path in the tree (as_i64_slice -> d as f64, skipping the values() Scalar materialization). A/B on cut(i64,10) 3M: OLD (generic Scalar input) 128.3ms vs NEW (typed i64 input) 129.0ms = ZERO gain (within noise). The input Scalar materialization is NOT the bottleneck — cut/qcut are bound by the Utf8 interval-STRING output (structural [[cut-structural-utf8-gap]]: pandas cut->Categorical codes, fp locked to Utf8 interval strings by FP-P2D-081, bit-locked). Both remain 0.65x pandas (129 vs 84ms). REVERTED the zero-gain change. DON'T re-try typed cut/qcut input paths — the floor is the Utf8 output, not the input. (The as_f64_slice input arm already present is likewise not the lever; only a Categorical column backing + fixture regen would move it.)
+
+### 2026-07-03 BlackThrush — Bool typed scattered gather in take_positions — 0.06x -> 0.24x (3.9x)
+Last untyped dtype in the scattered take_positions (behind take/iloc/sort/merge-output on a frame carrying a Bool value column). Bool fell to the generic per-row Vec<Scalar::Bool> (32 B/elem enum boxing) vs 1 B/elem typed. Added the Bool arm (as_bool_slice -> gather -> lazy_all_valid_bool), mirroring the Int64 arm. Bit-identical (in-bench value check + fp-columnar 467/0).
+2M scattered take, min-of-8, pandas(numpy):
+| op | before (Scalar) | after (typed) | pandas | ratio |
+| --- | ---: | ---: | ---: | ---: |
+| bool take 2M scattered | 104.9ms | 26.7ms | 6.3ms | 0.06x -> 0.24x |
+3.9x fp-side, broad. Still sub-parity: pandas numpy bool take is 1 B/elem (2 MB, 6.3ms) vs fp's scattered Vec<bool> gather + lazy backing. scattered take_positions is now typed for f64/i64/utf8/datetime/timedelta/bool — full dtype coverage.

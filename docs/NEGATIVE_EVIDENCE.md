@@ -8667,3 +8667,18 @@ bench 2M rows, nullable Int64 (20%-null) value, best-of-6, quiet box, pandas 2.2
 | `sgb.count` sparse-i64 key  | 605.8ms | 52.9ms | 0.16x -> 1.82x WIN (pandas 96.1ms) |
 
 FLIPS LOSS->WIN. count was a SEPARATE path from agg_numeric (counts non-missing per group, not a reduction) — this closes the documented `sgb.count nullable-i64 0.44x` gap plus the far worse sparse-i64 case. Same template family as the agg_numeric nullable branches (bounded/sparse-i64 + contiguous-Utf8). REMAINING: EAGER Utf8 key (in-memory, as_utf8_contiguous==None) nullable value still build_groups.
+
+### 2026-07-02 BlackThrush — SeriesGroupBy sum/mean/max/min/count on EAGER (in-memory) Utf8 key: dense_group_ids path (LOSS -> 1.0-3.7x WIN)
+Closes the LAST agg_numeric/count nullable gap (the "EAGER Utf8 key still generic" residual from the two prior entries). agg_numeric's dense paths gate the KEY on `as_i64_slice`/`as_utf8_contiguous`, so an in-memory `from_values` Utf8 key (`as_utf8_contiguous()==None`, unlike a CSV/parquet-loaded contiguous key) fell to generic build_groups (SipHash) for BOTH all-valid and nullable values (~0.63x pandas). Added an agg_numeric path reusing the shared `dense_group_ids` gid layout — which ALREADY handles the scalar-backed Utf8 key (fp-frame:30765) — plus `dense_group_labels`: bucket per gid in ascending row order (typed all-valid slice, or validity-masked nullable skipna with `!is_nan` for valid-but-NaN f64), `Null(NaN)` for an all-missing group, only for a numeric value backing. Mirror fix in count() (present-count via the same dense_group_ids fallback after its contiguous-Utf8 arm). Bit-identical: dense_group_ids assigns gids in the same first-seen order as build_groups. VERIFIED vs pandas 2.2.3 on an eager-Utf8 differential (7000 rows, card 40, group-4 fully-missing + 25% null): sum/mean/max/min/count all EXACT. fp-frame 3109/0.
+
+bench 2M rows, ~1000 categories, EAGER Utf8 key (from_values), best-of-6, quiet box, pandas 2.2.3:
+| op | before (generic) | after | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `sgb.sum`   nullable-i64 | 137ms | 57.0ms | 0.63x -> 1.52x WIN (pandas 86.8ms) |
+| `sgb.mean`  nullable-i64 | 128ms | 56.1ms | 0.65x -> 1.49x WIN (pandas 83.6ms) |
+| `sgb.max`   nullable-i64 | 133ms | 55.5ms | 0.62x -> 1.48x WIN (pandas 82.0ms) |
+| `sgb.count` nullable-i64 | 143ms | 81.3ms | 0.58x -> 1.02x WIN (pandas 82.7ms) |
+| `sgb.sum`   all-valid-i64 | ~137ms | 25.3ms | -> 3.40x WIN (pandas 86.2ms) |
+| `sgb.mean`  all-valid-i64 | ~137ms | 25.4ms | -> 3.69x WIN (pandas 93.7ms) |
+
+FLIPS LOSS->WIN. This was the "bigger lever" flagged in the prior two entries — one dense_group_ids-keyed bucket path in agg_numeric covers all 4 reducers × {all-valid, nullable} for the eager-Utf8 key; the all-valid case (3.4-3.7x) benefits most since it never even had a typed eager-Utf8 path. SeriesGroupBy nullable-value surface (bounded/sparse-i64 + contiguous/eager-Utf8 keys) now fully WIN across sum/mean/max/min/count.

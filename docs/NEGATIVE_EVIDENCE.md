@@ -8682,3 +8682,14 @@ bench 2M rows, ~1000 categories, EAGER Utf8 key (from_values), best-of-6, quiet 
 | `sgb.mean`  all-valid-i64 | ~137ms | 25.4ms | -> 3.69x WIN (pandas 93.7ms) |
 
 FLIPS LOSS->WIN. This was the "bigger lever" flagged in the prior two entries — one dense_group_ids-keyed bucket path in agg_numeric covers all 4 reducers × {all-valid, nullable} for the eager-Utf8 key; the all-valid case (3.4-3.7x) benefits most since it never even had a typed eager-Utf8 path. SeriesGroupBy nullable-value surface (bounded/sparse-i64 + contiguous/eager-Utf8 keys) now fully WIN across sum/mean/max/min/count.
+
+### 2026-07-02 BlackThrush — DataFrameGroupBy sum/mean/max/min/std/count on Utf8 key + NULLABLE Float64 values: str-dense gate relaxation (LOSS -> 1.9x WIN)
+DataFrameGroupBy's str-dense bypass (both the native-contiguous-Utf8 and eager/from_values-Utf8 key paths in aggregate_named_func) gated every value column on `as_f64_slice() || as_i64_slice()` (all-valid ONLY), so a frame with ANY nullable value column keyed by a Utf8 column fell to the generic build_groups path (~0.56x pandas — the common `df.groupby("cat").sum()` idiom on real, null-bearing data). The int64-key dense path already accepted `as_f64_slice_with_validity()` (nullable Float64) and the shared `dense_aggregate_emit` already has the skipna branch for it — the str-dense gates simply hadn't been widened. Added `|| col.as_f64_slice_with_validity().is_some()` to both str-dense gates. Zero emit change — reuses the tested nullable-Float64 skipna branch. Bit-identical: VERIFIED vs pandas 2.2.3 on an eager-Utf8-key differential (6000 rows, card 30, 2 nullable-f64 cols incl. a fully-missing group) — sum/mean/max/min/count/std all EXACT (default sum: all-missing group -> 0.0, matching pandas). fp-frame 3109/0.
+
+bench 2M rows, ~1000 cats, EAGER Utf8 key, 2 nullable-Float64 value cols, best-of-6, pandas 2.2.3:
+| op | before (generic) | after | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `dfgb.sum`  | 153.6ms | 45.8ms | 0.56x -> 1.87x WIN (pandas 85.8ms) |
+| `dfgb.mean` | 153.3ms | 46.5ms | 0.58x -> 1.89x WIN (pandas 88.2ms) |
+
+FLIPS LOSS->WIN. bounded-Int64 key + nullable-Float64 was ALREADY fast (18ms, the int64-dense path handles nullable-f64); this closes the Utf8-key sibling. REMAINING: nullable-Int64 value columns still fall to generic on ALL dense paths (dense_aggregate_emit has no as_i64_slice_with_validity branch, and the gates exclude it) — a follow-up needing an emit branch + the Int64-sum output-dtype question (Int64 vs Float64 vs the generic path).

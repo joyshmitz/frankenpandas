@@ -9019,3 +9019,15 @@ COLD read, min-of-many, load ~15-18, pandas 2.2.3 + pyarrow 24:
 
 ### 2026-07-03 BlackThrush — write_parquet is a WIN and ENCODE-bound (Scalar round-trip NOT the bottleneck; don't chase)
 After landing the read_parquet fix (e143719a2), checked write_parquet as its sibling. FINDING: write_parquet already WINS — 1M x 6 numeric, fp write_parquet_bytes 128.5ms vs pandas to_parquet(BytesIO) 142.9ms = 1.11x. column_to_arrow_array DOES have the same per-cell values() Vec<Scalar> round-trip the read path had, so I prototyped a typed write (as_i64/f64_slice + Arrow builder append_slice/typed-loop, bit-identical, verified: 605/0 + fp-write→pandas-read roundtrip with nullable Int64/Float64/NaN/bool/str all correct incl. null positions). But clean same-load A/B: typed 122.7ms vs Scalar 126.7ms = ~3%, WITHIN NOISE. The parquet ENCODE (dictionary/RLE + snappy compression, ~120ms) dominates; the Scalar materialization is only ~4ms of it. REVERTED the typed write (not a real win). DON'T chase the write-side Scalar round-trip — write_parquet is encode-bound and already beats pandas. (Contrast the READ path, where the Scalar round-trip + tiny-batch concat WAS the bottleneck and the fix was a real 1.6-1.9x — see [[read-parquet-scalar-batch]].)
+
+### 2026-07-03 BlackThrush — read_parquet CORRECTION (prior numbers were a bench artifact) + lazy index; MIXED is a WIN
+Re-profiled read_parquet (decode-only = 27ms, FASTER than pyarrow's 32ms full read — the Rust parquet decode is NOT the floor). The ~110ms residual I attributed to "decode floor" in e143719a2 was actually TWO things: (a) the bench itself called df.column(..).values() to "force materialization", which BOXES the typed columns back to Vec<Scalar> (~60ms) — a cost pandas never pays and my e143719a2-fix INTRODUCED (typed columns box on .values(), Scalar-backed old columns don't), so the bench UNFAIRLY penalized the new path; (b) a small Vec<IndexLabel> materialization for the default 0..n index.
+
+FIXED (b): record_batch_to_dataframe now uses Index::new_known_unique_int64_unit_range(0, n_rows) (lazy) instead of Index::new(Vec<IndexLabel> of n_rows). Fixed the bench to not box columns (df.index().len(), not per-cell .values()).
+
+TRUE numbers (FAIR bench: read + O(1) index len, no Scalar boxing; the typed i64/f64 column buffers ARE the materialized data, like numpy), min-of-many, load ~13-17, pandas 2.2.3 + pyarrow 24:
+| workload | original (pre-e143719a2) | now | pandas(pyarrow) | ratio |
+| --- | ---: | ---: | ---: | ---: |
+| read_parquet 1M x 4 mixed | 208ms | 45.7ms | 50ms | 0.24x -> 1.10x WIN |
+| read_parquet 1M x 6 numeric | 116ms | 71.3ms | 32ms | 0.28x -> 0.45x |
+So read_parquet mixed is now a WIN (not the 0.39x loss e143719a2 reported), and numeric is 0.45x (not 0.24x) — a 4.6x / 1.6x fp-side gain. LESSON: benching read_* by summing .values() boxes typed columns → penalizes typed-column readers; measure via a typed accessor or index len. Residual numeric gap = pyarrow zero-copy Arrow->numpy vs fp's owned-buffer copy (the memcpy out of Arrow's buffer, ~40ms for 6 cols) — the true, smaller floor. See [[read-parquet-scalar-batch]].

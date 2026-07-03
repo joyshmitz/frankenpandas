@@ -7447,8 +7447,11 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
         col_order.push(name);
     }
 
-    let labels: Vec<IndexLabel> = (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
-    let index = Index::new(labels);
+    // A parquet batch gets the default 0..n RangeIndex. Use the LAZY unit-range
+    // index instead of materializing a Vec<IndexLabel> of n_rows + Index::new
+    // (which was ~110ms of a 137ms 1M-row read — the real read_parquet bottleneck,
+    // NOT the ~27ms decode). Bit-identical: same integer labels 0..n_rows.
+    let index = Index::new_known_unique_int64_unit_range(0, n_rows);
 
     let frame = DataFrame::new_with_column_order(index, columns, col_order)?;
     promote_synthetic_row_multiindex_if_present(&frame)

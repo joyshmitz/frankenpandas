@@ -8780,3 +8780,13 @@ bench 2M rows, wide-i64 (~865k distinct, *7919), best-of-5/8, quiet box, pandas 
 | `Series.value_counts` wide-i64 | 327ms | 163ms (0.76x) | ~105ms | 0.41x -> ~1.15x WIN (pandas 121.7ms) |
 
 FLIPS LOSS->WIN. Phase profile (typed+direct): tally ~85ms (dominant, 2M random probes — the irreducible memory-latency floor, on par with khash), sort ~6ms, build ~10ms, Index::new ~0ms (lazy). Seventh reuse of the open-addressing i64 table. This closes the ENTIRE wide-i64 hash surface: duplicated/unique/nunique/isin/df-dedup/value_counts all now WIN (factorize/searchsorted/Index-set-ops/groupby-keys already did).
+
+### 2026-07-03 BlackThrush — merge LEFT on a wide/high-cardinality Int64 key: typed hash position path (LOSS -> 1.31x WIN)
+merge's single-key LEFT dispatch had typed Int64 fast paths only for ORDERED-unique and DENSE (bounded-span) keys; a wide/high-cardinality Int64 key (ids, hashes — dense span gate bails) fell to the generic `JoinKeyComponent` Scalar-materialization + FxHashMap<JoinKeyComponent> path (0.65x pandas), even though INNER already had `hash_int64_inner_positions` (1.85x WIN). Added `hash_int64_left_positions` — the wide/sparse sibling: build a typed `FxHashMap<i64>` of right key -> ascending-position buckets, probe left in order, emit one row per (left, matching right) or a single (left, None) null-fill for an unmatched left row. Wired it into the LEFT dispatch before the generic fallthrough. Bit-identical to the generic/dense path: VERIFIED vs pandas 2.2.3 on a 3000-row wide-i64 left merge with duplicate keys (one-to-many, null-fill) — 9130 output rows match EXACTLY in ORDER (not just multiset). fp-join 138/0.
+
+bench 1M x 1M rows, wide-i64 key (~unique, *2654435761), best-of-5, pandas 2.2.3:
+| op | before (generic Scalar) | after (typed hash) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `merge` LEFT wide-i64 | 447ms | 224ms | 0.65x -> 1.31x WIN (pandas 293.6ms) |
+
+FLIPS LOSS->WIN. merge INNER wide-i64 already WON 1.85x (168ms vs 311ms). REMAINING: merge OUTER wide-i64 still 0.34x (1200ms vs 412ms) — the generic Scalar path + an IndexLabel-comparison union sort; needs a typed hash_int64_outer_positions + typed-i64 union sort (bigger, the outer null-fill + pandas key-sort semantics need care). Next lever.

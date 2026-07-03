@@ -6687,6 +6687,50 @@ fn hash_int64_inner_positions(
     Some(hash_i64_inner_positions_slices(left, right))
 }
 
+/// LEFT-join positions via a typed `FxHashMap<i64>` build+probe for all-valid
+/// Int64 keys — the wide/sparse sibling of `dense_int64_left_positions` (whose
+/// direct-address table bails on a wide key span, dropping the join to the
+/// generic `JoinKeyComponent` Scalar-materialization path: left merge on a
+/// wide-i64 key was 0.65x pandas). Build the right key -> ascending-position
+/// buckets, then emit one output row per (left row, matching right row) in left
+/// order, or a single (left, None) for an unmatched left row (null-fill).
+/// Bit-identical to the dense/generic left path: same left iteration order, same
+/// ascending right positions per key bucket. `None` (falls back) unless BOTH keys
+/// are all-valid Int64 (a null-bearing key keeps the generic null-matching path).
+fn hash_int64_left_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left = left_key.as_i64_slice()?;
+    let right = right_key.as_i64_slice()?;
+    if right.is_empty() {
+        let left_positions = (0..left.len()).map(Some).collect::<Vec<_>>();
+        let right_positions = vec![None; left.len()];
+        return Some((left_positions, right_positions));
+    }
+    let mut right_map = FxHashMap::<i64, JoinPositionBucket>::with_capacity_and_hasher(
+        right.len(),
+        Default::default(),
+    );
+    for (pos, &key) in right.iter().enumerate() {
+        right_map.entry(key).or_default().push(pos);
+    }
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(left.len());
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(left.len());
+    for (left_pos, &key) in left.iter().enumerate() {
+        if let Some(matches) = right_map.get(&key) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
 /// Hash build+probe over raw UTF-8 byte spans for all-valid contiguous-Utf8
 /// keys (br-frankenpandas-i388q). Mirrors the generic `JoinKeyComponent` inner
 /// path exactly — right positions pushed ascending per key bucket, left probed
@@ -7481,6 +7525,25 @@ pub fn merge_dataframes_on_with_options(
         && validate_allows_fast_positions
         && let Some((left_positions, right_positions)) =
             dense_int64_left_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_dense_left_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Left)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            hash_int64_left_positions(left_key_columns[0], right_key_columns[0])
     {
         return build_single_key_dense_left_merge_output(
             left,

@@ -8916,3 +8916,14 @@ bench 1M x 1M rows, 5 Float64 cols (~25% null), indexes offset 500k, best-of-6, 
 | `df.add(fill_value=0)` UNALIGNED | 1792ms | 25.05ms | 0.14x -> 9.8x WIN (pandas 245.8ms) |
 
 FLIPS LOSS->WIN. Covers add/sub/mul/div/mod/pow with fill_value (all via binary_df_op_fill). Benefits from the affine-union align fast path (259bec7be).
+
+### 2026-07-03 BlackThrush — Series binary op with fill_value on UNALIGNED indexes — typed gather (LOSS -> 2.5x WIN)
+Series.binary_op_fill (s.add/sub/mul/div with fill_value=X) reindexed both sides via reindex_by_positions (SCALAR for nullable sources) then ran a per-cell Vec<Scalar> fill loop — 20x slower than pandas. Added the same typed fast path as the df variant: both columns numeric -> binary_gather_op_fill_numeric (gather from source f64/i64+validity slices; both-missing -> Null(NaN), one-missing -> op with fill; NaN/inf results preserved). The alignment plan itself was already fast (affine-union merge, 259bec7be). Bit-identical: VERIFIED vs pandas 2.2.3 over shifted affine ranges [-10,110)+[50,170) w/ NULLS + unmatched both sides, add/div/mul (div exercises x/0 -> inf), EXACT. fp-frame 3109/0.
+
+bench 1M + 1M rows, indexes offset 500k (union 1.5M), best-of-6, QUIET box, pandas 2.2.3:
+| op | before (Scalar) | after (typed gather) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `s.add(fill_value=0)` UNALIGNED nullable | 728.9ms | 13.9ms | 0.049x -> 2.56x WIN (pandas 35.57ms) |
+| `s.add(fill_value=0)` UNALIGNED all-valid | 412.7ms | 9.8ms | 0.049x -> 2.05x WIN (pandas 20.05ms) |
+
+FLIPS 20x LOSS -> WIN. Covers add/sub/mul/div/mod/pow/floordiv with fill_value (all via binary_op_fill). NOTE: the cold 274/140ms first-reads right after the remote build were machine-load PHANTOMS; warm quiet-box best-of-6 is 14/9.8ms.

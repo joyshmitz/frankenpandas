@@ -7547,6 +7547,130 @@ fn typed_wide_multi_i64_key_positions(
     Some((left_positions, right_positions, None))
 }
 
+/// K-key (K >= 3) INNER/LEFT positions for all-valid BOUNDED-range Int64 keys
+/// whose joint mixed-radix span fits an `i64` — even when that span exceeds the
+/// direct-address gate of `dense_packed_int64_inner_positions` (2^24). Packs each
+/// row's composite into one `i64` (`Σ_c (val_c - min_c)·stride_c`, `stride_0 = 1`,
+/// `stride_c = stride_{c-1}·range_{c-1}`; a bijection on the joint key box, so
+/// composite equality IFF every component equal) and runs the SINGLE-key i64 hash
+/// merge on it — skipping the K per-column factorization `FxHashMap`s that
+/// `typed_wide_multi_i64_key_positions` builds (the khash-floor cost that left
+/// 3-key merge at 0.43-0.57x pandas). Bit-identical to that path / the generic
+/// Scalar composite path: same left iteration order, same ascending right position
+/// per composite bucket, same unmatched-left null-fill. Returns `None` (caller
+/// falls back to the factorize path) unless every key is an all-valid Int64 slice
+/// and the joint span fits `i64` — Outer bails (its key-ascending emit is handled
+/// by the factorize path's semantic gid sort).
+fn bounded_composite_multi_i64_key_positions(
+    join_type: JoinType,
+    left_cols: &[&Column],
+    right_cols: &[&Column],
+) -> Option<MergeRowPositions> {
+    if !matches!(join_type, JoinType::Inner | JoinType::Left) {
+        return None;
+    }
+    let k = left_cols.len();
+    if k < 3 || right_cols.len() != k {
+        return None;
+    }
+    let mut ls: Vec<&[i64]> = Vec::with_capacity(k);
+    let mut rs: Vec<&[i64]> = Vec::with_capacity(k);
+    for c in 0..k {
+        ls.push(left_cols[c].as_i64_slice()?);
+        rs.push(right_cols[c].as_i64_slice()?);
+    }
+    let nl = ls[0].len();
+    let nr = rs[0].len();
+    if ls.iter().any(|s| s.len() != nl) || rs.iter().any(|s| s.len() != nr) {
+        return None;
+    }
+    if nl == 0 || nr == 0 {
+        // Let the generic/factorize path handle degenerate empties (its
+        // left-null-fill / empty-output shape is already validated there).
+        return None;
+    }
+
+    // Per-column min + span over left ∪ right; bail if the joint mixed-radix
+    // product overflows i64 (a truly wide key keeps the factorize path).
+    let mut mins = vec![0i64; k];
+    let mut ranges = vec![0u128; k];
+    for c in 0..k {
+        let mut mn = i64::MAX;
+        let mut mx = i64::MIN;
+        for &v in ls[c] {
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
+        }
+        for &v in rs[c] {
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
+        }
+        mins[c] = mn;
+        ranges[c] = (mx as i128 - mn as i128 + 1) as u128;
+    }
+    // strides[0] = 1, strides[c] = strides[c-1] * ranges[c-1]; bail on overflow.
+    let mut strides = vec![1i64; k];
+    let mut acc: u128 = 1;
+    for c in 0..k {
+        strides[c] = acc as i64;
+        acc = acc.checked_mul(ranges[c])?;
+        if acc > i64::MAX as u128 {
+            return None;
+        }
+    }
+    let comp = |s: &[&[i64]], row: usize| -> i64 {
+        let mut p: i64 = 0;
+        for c in 0..k {
+            // (val - min) < range_c and range product fits i64 ⇒ no overflow.
+            p += (s[c][row] - mins[c]) * strides[c];
+        }
+        p
+    };
+    let lcomp: Vec<i64> = (0..nl).map(|r| comp(&ls, r)).collect();
+    let rcomp: Vec<i64> = (0..nr).map(|r| comp(&rs, r)).collect();
+
+    if matches!(join_type, JoinType::Inner) {
+        let (lp, rp) = hash_i64_inner_positions_slices(&lcomp, &rcomp);
+        return Some((
+            lp.into_iter().map(Some).collect(),
+            rp.into_iter().map(Some).collect(),
+            None,
+        ));
+    }
+
+    // LEFT: right composite -> ascending-position buckets, probe left in order
+    // (mirror of hash_int64_left_positions on the composite slices).
+    let mut right_map = FxHashMap::<i64, JoinPositionBucket>::with_capacity_and_hasher(
+        nr,
+        Default::default(),
+    );
+    for (pos, &key) in rcomp.iter().enumerate() {
+        right_map.entry(key).or_default().push(pos);
+    }
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(nl);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(nl);
+    for (left_pos, &key) in lcomp.iter().enumerate() {
+        if let Some(matches) = right_map.get(&key) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions, None))
+}
+
 fn dense_packed_int64_inner_positions(
     left_cols: &[&Column],
     right_cols: &[&Column],
@@ -8304,6 +8428,21 @@ pub fn merge_dataframes_on_with_options(
         None
     };
 
+    // Typed K-key (K >= 3) BOUNDED-Int64 INNER/LEFT positions: pack the composite
+    // into one i64 + single-key i64 hash merge, skipping the K per-column
+    // factorization maps the factorize path below builds (3-key merge was
+    // 0.43-0.57x pandas — the khash floor of those maps). Same fast-path gates.
+    let composite_multi_key = if !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && packed_inner.is_none()
+        && typed_two_key.is_none()
+    {
+        bounded_composite_multi_i64_key_positions(join_type, &left_key_columns, &right_key_columns)
+    } else {
+        None
+    };
+
     // Typed general K-key (K >= 3) wide-Int64 positions: factorize-to-gid + u128
     // pack, bypassing the Scalar collect_composite_keys path. Same fast-path gates.
     let typed_multi_key = if !sort
@@ -8311,6 +8450,7 @@ pub fn merge_dataframes_on_with_options(
         && validate_allows_fast_positions
         && packed_inner.is_none()
         && typed_two_key.is_none()
+        && composite_multi_key.is_none()
     {
         typed_wide_multi_i64_key_positions(join_type, &left_key_columns, &right_key_columns)
     } else {
@@ -8325,6 +8465,8 @@ pub fn merge_dataframes_on_with_options(
                 None,
             )
         } else if let Some(typed) = typed_two_key {
+            typed
+        } else if let Some(typed) = composite_multi_key {
             typed
         } else if let Some(typed) = typed_multi_key {
             typed

@@ -8938,3 +8938,14 @@ bench 1M x 5 Float64 cols, cond/other index offset 200k, best-of-6, QUIET box, p
 | `df.where(cond_df, other_df)` UNALIGNED all-valid | 457.0ms | ~99ms | 0.84x -> 3.86x WIN (pandas 381.8ms) |
 
 Covers where + mask. NOTE: measured on a QUIET box (98ms stable x3); under heavy box load (loadavg 68 on 64 cores) the rayon par_map_columns path throttles to ~340ms — a contention artifact, not the op.
+
+### 2026-07-03 BlackThrush — Series where/mask with a Series other on UNALIGNED indexes — typed gather (WIN, mirrors the DataFrame fix)
+where_cond_series / mask_series with a differing (unaligned) row index fell to align(Left) + reindex_by_positions (SCALAR) + a per-cell Vec<Scalar> select — the same Scalar tax the DataFrame where/mask fix (c8c361637) measured at 0.85x. Reused the module-level where_gather_df_col: self's rows are the Left-align identity left_positions, so gather only cond (Bool) + other (f64+validity) onto self; cond True->self / False->other (mask inverts), cond/other absent -> Null(NaN). Gated: unique indexes, self+other Float64+validity, all-valid Bool cond (i64/other dtypes bail to Scalar). union_index = self.index (Left align), matching with_labels_and_values_preserving_name's labels + self.index.name. Bit-identical: VERIFIED vs pandas 2.2.3 on a 60-row unaligned case (self [-5,55), cond/other [20,80)) with NULLS, where AND mask, EXACT. fp-frame 3109/0.
+
+bench 1M + 1M rows, cond/other index offset 200k, global-min over many runs on a HEAVILY LOADED box (loadavg 60-75; single-threaded path, clean would be lower), pandas 2.2.3:
+| op | after (typed gather, under load) | vs pandas 2.2.3 |
+| --- | ---: | ---: |
+| `s.where(cond_s, other_s)` UNALIGNED nullable | 83.3ms | >=1.80x WIN (pandas 149.8ms) |
+| `s.where(cond_s, other_s)` UNALIGNED all-valid | 80.7ms | >=1.69x WIN (pandas 136.7ms) |
+
+Covers where + mask. Before = the Scalar align+reindex+per-cell path (same lever/tax as the DF where fix, there 0.85x->3.9x); the typed gather eliminates the Vec<Scalar> materialization. Ratio is a floor — the box was under heavy contention; a quiet box measures lower.

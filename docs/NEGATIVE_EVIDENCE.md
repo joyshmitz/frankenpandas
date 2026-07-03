@@ -8704,3 +8704,16 @@ bench 2M rows, ~1000 groups, 2 nullable value cols (Int64 + Float64), best-of-6,
 | `dfgb.count` eager-Utf8 key    | 144.0ms | 36.7ms | 0.57x -> 2.22x WIN (pandas 81.7ms) |
 
 FLIPS LOSS->WIN. Complements the str-dense sum/mean nullable-f64 fix (prior entry). REMAINING dfgb nullable gap: sum/mean/etc. on nullable-INT64 value columns (dense_aggregate_emit has no as_i64_slice_with_validity branch; needs the Int64-sum output-dtype decision).
+
+### 2026-07-02 BlackThrush — DataFrameGroupBy sum/mean/max/min/var/std/prod/median/first/last on NULLABLE Int64 value columns: dedicated skipna emit branch (LOSS -> 1.6-4.4x WIN)
+Completes the dfgb nullable-value surface. dense_aggregate_emit had branches for all-valid-f64 / all-valid-i64 / nullable-f64, but NONE for nullable-Int64, and all three dense gates (contiguous-Utf8, eager-Utf8, bounded-Int64 key) excluded `as_i64_slice_with_validity` — so a frame with ANY nullable-Int64 value column fell entirely to generic build_groups (~0.6-0.67x pandas; blocks even sibling nullable-f64 cols via the all-columns gate). Added a nullable-Int64 skipna emit branch + widened the three gates. CRITICAL dtype subtlety: the branch mirrors the GENERIC (build_groups) path's per-func output dtype, which DIFFERS from the all-valid-Int64 branch — notably `prod` is Float64 for null-bearing Int64 (generic coerces) but Int64 for all-valid. Verified by capturing the generic path's exact per-func dtype/empty-group output BEFORE the change, then confirming the new dense path reproduces it BIT-IDENTICALLY (sum Int64 empty->0, mean/var/std/median/prod Float64, min/max/first/last Int64 empty->Null(NaN), median empty->Null(NaN) via is_nan guard). Also 644 checks vs pandas 2.2.3 (bounded + eager keys, 11 funcs, fully-missing group) all EXACT. fp-frame 3109/0.
+
+bench 2M rows, ~1000 groups, mixed nullable Int64 + Float64 value cols, best-of-6, pandas 2.2.3:
+| op | before (generic) | after | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `dfgb.sum`  bounded-Int64 key | 134.7ms | 21.0ms | 0.67x -> 4.31x WIN (pandas 90.3ms) |
+| `dfgb.mean` bounded-Int64 key | 145.9ms | 22.5ms | 0.67x -> 4.38x WIN (pandas 98.4ms) |
+| `dfgb.sum`  eager-Utf8 key    | 141.7ms | 52.9ms | 0.61x -> 1.62x WIN (pandas 85.8ms) |
+| `dfgb.mean` eager-Utf8 key    | 149.1ms | 53.2ms | 0.59x -> 1.66x WIN (pandas 88.2ms) |
+
+FLIPS LOSS->WIN. DataFrameGroupBy nullable-value surface (sum/mean/max/min/var/std/prod/median/first/last/count × {bounded-Int64, contiguous/eager-Utf8} keys × {nullable Int64, nullable Float64} values) now fully WIN. LESSON: nullable-Int64 groupby output dtype follows the GENERIC path, not the all-valid dense arm (prod Int64->Float64 divergence) — always capture the generic per-func dtype first.

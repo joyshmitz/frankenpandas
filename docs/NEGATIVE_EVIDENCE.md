@@ -8906,3 +8906,13 @@ bench 1M rows, indexes offset 500k (contiguous affine union), best-of-6, pandas 
 | `Series.combine_first` UNALIGNED | 265.7ms | 10.5ms | 0.13x -> 3.4x WIN (pandas 35.6ms) (align + typed gather) |
 
 FLIPS Series.combine_first LOSS->WIN and boosts df.add/where/mask/combine_first (all use align_union_sorted_plan). Non-affine or non-contiguous-union indexes keep the general IndexLabel merge (unchanged).
+
+### 2026-07-03 BlackThrush — DataFrame binary op with fill_value on UNALIGNED indexes — typed gather (LOSS -> 9.8x WIN)
+binary_df_op_fill (df.add/sub/mul/div with fill_value=X) fell to align_on_index Scalar clones + a per-cell fill loop — 1792ms vs pandas 245.8ms = 0.14x (the plain binary_df_op fix didn't cover the fill variant). Added the typed unaligned path (same numeric column set, no row-MultiIndex): align_union_sorted_plan (fast for affine ranges) + binary_gather_op_fill_numeric (gather from source f64/i64+validity slices; both-missing -> Null(NaN), one-missing -> op with fill; Scalar fallback for mixed/non-numeric). Bit-identical: VERIFIED vs pandas 2.2.3 on a 180-row add(fill_value=0) over shifted affine ranges w/ NULLS + unmatched both sides, EXACT. fp-frame 3109/0.
+
+bench 1M x 1M rows, 5 Float64 cols (~25% null), indexes offset 500k, best-of-6, pandas 2.2.3:
+| op | before (Scalar) | after (typed gather) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `df.add(fill_value=0)` UNALIGNED | 1792ms | 25.05ms | 0.14x -> 9.8x WIN (pandas 245.8ms) |
+
+FLIPS LOSS->WIN. Covers add/sub/mul/div/mod/pow with fill_value (all via binary_df_op_fill). Benefits from the affine-union align fast path (259bec7be).

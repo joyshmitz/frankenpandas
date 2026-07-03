@@ -16,6 +16,7 @@ fn main(){
     let a=mkdf(n,0,5); let b_aligned=mkdf(n,0,5); let b_shift=mkdf(n,500_000,5);
     timeit("df.add aligned (5col,1M)", || { std::hint::black_box(a.add(&b_aligned).unwrap()); });
     timeit("df.add unaligned-shift (5col,1M)", || { std::hint::black_box(a.add(&b_shift).unwrap()); });
+    timeit("df.add_fill unaligned-shift (5col,1M)", || { std::hint::black_box(a.add_df_fill(&b_shift, 0.0).unwrap()); });
     // concat many small frames
     let frames:Vec<DataFrame>=(0..200).map(|i| mkdf(5000, (i*5000) as i64, 5)).collect();
     let refs:Vec<&DataFrame>=frames.iter().collect();

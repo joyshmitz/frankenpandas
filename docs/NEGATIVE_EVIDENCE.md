@@ -8749,3 +8749,13 @@ bench 2M rows, wide-i64 (~1M distinct, *7919), best-of-5, pandas 2.2.3:
 | `Series.unique`  wide-i64 | 76.0ms | 39.8ms | 0.73x -> 1.40x WIN (pandas 55.8ms) |
 
 FLIPS LOSS->WIN. Extends the open-addressing lever to the distinct-collection ops. REMAINING khash-floor sibling: value_counts wide-i64 0.41x (needs the table + a per-key count payload + first-seen-order emit) — the last and biggest of the wide-i64 hash losses.
+
+### 2026-07-02 BlackThrush — Series.isin on WIDE/high-cardinality all-Int64 needles: open-addressing i64 membership (LOSS -> 1.43x WIN)
+isin's dense-bitset fast path (`int_needle_membership_bitset`) only fires for a BOUNDED needle span; a wide/high-cardinality all-Int64 needle set (ids, hashes) returned None and dropped the column to the generic `IsinIndex` SipHash HashSet + `Vec<Scalar::Bool>` output — 0.37x pandas (84ms vs 31ms), the isin khash floor. Added a wide-Int64 path with the SAME all-Int64-needle gate as the bitset: build the needle set in the custom open-addressing i64 table (`Self::oa_i64_isin_flags` — power-of-two, linear probe, splitmix64, inline slots + occupied byte-map) and probe the raw `&[i64]` haystack, emitting typed Bool (1B/elem). Bit-identical to pure-i64 set membership (`IsinIndex::contains(Int64)` == `ints.contains`, the same equivalence the bitset path relies on). VERIFIED vs pandas 2.2.3 on 50k haystack / 5k wide-i64 needles — EXACT. fp-frame 3109/0.
+
+bench 2M-row haystack, 100k wide-i64 needles, best-of-5, quiet box, pandas 2.2.3:
+| op | before (IsinIndex) | after (open-addr) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `Series.isin` wide-i64 | 83.7ms | 20.6ms | 0.37x -> 1.43x WIN (pandas 29.5ms) |
+
+FLIPS LOSS->WIN. Fifth reuse of the open-addressing i64 table (after duplicated / unique / nunique) — the build-then-probe membership variant. searchsorted wide-i64 already WINS 3.84x (finger-search). REMAINING wide-i64 hash floor: value_counts 0.76x (bottlenecked on Index::new(1M labels), not the tally — needs an fp-index lazy result-index lever, surfaced separately).

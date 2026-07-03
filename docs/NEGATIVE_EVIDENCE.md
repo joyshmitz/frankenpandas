@@ -8811,3 +8811,13 @@ bench 1M x 1M rows, 2 Int64 keys (k0 wide, k1 bounded), best-of-5, pandas 2.2.3:
 | `merge` LEFT  2-key wide-i64 | 464ms | 216ms | 0.69x -> 1.49x WIN (pandas 322ms) |
 
 FLIPS LOSS->WIN. REMAINING: 2-key OUTER wide-i64 still 0.29x (1820ms vs 542ms) — needs the composite-key union sort (like single-key outer's CSR, but sorting by the (k0,k1) tuple); >2 keys still Scalar (u128 pack is 2-key-specific — a general-K typed composite is the follow-up). LESSON: the u128 bijection makes a 2-i64 composite a single hashable, reusing the single-key hash-join shape.
+
+### 2026-07-03 BlackThrush — multi-key (2-column) merge OUTER on wide Int64 keys: u128 CSR + semantic tuple sort (LOSS -> 1.61x WIN)
+Completes the 2-i64-key merge surface (inner/left landed prior; outer was still 0.29x — 1820ms vs 542ms — via the generic collect_composite_keys Scalar path + sort). Extended typed_wide_two_i64_key_positions with an OUTER arm: gid-factorize the u128-packed (k0,k1) composite, CSR the per-gid left/right positions, then argsort gids by the SEMANTIC (i64,i64) tuple DECODED from the packed key (u128 order would mis-sort negatives), emit key-ascending (cross product / unmatched-left / unmatched-right). The typed branch returns positions directly (the generic in-block sort_merge_rows_by_join_keys is bypassed), so they arrive pre-sorted; the multi-key builder coalesces key columns from left-else-right positions (no out_row_keys needed). Bit-identical: VERIFIED vs pandas 2.2.3 on a 3000-row 2-key merge with WIDE + NEGATIVE keys and DISJOINT sides (unmatched both sides) — inner/left/outer all EXACT order (3097/3098/3099 rows).
+
+bench 1M x 1M rows, 2 Int64 keys (k0 wide, k1 bounded), best-of-5, pandas 2.2.3:
+| op | before (Scalar) | after (u128 CSR) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `merge` OUTER 2-key wide-i64 | 1820ms | 337ms | 0.29x -> 1.61x WIN (pandas 542ms) |
+
+FLIPS LOSS->WIN. 2-i64-key merge now dominates across inner (1.55x) / left (1.49x) / outer (1.61x). REMAINING: >2 keys still Scalar (u128 is 2-key-specific — a general-K SmallVec<[i64;K]> or per-column-factorize composite is the follow-up); single-key merge RIGHT ~0.96x parity (un-landed).

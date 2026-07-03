@@ -7205,7 +7205,7 @@ fn typed_wide_two_i64_key_positions(
     left_cols: &[&Column],
     right_cols: &[&Column],
 ) -> Option<MergeRowPositions> {
-    if !matches!(join_type, JoinType::Inner | JoinType::Left) {
+    if !matches!(join_type, JoinType::Inner | JoinType::Left | JoinType::Outer) {
         return None;
     }
     if left_cols.len() != 2 || right_cols.len() != 2 {
@@ -7216,6 +7216,105 @@ fn typed_wide_two_i64_key_positions(
     let r0 = right_cols[0].as_i64_slice()?;
     let r1 = right_cols[1].as_i64_slice()?;
     let pack = |a: i64, b: i64| -> u128 { (u128::from(a as u64) << 64) | u128::from(b as u64) };
+
+    if matches!(join_type, JoinType::Outer) {
+        // OUTER: gid-factorize the u128 composite, CSR the per-gid positions, then
+        // emit key-ASCENDING by the SEMANTIC (i64, i64) tuple (decoded from the
+        // packed key — u128 order would mis-sort negatives). The typed branch
+        // returns positions directly (the generic in-block sort is bypassed), so
+        // they must arrive pre-sorted, matching sort_merge_rows_by_join_keys.
+        let mut gid_of: FxHashMap<u128, u32> = FxHashMap::with_capacity_and_hasher(
+            l0.len().saturating_add(r0.len()),
+            Default::default(),
+        );
+        let mut gid_keys: Vec<u128> = Vec::new();
+        let mut left_gid: Vec<u32> = Vec::with_capacity(l0.len());
+        for pos in 0..l0.len() {
+            let key = pack(l0[pos], l1[pos]);
+            let g = *gid_of.entry(key).or_insert_with(|| {
+                let x = gid_keys.len() as u32;
+                gid_keys.push(key);
+                x
+            });
+            left_gid.push(g);
+        }
+        let mut right_gid: Vec<u32> = Vec::with_capacity(r0.len());
+        for pos in 0..r0.len() {
+            let key = pack(r0[pos], r1[pos]);
+            let g = *gid_of.entry(key).or_insert_with(|| {
+                let x = gid_keys.len() as u32;
+                gid_keys.push(key);
+                x
+            });
+            right_gid.push(g);
+        }
+        let ng = gid_keys.len();
+        let mut loff = vec![0u32; ng + 1];
+        for &g in &left_gid {
+            loff[g as usize + 1] += 1;
+        }
+        let mut roff = vec![0u32; ng + 1];
+        for &g in &right_gid {
+            roff[g as usize + 1] += 1;
+        }
+        for g in 0..ng {
+            loff[g + 1] += loff[g];
+            roff[g + 1] += roff[g];
+        }
+        let mut lpos = vec![0u32; l0.len()];
+        let mut lw = loff[..ng].to_vec();
+        for (i, &g) in left_gid.iter().enumerate() {
+            let g = g as usize;
+            lpos[lw[g] as usize] = i as u32;
+            lw[g] += 1;
+        }
+        let mut rpos = vec![0u32; r0.len()];
+        let mut rw = roff[..ng].to_vec();
+        for (i, &g) in right_gid.iter().enumerate() {
+            let g = g as usize;
+            rpos[rw[g] as usize] = i as u32;
+            rw[g] += 1;
+        }
+        // Argsort gids by the SEMANTIC (i64, i64) key (hi = k0, lo = k1).
+        let decode = |packed: u128| -> (i64, i64) {
+            (((packed >> 64) as u64) as i64, (packed as u64) as i64)
+        };
+        let mut order: Vec<u32> = (0..ng as u32).collect();
+        order.sort_unstable_by_key(|&g| decode(gid_keys[g as usize]));
+        let mut left_positions = Vec::<Option<usize>>::new();
+        let mut right_positions = Vec::<Option<usize>>::new();
+        for &g in &order {
+            let g = g as usize;
+            let ls = &lpos[loff[g] as usize..loff[g + 1] as usize];
+            let rs = &rpos[roff[g] as usize..roff[g + 1] as usize];
+            match (ls.is_empty(), rs.is_empty()) {
+                (false, false) => {
+                    for &l in ls {
+                        for &r in rs {
+                            left_positions.push(Some(l as usize));
+                            right_positions.push(Some(r as usize));
+                        }
+                    }
+                }
+                (false, true) => {
+                    for &l in ls {
+                        left_positions.push(Some(l as usize));
+                        right_positions.push(None);
+                    }
+                }
+                (true, false) => {
+                    for &r in rs {
+                        left_positions.push(None);
+                        right_positions.push(Some(r as usize));
+                    }
+                }
+                (true, true) => {}
+            }
+        }
+        return Some((left_positions, right_positions, None));
+    }
+
+    // Inner / Left: right key -> ascending-position map, probe left in order.
     let mut right_map = FxHashMap::<u128, JoinPositionBucket>::with_capacity_and_hasher(
         r0.len(),
         Default::default(),

@@ -9,16 +9,16 @@ fn sm(i: usize, s: u64) -> u64 { let mut h=(i as u64).wrapping_add(s).wrapping_m
 fn main(){
     let n=3000usize;
     let mk=|seed:u64,vn:&str|{
-        let k1:Vec<Scalar>=(0..n).map(|i| Scalar::Int64(((sm(i,seed)%800) as i64)*104729)).collect();
+        let k1:Vec<Scalar>=(0..n).map(|i| Scalar::Int64(((sm(i,seed)%5000) as i64)*104729 - 40_000_000)).collect();
         let k2:Vec<Scalar>=(0..n).map(|i| Scalar::Int64((sm(i,seed+10)%20) as i64)).collect();
         let v:Vec<Scalar>=(0..n).map(|i| Scalar::Int64((sm(i,7)%100) as i64)).collect();
         let mut m=BTreeMap::new(); m.insert("k1".into(),Column::from_values(k1.clone()).unwrap()); m.insert("k2".into(),Column::from_values(k2.clone()).unwrap()); m.insert(vn.to_string(),Column::from_values(v.clone()).unwrap());
         (DataFrame::new_with_column_order(Index::from_range(0,n as i64,1),m,vec!["k1".into(),"k2".into(),vn.into()]).unwrap(), k1, k2, v)
     };
     let (l,lk1,lk2,lv)=mk(1,"lv"); let (r,rk1,rk2,rv)=mk(2,"rv");
-    let g=|s:&Scalar| match s {Scalar::Int64(v)=>v.to_string(),Scalar::Null(_)=>"NA".into(),o=>format!("{o:?}")};
+    let g=|s:&Scalar| match s {Scalar::Int64(v)=>v.to_string(),Scalar::Float64(v)=>format!("{}",*v as i64),Scalar::Null(_)=>"NA".into(),o=>format!("{o:?}")};
     let mut f=std::fs::File::create("/tmp/fp_mergemk.txt").unwrap();
-    for (tag,jt) in [("inner",JoinType::Inner),("left",JoinType::Left)]{
+    for (tag,jt) in [("inner",JoinType::Inner),("left",JoinType::Left),("outer",JoinType::Outer)]{
         let m=merge_dataframes_on(&l,&r,&["k1","k2"],jt).unwrap();
         let k1=m.columns.get("k1").unwrap().values(); let k2=m.columns.get("k2").unwrap().values();
         let lvv=m.columns.get("lv").unwrap().values(); let rvv=m.columns.get("rv").unwrap().values();

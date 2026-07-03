@@ -9108,3 +9108,13 @@ Executed the 6b99c9132 surface. Added LazyNullableDatetime64 + LazyNullableTimed
 | --- | ---: | ---: | ---: | ---: |
 | datetime reindex 1M half-miss | 90ms | 34.4ms | 16.4ms | 0.18x -> 0.48x |
 2.6x fp-side, broad (outer join / align / where-differing-index / reindex on datetime+timedelta columns). Residual (0.48x, vs i64 sibling 11ms): the from_values temporal source carries both a Scalar backing and ColumnData (memory pressure), plus the nullable materialization. The temporal columnar gather surface (take_positions all-present + reindex_by_positions null-fill) is now typed for BOTH Datetime64 and Timedelta64.
+
+### 2026-07-03 BlackThrush — temporal-adjacent ops confirmed WINS (don't re-probe); take/reindex fix propagation verified
+After completing the temporal columnar-gather fixes (take_positions + reindex_by_positions typed for Datetime64/Timedelta64), swept the adjacent datetime ops for losses — found WINS across the board (pandas is slow at datetime hashing/sorting, unlike its fast numpy gather which was the real gap):
+| op (2M/1M) | fp | pandas 2.2.3 | ratio |
+| --- | ---: | ---: | ---: |
+| Series.mode i64 2M | 3.8ms | 33.7ms | 8.8x WIN |
+| Series.duplicated datetime 2M | 40ms | 217.8ms | 5.4x WIN |
+| Series.value_counts datetime 2M | 146ms | 492.2ms | 3.4x WIN |
+| df.sort_values datetime 1M | 8.3ms | 341.1ms | 41x WIN |
+sort_values datetime WIN confirms the take_positions Datetime64 fix (34e4374b8/542631050) propagates — the sort reorder gathers the datetime column typed. (datetime duplicated/value_counts are fp-internally Scalar — slower than fp's i64 sibling — but STILL beat pandas, so NOT levers; gold-plating avoided.) The genuine temporal losses were the GATHER primitives (pandas take/reindex = fast numpy), all fixed 0.12-0.18x -> 0.33-0.84x.

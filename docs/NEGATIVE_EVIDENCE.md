@@ -8862,3 +8862,13 @@ bench 1M x 1M rows, 5 Float64 cols (~25% null), indexes offset 500k, best-of-6, 
 | `df.add` UNALIGNED nullable | 435ms | 67.9ms | 0.27x -> 1.72x WIN |
 
 Completes the unaligned df binary-op fix for nullable columns (same direct-gather pattern as combine_first 7a49193e3).
+
+### 2026-07-03 BlackThrush — df.where(cond_df, other_df) typed select (LOSS -> 4.6x WIN)
+where_cond_df (df.where with a DataFrame cond + DataFrame other) materialized 3 Scalar Vecs per column and cloned a Scalar per cell in a `match c { Bool(true)=>self, Bool(false)=>other, _=>Null }` loop — 5M Scalar clones at 5 cols x 1M rows, 333ms vs pandas 40.7ms = 0.12x (even ALIGNED). Added a typed select fast path (gated: identical unique index across self/cond/other, no row-MultiIndex, every column two-sided Float64 with an all-valid Bool cond): select straight from the f64+validity slices via the bool slice into a typed output (cond True -> self present-iff-valid, False -> other present-iff-valid). Bit-identical to the per-cell Scalar select; VERIFIED vs pandas 2.2.3 on a 3000-row df.where with NULLS in self AND other + bool cond — a/b columns EXACT. Nullable cond / non-f64 / differing index fall through to the Scalar path. fp-frame 3109/0.
+
+bench 1M rows, 5 Float64 cols, aligned bool cond, best-of-6, pandas 2.2.3:
+| op | before (Scalar per-cell) | after (typed select) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `df.where(cond_df, other_df)` | 333ms | 8.85ms | 0.12x -> 4.59x WIN (pandas 40.7ms) |
+
+FLIPS LOSS->WIN. mask_df_other (the inverse) has the identical Scalar per-cell loop and is the queued sibling.

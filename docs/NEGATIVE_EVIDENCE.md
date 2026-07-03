@@ -8927,3 +8927,14 @@ bench 1M + 1M rows, indexes offset 500k (union 1.5M), best-of-6, QUIET box, pand
 | `s.add(fill_value=0)` UNALIGNED all-valid | 412.7ms | 9.8ms | 0.049x -> 2.05x WIN (pandas 20.05ms) |
 
 FLIPS 20x LOSS -> WIN. Covers add/sub/mul/div/mod/pow/floordiv with fill_value (all via binary_op_fill). NOTE: the cold 274/140ms first-reads right after the remote build were machine-load PHANTOMS; warm quiet-box best-of-6 is 14/9.8ms.
+
+### 2026-07-03 BlackThrush — DataFrame where/mask with a DataFrame other on UNALIGNED indexes — typed gather (LOSS -> ~3.9x WIN)
+where_cond_df / mask_df_other with a differing (unaligned) row index fell to align(Left) + reindex_by_positions (SCALAR) + a per-cell Vec<Scalar> select. Pandas ALSO reindexes both frames here (~390ms), so it was only a mild 0.85x loss — but a typed gather flips it to a large win. Added where_gather_df_col (module-level): gathers cond (Bool) + other (f64+validity) onto self via the Left-align position vectors, cond True->self / False->other (mask inverts), cond/other absent -> Null(NaN); per-column bail to the Scalar path on any non-fit. Gated: unique indexes, no row-MultiIndex, self+other Float64+validity, all-valid Bool cond. Bit-identical: VERIFIED vs pandas 2.2.3 on a 60-row unaligned case (self [-5,55), cond/other [20,80), ~overlap [20,55)) with NULLS, where AND mask, EXACT.
+
+bench 1M x 5 Float64 cols, cond/other index offset 200k, best-of-6, QUIET box, pandas 2.2.3:
+| op | before (Scalar) | after (typed gather) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `df.where(cond_df, other_df)` UNALIGNED nullable | 460.6ms | ~98ms | 0.85x -> 3.98x WIN (pandas 390.0ms) |
+| `df.where(cond_df, other_df)` UNALIGNED all-valid | 457.0ms | ~99ms | 0.84x -> 3.86x WIN (pandas 381.8ms) |
+
+Covers where + mask. NOTE: measured on a QUIET box (98ms stable x3); under heavy box load (loadavg 68 on 64 cores) the rayon par_map_columns path throttles to ~340ms — a contention artifact, not the op.

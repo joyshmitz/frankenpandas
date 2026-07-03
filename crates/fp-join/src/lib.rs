@@ -8983,22 +8983,28 @@ fn try_asof_datetime_shift(
     let rd = right_key.as_datetime64_slice()?;
     let lv = left_key.validity();
     let rv = right_key.validity();
-    let valid = |data: &[i64], v: &fp_columnar::ValidityMask, i: usize| -> bool {
-        v.get(i) && data[i] != fp_types::Timestamp::NAT
+    // All-valid fast path: when a side has no null bits, the per-element
+    // ValidityMask::get bit-test is skipped in both the min-scan and the shift
+    // (only the cheap NaT sentinel compare remains, which vectorizes). NaT/null
+    // are rare in an asof `on` key, so this is the hot path.
+    let l_all = lv.all();
+    let r_all = rv.all();
+    let is_valid = |data: &[i64], v: &fp_columnar::ValidityMask, all: bool, i: usize| -> bool {
+        (all || v.get(i)) && data[i] != fp_types::Timestamp::NAT
     };
     // Global min/max over the valid (non-NaT) ns of both sides.
     let mut lo = i64::MAX;
     let mut hi = i64::MIN;
     let mut any = false;
     for i in 0..ld.len() {
-        if valid(ld, lv, i) {
+        if is_valid(ld, lv, l_all, i) {
             lo = lo.min(ld[i]);
             hi = hi.max(ld[i]);
             any = true;
         }
     }
     for i in 0..rd.len() {
-        if valid(rd, rv, i) {
+        if is_valid(rd, rv, r_all, i) {
             lo = lo.min(rd[i]);
             hi = hi.max(rd[i]);
             any = true;
@@ -9014,10 +9020,10 @@ fn try_asof_datetime_shift(
              which exceeds f64 asof precision; not yet supported"
         )))));
     }
-    let shift = |data: &[i64], v: &fp_columnar::ValidityMask| -> Vec<f64> {
+    let shift = |data: &[i64], v: &fp_columnar::ValidityMask, all: bool| -> Vec<f64> {
         (0..data.len())
             .map(|i| {
-                if valid(data, v, i) {
+                if is_valid(data, v, all, i) {
                     (data[i] - lo) as f64
                 } else {
                     f64::NAN
@@ -9025,7 +9031,7 @@ fn try_asof_datetime_shift(
             })
             .collect()
     };
-    Some(Ok((shift(ld, lv), shift(rd, rv))))
+    Some(Ok((shift(ld, lv, l_all), shift(rd, rv, r_all))))
 }
 
 fn asof_numeric_values(column: &Column, side: &str, on: &str) -> Result<Vec<f64>, JoinError> {

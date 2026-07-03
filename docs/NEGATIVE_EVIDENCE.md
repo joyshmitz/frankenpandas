@@ -9064,3 +9064,11 @@ perf (secondary — there was no "before", it errored), 1M/1M short-range dateti
 | --- | ---: | ---: |
 | `merge_asof(datetime, backward)` 1M/1M | 22.3ms | 15.5ms (0.70x) |
 0.70x (the global-min scan + 2x shift add ~11ms over the i64 path), but the op went from REJECTED to CORRECT. Long-range datetime + the full i64-precision asof rewrite remain the deferred lever ([[join-scalar-materialization-vein]]). df.nlargest confirmed a 20x WIN (pandas nlargest slow) — not a lever.
+
+### 2026-07-03 BlackThrush — merge_asof datetime shift all-valid fast path — 0.73x -> 0.89x
+Follow-up to 5d1989abd (datetime asof shift-to-f64). try_asof_datetime_shift did a per-element ValidityMask::get bit-test in BOTH the min-scan and the shift. Added an all-valid fast path: when a side has no null bits (lv.all()/rv.all(), the hot case for an asof `on` key), skip the bit-test — only the cheap NaT sentinel compare remains (vectorizes). Bit-identical (asof_dt_verify bwd/fwd/nearest still EXACT vs pandas; fp-join 138/0).
+Clean same-load A/B (load ~9), 1M/1M short-range datetime backward:
+| | before | after | pandas |
+| --- | ---: | ---: | ---: |
+| merge_asof(datetime) 1M/1M | 21.3ms | 17.5ms | 15.5ms (0.73x -> 0.89x) |
+~18% faster, near parity. df.corrwith (9.7x) + df.nlargest (20x) confirmed WINS this pass (pandas loops in Python) — not levers.

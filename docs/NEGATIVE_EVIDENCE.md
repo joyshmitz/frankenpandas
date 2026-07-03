@@ -8644,3 +8644,15 @@ bench 2M rows, ~1000 categories, nullable Int64 (20%-null) value, CONTIGUOUS Utf
 | `sgb.max`  Utf8-key nullable | 130ms | 60.2ms | 0.63x -> 1.37x WIN (pandas 82.6ms) |
 
 FLIPS LOSS->WIN for the contiguous-Utf8-key case (CSV/parquet-loaded categoricals — the shape the all-valid Utf8-contiguous path already targets). REMAINING GAP: an EAGER Utf8 key (in-memory from_values) has `as_utf8_contiguous()==None` so agg_numeric skips ALL its Utf8 dense paths (all-valid AND this nullable one) and uses build_groups — the real fix there is a scalar-backed-Utf8-key dense path in agg_numeric (dense_group_ids has one; agg_numeric doesn't), a separate bigger lever for BOTH all-valid and nullable values. Also sparse/wide-i64-key nullable still generic (same template, not yet added).
+
+### 2026-07-02 BlackThrush — SeriesGroupBy sum/mean/max/min NULLABLE value + sparse/wide-i64 key: typed FxHashMap<i64> skipna bucket (LOSS -> 1.6-2.1x WIN)
+Closes the "sparse/wide-i64-key nullable still generic" gap flagged in the prior (contiguous-Utf8) entry. agg_numeric's sparse/wide-i64 path groups via `FxHashMap<i64,gid>` over the raw `&[i64]` key slice (inline keys, no Scalar/SipHash) but gated its value bucket on `as_f64_slice`/`as_i64_slice` (all-valid) — so a NULLABLE value column keyed by a wide i64 key fell through to generic build_groups (per-row Scalar `.values()` + ScalarKey + SipHash), ~2.6x slower than the typed grouping. Added the sister nullable arm: reuse the SAME `FxHashMap<i64,gid>` inline-key grouping, bucket only PRESENT values (skipna), emit `Null(NaN)` for an all-missing group else `Float64(func(nums))`. Character-for-character mirror of the already-verified bounded-Int64 nullable branch (differs only in FxHashMap grouping vs dense array + `Int64(k)` label) — bit-identical by construction. VERIFIED bit-exact vs pandas 2.2.3 on a sparse-key differential (8000 rows, card 500, key *1_000_003 to force the sparse arm, ~fully-missing group 4 + 25% null): sum/mean/max/min all EXACT.
+
+bench 2M rows, sparse i64 key (card 200k, *1_000_003), nullable Int64 (20%-null) value, best-of-6, quiet box, pandas 2.2.3:
+| op | before (generic) | after | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `sgb.sum`  sparse-i64 nullable | 719ms | 249.6ms | ~0.72x -> 2.06x WIN (pandas 515ms) |
+| `sgb.mean` sparse-i64 nullable | 637ms | 169.2ms | ~0.49x -> 1.85x WIN (pandas 313ms) |
+| `sgb.max`  sparse-i64 nullable | 671ms | 192.5ms | ~0.45x -> 1.56x WIN (pandas 300ms) |
+
+FLIPS LOSS->WIN. The typed FxHashMap<i64,gid> grouping (already used for all-valid sparse-i64 values) was the missing rung for the nullable value case — same template as the bounded-Int64 and contiguous-Utf8 nullable branches. REMAINING: an EAGER Utf8 key nullable value still uses build_groups (needs a scalar-Utf8-key dense path in agg_numeric — separate lever, covers all-valid too).

@@ -1,80 +1,23 @@
-//! Bench for the typed buffer concat levers (concat_series_columns + typed Int64 index
-//! concat, tbrtu). Concatenates K Int64 series (each m rows) via
-//! concat_series_with_ignore_index. Self-times best-of-N. Compare vs pandas pd.concat.
-//!
-//! Run: cargo run -p fp-frame --example bench_concat --release -- 1000000 8 30
-
-use std::time::Instant;
-
+use fp_frame::{DataFrame, concat_dataframes};
+use fp_index::Index;
 use fp_columnar::Column;
-use fp_frame::{Series, concat_series_with_ignore_index};
-use fp_index::{Index, IndexLabel};
 use fp_types::Scalar;
-
-// Scalars-backed (from_values): as_i64_slice returns None for Int64 (no fast path).
-fn build_one(m: usize, base: i64) -> Series {
-    Series::from_values(
-        "v",
-        (0..m as i64).map(IndexLabel::Int64).collect(),
-        (0..m as i64).map(|x| Scalar::Int64(x + base)).collect(),
-    )
-    .unwrap()
+use std::collections::BTreeMap;
+fn sm(i: usize, s: u64) -> u64 { let mut h=(i as u64).wrapping_add(s).wrapping_mul(0x9E3779B97F4A7C15); h=(h^(h>>30)).wrapping_mul(0xBF58476D1CE4E5B9); h^(h>>31) }
+fn mk(n:usize, off:i64)->DataFrame{
+    let idx=Index::from_range(off,off+n as i64,1);
+    let mut m=BTreeMap::new(); let mut order=vec![];
+    for j in 0..5 { let nm=format!("c{j}"); let v:Vec<Scalar>=(0..n).map(|i| if j%2==0 {Scalar::Int64((sm(i,j)%1000000) as i64)} else {Scalar::Float64((sm(i,j)%100000) as f64/100.0)}).collect(); m.insert(nm.clone(),Column::from_values(v).unwrap()); order.push(nm); }
+    DataFrame::new_with_column_order(idx,m,order).unwrap()
 }
-
-// Typed-backed (from_i64_values): as_i64_slice returns Some → typed concat path fires.
-fn build_one_typed(m: usize, base: i64) -> Series {
-    let index = Index::new_known_unique_int64_unit_range(0, m);
-    let col = Column::from_i64_values((0..m as i64).map(|x| x + base).collect());
-    Series::new("v", index, col).unwrap()
-}
-
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let total: usize = args
-        .get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1_000_000);
-    let k: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
-    let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(30);
-    let m = total / k.max(1);
-
-    let measure = |parts: &[Series]| -> u128 {
-        let refs: Vec<&Series> = parts.iter().collect();
-        let mut best = u128::MAX;
-        for _ in 0..iters {
-            let t = Instant::now();
-            let out = concat_series_with_ignore_index(&refs, true).expect("concat");
-            let e = t.elapsed().as_nanos();
-            std::hint::black_box(&out);
-            if e < best {
-                best = e;
-            }
-        }
-        best
-    };
-
-    let scalars: Vec<Series> = (0..k).map(|i| build_one(m, (i * m) as i64)).collect();
-    let typed: Vec<Series> = (0..k).map(|i| build_one_typed(m, (i * m) as i64)).collect();
-    let best_scalars = measure(&scalars);
-    let best_typed = measure(&typed);
-
-    // Isolate: time ONLY building the result Series (lazy index + from_i64_values of a
-    // pre-concatenated Vec<i64>), no concat iteration. Pinpoints whether the cost is in
-    // result construction (Series::new/from_i64_values) or the concat extend/iteration.
-    let flat: Vec<i64> = (0..total as i64).collect();
-    let mut best_build = u128::MAX;
-    for _ in 0..iters {
-        let t = Instant::now();
-        let idx = Index::new_known_unique_int64_unit_range(0, total);
-        let col = Column::from_i64_values(flat.clone());
-        let out = Series::new("v", idx, col).unwrap();
-        let e = t.elapsed().as_nanos();
-        std::hint::black_box(&out);
-        if e < best_build {
-            best_build = e;
-        }
-    }
-    println!(
-        "concat total={total} k={k} m={m} iters={iters}: scalars_backed={best_scalars}ns typed_backed={best_typed}ns direct_build={best_build}ns"
-    );
+fn timeit(l:&str, mut f: impl FnMut()){ let mut b=u128::MAX; for _ in 0..6 { let t=std::time::Instant::now(); f(); b=b.min(t.elapsed().as_nanos()); } println!("{l}: {:.2}ms", b as f64/1e6); }
+fn main(){
+    // 10 frames of 200k x 5 = concat to 2M x 5 (few large frames, ignore_index)
+    let frames: Vec<DataFrame>=(0..10).map(|k| mk(200_000, k*200_000)).collect();
+    let refs: Vec<&DataFrame>=frames.iter().collect();
+    timeit("concat 10x(200kx5) axis0", || { std::hint::black_box(concat_dataframes(&refs).unwrap()); });
+    // many small frames: 500 x (4k x 5) = 2M x 5
+    let small: Vec<DataFrame>=(0..500).map(|k| mk(4_000, k*4_000)).collect();
+    let srefs: Vec<&DataFrame>=small.iter().collect();
+    timeit("concat 500x(4kx5) axis0", || { std::hint::black_box(concat_dataframes(&srefs).unwrap()); });
 }

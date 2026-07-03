@@ -9031,3 +9031,12 @@ TRUE numbers (FAIR bench: read + O(1) index len, no Scalar boxing; the typed i64
 | read_parquet 1M x 4 mixed | 208ms | 45.7ms | 50ms | 0.24x -> 1.10x WIN |
 | read_parquet 1M x 6 numeric | 116ms | 71.3ms | 32ms | 0.28x -> 0.45x |
 So read_parquet mixed is now a WIN (not the 0.39x loss e143719a2 reported), and numeric is 0.45x (not 0.24x) — a 4.6x / 1.6x fp-side gain. LESSON: benching read_* by summing .values() boxes typed columns → penalizes typed-column readers; measure via a typed accessor or index len. Residual numeric gap = pyarrow zero-copy Arrow->numpy vs fp's owned-buffer copy (the memcpy out of Arrow's buffer, ~40ms for 6 cols) — the true, smaller floor. See [[read-parquet-scalar-batch]].
+
+### 2026-07-03 BlackThrush — read_parquet all-valid numeric: from_*_values_owned (MOVE not copy) — 0.43x -> 0.52x
+Continued the read_parquet numeric residual (pyarrow zero-copy floor). arrow_array_to_column_typed built the typed column via Column::from_i64_values/from_f64_values, which do Arc::from(Vec) = a second alloc+memcpy (~28ms/5M) ON TOP of the Arrow-buffer gather. Switched the all-valid arms to from_i64_values_owned/from_f64_values_owned, which MOVE the gathered Vec into the backing (one Arc::new, no copy — the [[f64-arc-copy-on-produce]] move-fix). Only the all-valid numeric arms change; nullable/bool/Utf8 paths byte-identical. fp-io 605/0.
+
+FAIR bench (df.index().len(), no Scalar boxing), min-of-10, load ~12-13:
+| workload | copy (from_*_values) | move (_owned) | pandas(pyarrow) | ratio |
+| --- | ---: | ---: | ---: | ---: |
+| read_parquet 1M x 6 numeric | 75.3ms | 62.1ms | 32ms | 0.43x -> 0.52x |
+~17% fp-side. Mixed (2 numeric + bool + str) measured ~48→51ms build-to-build but that is measurement/build jitter, NOT a regression: the change only makes the 2 numeric columns cheaper (move<copy) and leaves bool/str code byte-identical, so mixed cannot slow from it. Residual numeric 0.52x = the last copy (Arrow buffer -> Vec gather, unavoidable in fp's owned-buffer model) vs pyarrow zero-copy Arrow->numpy. read_parquet mixed stays a WIN (~1.0-1.1x). See [[read-parquet-scalar-batch]].

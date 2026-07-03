@@ -7510,7 +7510,10 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
             let data: Vec<i64> = t.values().iter().map(|&v| v as i64).collect();
             Some(match arrow_validity_mask(arr) {
                 Some(m) => Column::from_i64_values_with_validity(data, m),
-                None => Column::from_i64_values(data),
+                // MOVE the gathered Vec into the backing (one Arc::new) rather than
+                // from_i64_values' Arc::from(Vec) alloc+memcpy (~28ms/5M) — a second
+                // copy on top of the Arrow-buffer gather. All-valid, so _owned fits.
+                None => Column::from_i64_values_owned(data),
             })
         }};
     }
@@ -7520,7 +7523,7 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
             let data: Vec<f64> = t.values().iter().map(|&v| v as f64).collect();
             Some(match arrow_validity_mask(arr) {
                 Some(m) => Column::from_f64_values_with_validity(data, m),
-                None => Column::from_f64_values(data),
+                None => Column::from_f64_values_owned(data),
             })
         }};
     }

@@ -8,7 +8,7 @@ fn timeit(l:&str, mut f: impl FnMut()){ let mut b=u128::MAX; for _ in 0..6 { let
 fn mkdf(n:usize, off:i64, ncols:usize)->DataFrame{
     let idx=Index::from_range(off, off + n as i64, 1);
     let mut m=BTreeMap::new(); let mut order=vec![];
-    for c in 0..ncols { let nm=format!("c{c}"); let col:Vec<Scalar>=(0..n).map(|i| Scalar::Float64((sm(i,c as u64+1)%1000) as f64)).collect(); m.insert(nm.clone(), Column::from_values(col).unwrap()); order.push(nm); }
+    for c in 0..ncols { let nm=format!("c{c}"); let col:Vec<Scalar>=(0..n).map(|i| if sm(i,3)%4==0 {Scalar::Null(fp_types::NullKind::Null)} else {Scalar::Float64((sm(i,c as u64+1)%1000) as f64)}).collect(); m.insert(nm.clone(), Column::from_values(col).unwrap()); order.push(nm); }
     DataFrame::new_with_column_order(idx, m, order).unwrap()
 }
 fn main(){

@@ -8852,3 +8852,13 @@ bench 1M x 1M rows, 5 Float64 cols (self ~25% null), indexes offset 500k, best-o
 | `df.combine_first` UNALIGNED | 636ms | 59.1ms | 0.25x -> 2.72x WIN (pandas 160.5ms) |
 
 FLIPS LOSS->WIN. Same alignment-family pattern as the df-arithmetic fix (9ac3bab60): typed gather via align_union_sorted_plan position vectors, bypassing the Scalar align round-trip.
+
+### 2026-07-03 BlackThrush — followup: NULLABLE unaligned DataFrame binary op — direct typed gather (0.27x -> 1.72x WIN)
+The df-arithmetic unaligned fix (9ac3bab60) used reindex_by_positions per column, which materializes a SCALAR column for a NULLABLE source (its typed gather gates on validity.all()) — so a null-bearing unaligned df.add fell to the Scalar op (435ms, 0.27x). Replaced the reindex+op with `binary_gather_op_numeric`: gather each operand straight from the source's as_f64/i64_slice_with_validity via the union position vectors (present iff position Some AND valid/valid-NaN), op iff both present else Null(NaN). No reindex, no Scalar — nullable stays typed. Bit-identical: VERIFIED vs pandas 2.2.3 on a 1446-row nullable unaligned add with unmatched both sides — EXACT. all-valid case unchanged (re-verified, 2220 rows EXACT). fp-frame 3109/0.
+
+bench 1M x 1M rows, 5 Float64 cols (~25% null), indexes offset 500k, best-of-6, pandas 2.2.3 (~117ms):
+| op | before (reindex->Scalar) | after (direct gather) | vs pandas |
+| --- | ---: | ---: | ---: |
+| `df.add` UNALIGNED nullable | 435ms | 67.9ms | 0.27x -> 1.72x WIN |
+
+Completes the unaligned df binary-op fix for nullable columns (same direct-gather pattern as combine_first 7a49193e3).

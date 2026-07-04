@@ -7,7 +7,12 @@
 use fp_index::{Index, IndexLabel};
 
 fn utf8_index(items: &[&str]) -> Index {
-    Index::new(items.iter().map(|s| IndexLabel::Utf8((*s).to_string())).collect())
+    Index::new(
+        items
+            .iter()
+            .map(|s| IndexLabel::Utf8((*s).to_string()))
+            .collect(),
+    )
 }
 
 fn labels(idx: &Index) -> Vec<String> {

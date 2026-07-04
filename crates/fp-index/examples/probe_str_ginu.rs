@@ -7,7 +7,10 @@ use fp_index::{Index, IndexLabel};
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let n: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let card: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(10_000);
     let mut z = 0x9E37_79B9u64;
     let source = Index::new(

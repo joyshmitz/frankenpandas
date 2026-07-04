@@ -1,6 +1,6 @@
 //! Index dedup-family ops over a Datetime64 index WITH duplicates @200k.
 //! Run: bench_idx_dt_dedup <n> <op>
-use fp_index::{Index, DuplicateKeep};
+use fp_index::{DuplicateKeep, Index};
 
 fn sm(i: usize, s: u64) -> u64 {
     let mut h = (i as u64).wrapping_add(s).wrapping_mul(0x9E3779B97F4A7C15);

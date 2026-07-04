@@ -8,7 +8,12 @@ use std::collections::HashSet;
 use fp_index::{Index, IndexLabel};
 
 fn idx(items: &[&str]) -> Index {
-    Index::new(items.iter().map(|s| IndexLabel::Utf8((*s).to_string())).collect())
+    Index::new(
+        items
+            .iter()
+            .map(|s| IndexLabel::Utf8((*s).to_string()))
+            .collect(),
+    )
 }
 fn labels(i: &Index) -> Vec<String> {
     i.labels()
@@ -73,7 +78,11 @@ fn cases() -> Vec<(Vec<&'static str>, Vec<&'static str>)> {
 #[test]
 fn union_typed_matches_oracle() {
     for (a, b) in cases() {
-        assert_eq!(labels(&idx(&a).union(&idx(&b))), oracle_union(&a, &b), "union {a:?} {b:?}");
+        assert_eq!(
+            labels(&idx(&a).union(&idx(&b))),
+            oracle_union(&a, &b),
+            "union {a:?} {b:?}"
+        );
     }
 }
 
@@ -106,7 +115,10 @@ fn larger_shuffled_all_three() {
     let ar: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
     let br: Vec<&str> = b.iter().map(|s| s.as_str()).collect();
     assert_eq!(labels(&idx(&ar).union(&idx(&br))), oracle_union(&ar, &br));
-    assert_eq!(labels(&idx(&ar).difference(&idx(&br))), oracle_difference(&ar, &br));
+    assert_eq!(
+        labels(&idx(&ar).difference(&idx(&br))),
+        oracle_difference(&ar, &br)
+    );
     assert_eq!(
         labels(&idx(&ar).symmetric_difference(&idx(&br))),
         oracle_symdiff(&ar, &br)

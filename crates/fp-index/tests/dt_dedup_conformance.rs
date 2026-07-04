@@ -21,7 +21,7 @@ fn cases() -> Vec<Vec<i64>> {
     vec![
         vec![30, 10, 20, 10, 40, 20, 30],
         vec![5, 5, 5, 5],
-        vec![1, 2, 3, 4, 5],     // all distinct, unsorted-ish
+        vec![1, 2, 3, 4, 5], // all distinct, unsorted-ish
         vec![9, 1, 9, 1, 9, 2],
         (0..400).map(|i| (i * 2654435761_i64) % 137).collect(),
     ]
@@ -34,9 +34,17 @@ fn datetime64_dedup_family_matches_int64() {
         let i64i = Index::new(ns.iter().map(|&v| IndexLabel::Int64(v)).collect());
 
         assert_eq!(dt.nunique(), i64i.nunique(), "nunique {ns:?}");
-        assert_eq!(lab_ns(dt.unique().labels()), lab_ns(i64i.unique().labels()), "unique {ns:?}");
+        assert_eq!(
+            lab_ns(dt.unique().labels()),
+            lab_ns(i64i.unique().labels()),
+            "unique {ns:?}"
+        );
         for keep in [DuplicateKeep::First, DuplicateKeep::Last] {
-            assert_eq!(dt.duplicated(keep), i64i.duplicated(keep), "duplicated {ns:?}");
+            assert_eq!(
+                dt.duplicated(keep),
+                i64i.duplicated(keep),
+                "duplicated {ns:?}"
+            );
             assert_eq!(
                 lab_ns(dt.drop_duplicates_keep(keep).labels()),
                 lab_ns(i64i.drop_duplicates_keep(keep).labels()),
@@ -50,11 +58,19 @@ fn datetime64_dedup_family_matches_int64() {
         for ((ldt, cdt), (li64, ci64)) in vc_dt.iter().zip(vc_i64.iter()) {
             assert_eq!(cdt, ci64, "vc count {ns:?}");
             assert!(matches!(ldt, IndexLabel::Datetime64(_)), "vc dtype {ns:?}");
-            let (vdt, vi) = (lab_ns(std::slice::from_ref(ldt))[0], lab_ns(std::slice::from_ref(li64))[0]);
+            let (vdt, vi) = (
+                lab_ns(std::slice::from_ref(ldt))[0],
+                lab_ns(std::slice::from_ref(li64))[0],
+            );
             assert_eq!(vdt, vi, "vc value {ns:?}");
         }
         // output dtype carried
-        assert!(dt.unique().labels().iter().all(|l| matches!(l, IndexLabel::Datetime64(_))));
+        assert!(
+            dt.unique()
+                .labels()
+                .iter()
+                .all(|l| matches!(l, IndexLabel::Datetime64(_)))
+        );
     }
 }
 
@@ -64,9 +80,21 @@ fn timedelta64_dedup_family_matches_int64() {
         let td = Index::from_timedelta64(ns.clone());
         let i64i = Index::new(ns.iter().map(|&v| IndexLabel::Int64(v)).collect());
         assert_eq!(td.nunique(), i64i.nunique(), "td nunique {ns:?}");
-        assert_eq!(lab_ns(td.unique().labels()), lab_ns(i64i.unique().labels()), "td unique {ns:?}");
-        assert_eq!(td.duplicated(DuplicateKeep::First), i64i.duplicated(DuplicateKeep::First));
-        assert!(td.unique().labels().iter().all(|l| matches!(l, IndexLabel::Timedelta64(_))));
+        assert_eq!(
+            lab_ns(td.unique().labels()),
+            lab_ns(i64i.unique().labels()),
+            "td unique {ns:?}"
+        );
+        assert_eq!(
+            td.duplicated(DuplicateKeep::First),
+            i64i.duplicated(DuplicateKeep::First)
+        );
+        assert!(
+            td.unique()
+                .labels()
+                .iter()
+                .all(|l| matches!(l, IndexLabel::Timedelta64(_)))
+        );
     }
 }
 

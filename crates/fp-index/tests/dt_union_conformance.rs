@@ -48,9 +48,17 @@ fn datetime64_union_matches_first_occurrence_oracle() {
     for (a, b) in cases() {
         let got = Index::from_datetime64(a.clone()).union(&Index::from_datetime64(b.clone()));
         let want = oracle_union_ns(&a, &b);
-        assert_eq!(got.labels(), dt_labels(&want).as_slice(), "dt union {a:?} {b:?}");
+        assert_eq!(
+            got.labels(),
+            dt_labels(&want).as_slice(),
+            "dt union {a:?} {b:?}"
+        );
         // every output label is Datetime64
-        assert!(got.labels().iter().all(|l| matches!(l, IndexLabel::Datetime64(_))));
+        assert!(
+            got.labels()
+                .iter()
+                .all(|l| matches!(l, IndexLabel::Datetime64(_)))
+        );
     }
 }
 
@@ -59,8 +67,16 @@ fn timedelta64_union_matches_first_occurrence_oracle() {
     for (a, b) in cases() {
         let got = Index::from_timedelta64(a.clone()).union(&Index::from_timedelta64(b.clone()));
         let want = oracle_union_ns(&a, &b);
-        assert_eq!(got.labels(), td_labels(&want).as_slice(), "td union {a:?} {b:?}");
-        assert!(got.labels().iter().all(|l| matches!(l, IndexLabel::Timedelta64(_))));
+        assert_eq!(
+            got.labels(),
+            td_labels(&want).as_slice(),
+            "td union {a:?} {b:?}"
+        );
+        assert!(
+            got.labels()
+                .iter()
+                .all(|l| matches!(l, IndexLabel::Timedelta64(_)))
+        );
     }
 }
 

@@ -6,11 +6,17 @@
 use fp_index::{Index, IndexLabel};
 
 fn idx(items: &[&str]) -> Index {
-    Index::new(items.iter().map(|s| IndexLabel::Utf8((*s).to_string())).collect())
+    Index::new(
+        items
+            .iter()
+            .map(|s| IndexLabel::Utf8((*s).to_string()))
+            .collect(),
+    )
 }
 
 fn oracle(src: &[&str], tgt: &[&str]) -> (Vec<isize>, Vec<usize>) {
-    let mut positions: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+    let mut positions: std::collections::HashMap<&str, Vec<usize>> =
+        std::collections::HashMap::new();
     for (p, &s) in src.iter().enumerate() {
         positions.entry(s).or_default().push(p);
     }

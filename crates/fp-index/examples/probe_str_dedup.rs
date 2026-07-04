@@ -23,7 +23,10 @@ fn bench(name: &str, iters: usize, mut f: impl FnMut() -> usize) {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let n: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let card: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(10_000);
     let mut z = 0x9E37_79B9u64;
     let a = Index::new(
@@ -41,7 +44,10 @@ fn main() {
     bench("nunique", 6, || a.nunique());
     bench("value_counts", 6, || a.value_counts().len());
     bench("duplicated", 6, || {
-        a.duplicated(DuplicateKeep::First).iter().filter(|x| **x).count()
+        a.duplicated(DuplicateKeep::First)
+            .iter()
+            .filter(|x| **x)
+            .count()
     });
     bench("drop_duplicates", 6, || a.drop_duplicates().labels().len());
 }

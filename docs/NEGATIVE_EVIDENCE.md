@@ -9338,7 +9338,7 @@ RCH required-remote runs were attempted first, but worker affinity was ignored a
 | 100k targets | 1.5215ms | 0.30713ms | **4.95x fp-side WIN** |
 | 1M targets | 12.653ms | 3.8230ms | **3.31x fp-side WIN** |
 
-This is a production lever, not a bench-only artifact: the public bulk APIs now avoid O(n_targets) repeated endpoint derivation while preserving the wide-overflow path.
+This is a production lever, not a bench-only artifact: the public bulk APIs now avoid O(n_targets) repeated endpoint derivation while preserving the wide-overflow path. Landing note: the source fast path is restored on `main` with the measured ratio above.
 
 ### 2026-07-04 BlackThrush — SeriesGroupBy by a Datetime64/Timedelta64 KEY: dense temporal arm — 6.7-7.6x fp-side + correctness fix (was Utf8("NaN") index)
 SeriesGroupBy on a temporal KEY Series (`vals.groupby(&datetime_key).sum()`) fell to the generic per-row Scalar + SipHash build_groups path: `compute_dense_group_ids`/`dense_group_labels` handled Int64 (dense+open-addr) and Utf8 but had NO Datetime64/Timedelta64 arm (ns are i64 but `as_i64_slice` is Int64-gated). Two failures at 2M rows / 490k groups: (1) ~3.6s (0.0x); (2) the output index was mislabeled `Utf8("NaN")` instead of a DatetimeIndex. The DataFrameGroupBy sibling (groupby by a Datetime64 COLUMN) ALREADY had the correct temporal fast path (FxHashMap<i64,gid> → ScalarKey::Datetime64) — SeriesGroupBy was the uncovered sibling.

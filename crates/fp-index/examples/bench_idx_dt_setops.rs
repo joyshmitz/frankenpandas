@@ -14,7 +14,7 @@ fn main() {
     let mut b_ns: Vec<i64> = (0..n).map(|i| base + (i + n / 2) as i64 * step).collect();
     if shuf {
         // splitmix Fisher-Yates so the indexes are Unsorted (no sorted-merge path)
-        let mut st = |x: &mut u64| -> u64 {
+        let st = |x: &mut u64| -> u64 {
             *x = x.wrapping_add(0x9E3779B97F4A7C15);
             let mut z = *x;
             z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
@@ -54,7 +54,10 @@ fn main() {
             "symdiff" => {
                 std::hint::black_box(idx.symmetric_difference(&other));
             }
-            _ => panic!("op"),
+            _ => {
+                eprintln!("unsupported op: {op}");
+                std::process::exit(2);
+            }
         }
         let e = t.elapsed().as_nanos();
         if e < best {

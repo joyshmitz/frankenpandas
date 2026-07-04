@@ -3286,8 +3286,7 @@ impl Index {
             Self::all_temporal_ns(self.labels(), true),
             Self::all_temporal_ns(other.labels(), true),
         ) {
-            let mut result =
-                Self::from_datetime64(Self::membership_filter_i64(&a_ns, &b_ns, true));
+            let mut result = Self::from_datetime64(Self::membership_filter_i64(&a_ns, &b_ns, true));
             result.name = self.shared_name(other);
             return result;
         }
@@ -3313,7 +3312,9 @@ impl Index {
         let self_labels = self.labels();
         let other_labels = other.labels();
         if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
-            && other_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+            && other_labels
+                .iter()
+                .all(|l| matches!(l, IndexLabel::Utf8(_)))
         {
             let mut b_matched: FxHashMap<&str, bool> = FxHashMap::default();
             b_matched.reserve(other_labels.len());
@@ -3465,16 +3466,18 @@ impl Index {
             }
             Some(out)
         };
-        if let (Some(a_ns), Some(b_ns)) =
-            (temporal_ns(self_labels, true), temporal_ns(other_labels, true))
-        {
+        if let (Some(a_ns), Some(b_ns)) = (
+            temporal_ns(self_labels, true),
+            temporal_ns(other_labels, true),
+        ) {
             let mut result = Self::from_datetime64(Self::union_i64(&a_ns, &b_ns));
             result.name = self.shared_name(other);
             return result;
         }
-        if let (Some(a_ns), Some(b_ns)) =
-            (temporal_ns(self_labels, false), temporal_ns(other_labels, false))
-        {
+        if let (Some(a_ns), Some(b_ns)) = (
+            temporal_ns(self_labels, false),
+            temporal_ns(other_labels, false),
+        ) {
             let mut result = Self::from_timedelta64(Self::union_i64(&a_ns, &b_ns));
             result.name = self.shared_name(other);
             return result;
@@ -3484,12 +3487,19 @@ impl Index {
         // string bytes directly, skipping the 32-byte enum load per probe.
         // Bit-identical: self-then-other order, first-occurrence dedup.
         if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
-            && other_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+            && other_labels
+                .iter()
+                .all(|l| matches!(l, IndexLabel::Utf8(_)))
         {
             let mut seen: FxHashMap<&str, ()> = FxHashMap::default();
-            seen.reserve(combined_output_capacity(self_labels.len(), other_labels.len()));
-            let mut labels: Vec<IndexLabel> =
-                Vec::with_capacity(combined_output_capacity(self_labels.len(), other_labels.len()));
+            seen.reserve(combined_output_capacity(
+                self_labels.len(),
+                other_labels.len(),
+            ));
+            let mut labels: Vec<IndexLabel> = Vec::with_capacity(combined_output_capacity(
+                self_labels.len(),
+                other_labels.len(),
+            ));
             for label in self_labels.iter().chain(other_labels.iter()) {
                 if let IndexLabel::Utf8(s) = label
                     && seen.insert(s.as_str(), ()).is_none()
@@ -3543,8 +3553,9 @@ impl Index {
             Self::all_temporal_ns(self.labels(), true),
             Self::all_temporal_ns(other.labels(), true),
         ) {
-            return self
-                .propagate_name(Self::from_datetime64(Self::membership_filter_i64(&a_ns, &b_ns, false)));
+            return self.propagate_name(Self::from_datetime64(Self::membership_filter_i64(
+                &a_ns, &b_ns, false,
+            )));
         }
         if let (Some(a_ns), Some(b_ns)) = (
             Self::all_temporal_ns(self.labels(), false),
@@ -3563,7 +3574,9 @@ impl Index {
         let self_labels = self.labels();
         let other_labels = other.labels();
         if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
-            && other_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+            && other_labels
+                .iter()
+                .all(|l| matches!(l, IndexLabel::Utf8(_)))
         {
             let mut set: FxHashMap<&str, ()> = FxHashMap::default();
             set.reserve(other_labels.len());
@@ -3644,7 +3657,9 @@ impl Index {
         let self_labels = self.labels();
         let other_labels = other.labels();
         if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
-            && other_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+            && other_labels
+                .iter()
+                .all(|l| matches!(l, IndexLabel::Utf8(_)))
         {
             let mut self_set: FxHashMap<&str, ()> = FxHashMap::default();
             self_set.reserve(self_labels.len());
@@ -4340,7 +4355,11 @@ impl Index {
         // (total == len). Bit-identical: same first-seen order, same per-label
         // counts, same `sort_by_key` (stable, so first-seen breaks ties). Allocates
         // a String only once per DISTINCT label when building the final pairs.
-        if self.labels().iter().all(|l| matches!(l, IndexLabel::Utf8(_))) {
+        if self
+            .labels()
+            .iter()
+            .all(|l| matches!(l, IndexLabel::Utf8(_)))
+        {
             let labels = self.labels();
             let mut seen_order: Vec<&str> = Vec::new();
             let mut counts: FxHashMap<&str, usize> = FxHashMap::default();
@@ -5316,7 +5335,9 @@ impl Index {
         let self_labels = self.labels();
         let target_labels = target.labels();
         if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
-            && target_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+            && target_labels
+                .iter()
+                .all(|l| matches!(l, IndexLabel::Utf8(_)))
         {
             let mut positions = FxHashMap::<&str, Vec<usize>>::default();
             for (position, label) in self_labels.iter().enumerate() {
@@ -11477,15 +11498,22 @@ impl RangeIndex {
     }
 
     fn position_of_value_with_len(&self, value: i64, len: usize) -> Option<usize> {
+        self.position_of_value_with_len_and_bounds(value, len, self.position_bounds_for_len(len))
+    }
+
+    fn position_of_value_with_len_and_bounds(
+        &self,
+        value: i64,
+        len: usize,
+        bounds: Option<(i64, i64)>,
+    ) -> Option<usize> {
         if self.step == 0 {
             return None;
         }
         if len == 0 {
             return None;
         }
-        if let Some((first, last)) = self.first_last_for_len(len) {
-            let lower = first.min(last);
-            let upper = first.max(last);
+        if let Some((lower, upper)) = bounds {
             if value < lower || value > upper {
                 return None;
             }
@@ -11508,6 +11536,11 @@ impl RangeIndex {
         }
         let position = offset / step;
         (position >= 0 && position < len as i128).then_some(position as usize)
+    }
+
+    fn position_bounds_for_len(&self, len: usize) -> Option<(i64, i64)> {
+        self.first_last_for_len(len)
+            .map(|(first, last)| (first.min(last), first.max(last)))
     }
 
     fn first_last_for_len(&self, len: usize) -> Option<(i64, i64)> {
@@ -12513,9 +12546,14 @@ impl RangeIndex {
         if let Some(indexer) = self.range_target_indexer(target, source_len) {
             return (target.clone(), indexer);
         }
+        let bounds = self.position_bounds_for_len(source_len);
         let indexer = (0..target.len())
             .map(|position| {
-                match self.position_of_value_with_len(target.value_at(position), source_len) {
+                match self.position_of_value_with_len_and_bounds(
+                    target.value_at(position),
+                    source_len,
+                    bounds,
+                ) {
                     Some(position) => position as isize,
                     None => -1,
                 }
@@ -12531,10 +12569,11 @@ impl RangeIndex {
     #[must_use]
     pub fn get_indexer_non_unique(&self, targets: &[i64]) -> (Vec<isize>, Vec<usize>) {
         let source_len = self.len();
-        let mut positions = Vec::<isize>::new();
+        let bounds = self.position_bounds_for_len(source_len);
+        let mut positions = Vec::<isize>::with_capacity(targets.len());
         let mut missing = Vec::<usize>::new();
         for (idx, target) in targets.iter().enumerate() {
-            match self.position_of_value_with_len(*target, source_len) {
+            match self.position_of_value_with_len_and_bounds(*target, source_len, bounds) {
                 Some(position) => positions.push(position as isize),
                 None => {
                     positions.push(-1);
@@ -12557,15 +12596,17 @@ impl RangeIndex {
     #[must_use]
     pub fn get_indexer(&self, targets: &[i64]) -> Vec<isize> {
         let source_len = self.len();
-        targets
-            .iter()
-            .map(
-                |&value| match self.position_of_value_with_len(value, source_len) {
+        let bounds = self.position_bounds_for_len(source_len);
+        let mut positions = Vec::with_capacity(targets.len());
+        for &value in targets {
+            positions.push(
+                match self.position_of_value_with_len_and_bounds(value, source_len, bounds) {
                     Some(position) => position as isize,
                     None => -1,
                 },
-            )
-            .collect()
+            );
+        }
+        positions
     }
 
     /// Replace positions where `cond` is `false` with `other`, matching
@@ -18751,6 +18792,7 @@ impl MultiIndex {
 
 /// Result of `MultiIndex::droplevel` — either a MultiIndex (if 2+ levels remain)
 /// or a plain Index (if reduced to 1 level).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum MultiIndexOrIndex {
     Multi(MultiIndex),
@@ -31162,8 +31204,8 @@ mod tests {
         // pre-epoch fractions where floor semantics bite.
         let edges = [
             i64::MIN,
-            i64::MIN + 1,                       // 1677-09-21 ...
-            i64::MAX,                           // 2262-04-11 ...
+            i64::MIN + 1, // 1677-09-21 ...
+            i64::MAX,     // 2262-04-11 ...
             0,
             -1,
             1,
@@ -31172,7 +31214,7 @@ mod tests {
             -1_000_000_000,
             500_000_000,
             123_456_789,
-            -86_400_000_000_000,                // exactly one day pre-epoch
+            -86_400_000_000_000, // exactly one day pre-epoch
         ];
         for ns in edges {
             assert_eq!(super::format_datetime_ns(ns), chrono_ref(ns), "ns={ns}");

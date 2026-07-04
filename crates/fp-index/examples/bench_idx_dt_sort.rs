@@ -10,7 +10,7 @@ fn main() {
     let step = 60_000_000_000i64;
     let mut ns: Vec<i64> = (0..n).map(|i| base + i as i64 * step).collect();
     // splitmix Fisher-Yates shuffle -> Unsorted
-    let mut st = |x: &mut u64| -> u64 {
+    let st = |x: &mut u64| -> u64 {
         *x = x.wrapping_add(0x9E3779B97F4A7C15);
         let mut z = *x;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
@@ -33,7 +33,10 @@ fn main() {
             "sort_values" => {
                 std::hint::black_box(idx.sort_values());
             }
-            _ => panic!("op"),
+            _ => {
+                eprintln!("unsupported op: {op}");
+                std::process::exit(2);
+            }
         }
         let e = t.elapsed().as_nanos();
         if e < best {

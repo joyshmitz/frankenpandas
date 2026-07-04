@@ -1920,6 +1920,14 @@ enum ScalarValues {
         data: Arc<Vec<i64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Owned all-valid Period backing: ordinals plus the column-uniform freq.
+    /// Mirrors the temporal i64-backed gather variants without boxing
+    /// `Scalar::Period` per row.
+    LazyAllValidPeriodVec {
+        data: Arc<Vec<i64>>,
+        freq: PeriodFreq,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Nullable Datetime64 backing (the temporal mirror of `LazyNullableInt64`):
     /// contiguous ns `data` + `validity`; an invalid slot materializes
     /// `Scalar::Null(NullKind::NaT)` (= `missing_for_dtype(Datetime64)`), a valid
@@ -1933,6 +1941,16 @@ enum ScalarValues {
     /// Nullable Timedelta64 sibling of `LazyNullableDatetime64`.
     LazyNullableTimedelta64 {
         data: Vec<i64>,
+        validity: ValidityMask,
+        values: OnceLock<Vec<Scalar>>,
+    },
+    /// Nullable Period backing. Valid slots materialize with `freq`; invalid
+    /// slots materialize with `missing_freq` so null-introducing reindex keeps
+    /// the existing `missing_for_dtype(Period)` contract exactly.
+    LazyNullablePeriod {
+        data: Vec<i64>,
+        freq: PeriodFreq,
+        missing_freq: PeriodFreq,
         validity: ValidityMask,
         values: OnceLock<Vec<Scalar>>,
     },
@@ -2407,6 +2425,14 @@ impl ScalarValues {
         }
     }
 
+    fn lazy_all_valid_period_owned(data: Vec<i64>, freq: PeriodFreq) -> Self {
+        Self::LazyAllValidPeriodVec {
+            data: Arc::new(data),
+            freq,
+            values: OnceLock::new(),
+        }
+    }
+
     fn lazy_nullable_datetime64(data: Vec<i64>, validity: ValidityMask) -> Self {
         Self::LazyNullableDatetime64 {
             data,
@@ -2418,6 +2444,21 @@ impl ScalarValues {
     fn lazy_nullable_timedelta64(data: Vec<i64>, validity: ValidityMask) -> Self {
         Self::LazyNullableTimedelta64 {
             data,
+            validity,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_period(
+        data: Vec<i64>,
+        freq: PeriodFreq,
+        missing_freq: PeriodFreq,
+        validity: ValidityMask,
+    ) -> Self {
+        Self::LazyNullablePeriod {
+            data,
+            freq,
+            missing_freq,
             validity,
             values: OnceLock::new(),
         }
@@ -3865,6 +3906,14 @@ impl ScalarValues {
             Self::LazyAllValidTimedelta64Vec { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Timedelta64).collect())
                 .as_slice(),
+            Self::LazyAllValidPeriodVec { data, freq, values } => values
+                .get_or_init(|| {
+                    data.iter()
+                        .copied()
+                        .map(|ordinal| Scalar::Period(Period::new(ordinal, *freq)))
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyNullableDatetime64 {
                 data,
                 validity,
@@ -3896,6 +3945,26 @@ impl ScalarValues {
                                 Scalar::Timedelta64(v)
                             } else {
                                 Scalar::Null(NullKind::NaT)
+                            }
+                        })
+                        .collect()
+                })
+                .as_slice(),
+            Self::LazyNullablePeriod {
+                data,
+                freq,
+                missing_freq,
+                validity,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data.iter()
+                        .enumerate()
+                        .map(|(i, &ordinal)| {
+                            if validity.get(i) {
+                                Scalar::Period(Period::new(ordinal, *freq))
+                            } else {
+                                Scalar::Period(Period::new(i64::MIN, *missing_freq))
                             }
                         })
                         .collect()
@@ -4565,8 +4634,10 @@ impl ScalarValues {
             Self::LazyAllValidDatetime64 { data, .. } => data.len(),
             Self::LazyAllValidDatetime64Vec { data, .. } => data.len(),
             Self::LazyAllValidTimedelta64Vec { data, .. } => data.len(),
+            Self::LazyAllValidPeriodVec { data, .. } => data.len(),
             Self::LazyNullableDatetime64 { data, .. } => data.len(),
             Self::LazyNullableTimedelta64 { data, .. } => data.len(),
+            Self::LazyNullablePeriod { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64Vec { data, .. } => data.len(),
             Self::LazyAllValidFloat64Chunks { len, .. } => *len,
@@ -4827,12 +4898,24 @@ impl Clone for ScalarValues {
                 data: Arc::clone(data),
                 values: OnceLock::new(),
             },
+            Self::LazyAllValidPeriodVec { data, freq, .. } => Self::LazyAllValidPeriodVec {
+                data: Arc::clone(data),
+                freq: *freq,
+                values: OnceLock::new(),
+            },
             Self::LazyNullableDatetime64 { data, validity, .. } => {
                 Self::lazy_nullable_datetime64(data.clone(), validity.clone())
             }
             Self::LazyNullableTimedelta64 { data, validity, .. } => {
                 Self::lazy_nullable_timedelta64(data.clone(), validity.clone())
             }
+            Self::LazyNullablePeriod {
+                data,
+                freq,
+                missing_freq,
+                validity,
+                ..
+            } => Self::lazy_nullable_period(data.clone(), *freq, *missing_freq, validity.clone()),
             Self::LazyAllValidFloat64 {
                 data, all_finite, ..
             } => Self::lazy_all_valid_float64_arc_with_finite(
@@ -7247,6 +7330,20 @@ impl Column {
         }
     }
 
+    /// Build an all-valid Period column from ordinals and a uniform frequency,
+    /// deferring `Scalar::Period` boxing until a scalar view is requested.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_period_values_owned(data: Vec<i64>, freq: PeriodFreq) -> Self {
+        let len = data.len();
+        Self {
+            dtype: DType::Period,
+            values: ScalarValues::lazy_all_valid_period_owned(data, freq),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
     /// Build an all-valid Utf8 column from a contiguous byte buffer + n+1
     /// offsets (br-frankenpandas-2krr0). `bytes[offsets[i]..offsets[i+1]]`
     /// must be valid UTF-8 for every row — string-output ops guarantee this
@@ -8087,6 +8184,32 @@ impl Column {
         }
     }
 
+    /// Period sibling of [`Self::from_datetime64_values_with_validity`].
+    /// Invalid slots materialize as `missing_for_dtype(Period)` (Daily NaT),
+    /// matching the scalar `reindex_by_positions` fallback.
+    #[doc(hidden)]
+    pub fn from_period_values_with_validity(
+        data: Vec<i64>,
+        freq: PeriodFreq,
+        validity: ValidityMask,
+    ) -> Self {
+        debug_assert_eq!(data.len(), validity.len());
+        if validity.all() {
+            return Self::from_period_values_owned(data, freq);
+        }
+        Self {
+            dtype: DType::Period,
+            values: ScalarValues::lazy_nullable_period(
+                data,
+                freq,
+                PeriodFreq::Daily,
+                validity.clone(),
+            ),
+            validity,
+            data: None,
+        }
+    }
+
     /// Build a `Bool` column from already-typed contiguous values plus a
     /// validity mask (br-frankenpandas-rcvpj). The nullable counterpart of
     /// [`Column::from_bool_values`]: an all-valid mask folds to the contiguous
@@ -8478,6 +8601,23 @@ impl Column {
         }
         if let Some(ColumnData::Timedelta64(data)) = &self.data {
             return Some(data.as_slice());
+        }
+        None
+    }
+
+    /// Borrow a Period column's contiguous ordinal backing plus its uniform
+    /// frequency when the column is all-valid.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_period_slice(&self) -> Option<(&[i64], PeriodFreq)> {
+        if self.dtype != DType::Period || !self.validity.all() {
+            return None;
+        }
+        if let ScalarValues::LazyAllValidPeriodVec { data, freq, .. } = &self.values {
+            return Some((data.as_slice(), *freq));
+        }
+        if let Some(ColumnData::Period(data, freq)) = &self.data {
+            return Some((data.as_slice(), *freq));
         }
         None
     }
@@ -9175,6 +9315,16 @@ impl Column {
                 };
             }
 
+            if self.dtype == DType::Period
+                && let Some((src, freq)) = self.as_period_slice()
+            {
+                let mut data = Vec::with_capacity(n);
+                for &pos in positions {
+                    data.push(src[pos]);
+                }
+                return Self::from_period_values_owned(data, freq);
+            }
+
             // Zero-copy contiguous-range view (br-frankenpandas-jbyuc.1.1.1):
             // when the requested positions are a contiguous ascending range over
             // an Arc-shared contiguous-Utf8 backing, share the source `bytes`/
@@ -9346,7 +9496,8 @@ impl Column {
         if self.validity.all()
             && (self.as_f64_slice().is_some()
                 || self.as_i64_slice().is_some()
-                || self.as_bool_slice().is_some())
+                || self.as_bool_slice().is_some()
+                || self.as_period_slice().is_some())
         {
             return true;
         }
@@ -9453,6 +9604,16 @@ impl Column {
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
                 };
+            }
+
+            if self.dtype == DType::Period
+                && let Some((src, freq)) = self.as_period_slice()
+            {
+                let mut data = Vec::with_capacity(out_len);
+                for &(start, len) in runs {
+                    data.extend_from_slice(&src[start..start + len]);
+                }
+                return Self::from_period_values_owned(data, freq);
             }
         }
 
@@ -10629,6 +10790,27 @@ impl Column {
             }
             return Ok(Self::from_timedelta64_values_with_validity(
                 data,
+                ValidityMask::from_words(words, n),
+            ));
+        }
+        if self.validity.all()
+            && self.dtype == DType::Period
+            && let Some((slice, freq)) = self.as_period_slice()
+        {
+            let mut data = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, slot) in positions.iter().enumerate() {
+                match slot {
+                    Some(idx) if *idx < slice.len() => {
+                        data.push(slice[*idx]);
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    _ => data.push(i64::MIN),
+                }
+            }
+            return Ok(Self::from_period_values_with_validity(
+                data,
+                freq,
                 ValidityMask::from_words(words, n),
             ));
         }
@@ -18365,6 +18547,7 @@ impl Column {
     /// `from_f64_values`, scans again, then copies into `Arc<[f64]>`. Here the
     /// same NaN-as-missing mask is built while writing the output, and the Vec is
     /// kept in the move-backed Float64 representation.
+    #[allow(dead_code)]
     fn typed_float_unary_nullable_owned<F: Fn(f64) -> f64>(&self, f: F) -> Option<Self> {
         let len = self.len();
         let mut out = Vec::with_capacity(len);
@@ -20702,6 +20885,99 @@ mod tests {
             assert_eq!(gathered.values(), expected.values());
             assert_eq!(gathered.validity(), expected.validity());
         }
+    }
+
+    #[test]
+    fn period_take_positions_defers_scalar_materialization() {
+        let column = Column::new(
+            DType::Period,
+            vec![
+                Scalar::Period(Period::new(10, PeriodFreq::Monthly)),
+                Scalar::Period(Period::new(-5, PeriodFreq::Monthly)),
+                Scalar::Period(Period::new(42, PeriodFreq::Monthly)),
+            ],
+        )
+        .expect("column should build");
+
+        let positions = [2, 0, 1, 2];
+        let gathered = column.take_positions(&positions);
+
+        assert!(
+            matches!(&gathered.values, ScalarValues::LazyAllValidPeriodVec { .. }),
+            "Period scattered gather should defer scalar materialization"
+        );
+        if let ScalarValues::LazyAllValidPeriodVec { data, freq, values, .. } = &gathered.values
+        {
+            assert_eq!(*freq, PeriodFreq::Monthly);
+            assert_eq!(data.as_slice(), &[42, 10, -5, 42]);
+            assert!(values.get().is_none());
+        }
+
+        let expected = Column::new(
+            DType::Period,
+            positions
+                .iter()
+                .map(|&position| column.values()[position].clone())
+                .collect(),
+        )
+        .expect("validated materialization");
+
+        assert_eq!(gathered.values(), expected.values());
+        assert_eq!(gathered.validity(), expected.validity());
+        if let ScalarValues::LazyAllValidPeriodVec { values, .. } = &gathered.values {
+            assert!(values.get().is_some());
+        }
+    }
+
+    #[test]
+    fn period_reindex_by_positions_uses_nullable_lazy_backing() {
+        let column = Column::new(
+            DType::Period,
+            vec![
+                Scalar::Period(Period::new(10, PeriodFreq::Monthly)),
+                Scalar::Period(Period::new(20, PeriodFreq::Monthly)),
+                Scalar::Period(Period::new(30, PeriodFreq::Monthly)),
+            ],
+        )
+        .expect("column should build");
+
+        let gathered = column
+            .reindex_by_positions(&[Some(2), None, Some(0), Some(99)])
+            .expect("reindex should work");
+
+        assert!(
+            matches!(&gathered.values, ScalarValues::LazyNullablePeriod { .. }),
+            "Period null-fill gather should defer scalar materialization"
+        );
+        if let ScalarValues::LazyNullablePeriod {
+            data,
+            freq,
+            missing_freq,
+            validity,
+            values,
+            ..
+        } = &gathered.values
+        {
+            assert_eq!(*freq, PeriodFreq::Monthly);
+            assert_eq!(*missing_freq, PeriodFreq::Daily);
+            assert_eq!(data, &[30, i64::MIN, 10, i64::MIN]);
+            assert_eq!(validity.count_valid(), 2);
+            assert!(values.get().is_none());
+        }
+
+        assert_eq!(
+            gathered.values(),
+            &[
+                Scalar::Period(Period::new(30, PeriodFreq::Monthly)),
+                Scalar::Period(Period::new(i64::MIN, PeriodFreq::Daily)),
+                Scalar::Period(Period::new(10, PeriodFreq::Monthly)),
+                Scalar::Period(Period::new(i64::MIN, PeriodFreq::Daily)),
+            ]
+        );
+        assert!(gathered.validity().get(0));
+        assert!(!gathered.validity().get(1));
+        assert!(gathered.validity().get(2));
+        assert!(!gathered.validity().get(3));
     }
 
     #[test]

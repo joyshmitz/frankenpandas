@@ -116,30 +116,76 @@ struct Utf8FactorizeDefaultWitness {
     unique_offsets: Arc<[usize]>,
 }
 
+fn fixed_width_utf8_offsets_le16(bytes_len: usize, offsets: &[usize]) -> Option<usize> {
+    let nrows = offsets.len().checked_sub(1)?;
+    if nrows == 0 || offsets.first().copied()? != 0 || offsets.get(nrows).copied()? != bytes_len {
+        return None;
+    }
+    let width = bytes_len / nrows;
+    if width == 0 || width > 16 || width * nrows != bytes_len {
+        return None;
+    }
+    for (row, &offset) in offsets.iter().enumerate() {
+        if offset != row * width {
+            return None;
+        }
+    }
+    Some(width)
+}
+
+fn pack_fixed_width_utf8_span(span: &[u8]) -> u128 {
+    debug_assert!(span.len() <= 16);
+    let mut packed = 0_u128;
+    for &byte in span {
+        packed = (packed << 8) | u128::from(byte);
+    }
+    packed
+}
+
 fn build_utf8_factorize_default_witness(
     bytes: &[u8],
     offsets: &[usize],
 ) -> Utf8FactorizeDefaultWitness {
     let nrows = offsets.len().saturating_sub(1);
-    let mut idx_map: FxHashMap<&[u8], i64> = FxHashMap::default();
     let mut codes: Vec<i64> = Vec::with_capacity(nrows);
     let mut unique_bytes: Vec<u8> = Vec::new();
     let mut unique_offsets: Vec<usize> = Vec::new();
     unique_offsets.push(0);
 
-    for row in 0..nrows {
-        let span = &bytes[offsets[row]..offsets[row + 1]];
-        let code = match idx_map.get(span) {
-            Some(&code) => code,
-            None => {
-                let code = unique_offsets.len() as i64 - 1;
-                idx_map.insert(span, code);
-                unique_bytes.extend_from_slice(span);
-                unique_offsets.push(unique_bytes.len());
-                code
-            }
-        };
-        codes.push(code);
+    if let Some(width) = fixed_width_utf8_offsets_le16(bytes.len(), offsets) {
+        let mut idx_map: FxHashMap<u128, i64> = FxHashMap::default();
+        for row in 0..nrows {
+            let start = row * width;
+            let span = &bytes[start..start + width];
+            let key = pack_fixed_width_utf8_span(span);
+            let code = match idx_map.get(&key) {
+                Some(&code) => code,
+                None => {
+                    let code = unique_offsets.len() as i64 - 1;
+                    idx_map.insert(key, code);
+                    unique_bytes.extend_from_slice(span);
+                    unique_offsets.push(unique_bytes.len());
+                    code
+                }
+            };
+            codes.push(code);
+        }
+    } else {
+        let mut idx_map: FxHashMap<&[u8], i64> = FxHashMap::default();
+        for row in 0..nrows {
+            let span = &bytes[offsets[row]..offsets[row + 1]];
+            let code = match idx_map.get(span) {
+                Some(&code) => code,
+                None => {
+                    let code = unique_offsets.len() as i64 - 1;
+                    idx_map.insert(span, code);
+                    unique_bytes.extend_from_slice(span);
+                    unique_offsets.push(unique_bytes.len());
+                    code
+                }
+            };
+            codes.push(code);
+        }
     }
 
     Utf8FactorizeDefaultWitness {
@@ -27108,6 +27154,38 @@ mod tests {
                     Scalar::Utf8("aa".into()),
                     Scalar::Utf8("b".into()),
                     Scalar::Utf8("c".into()),
+                ]
+            );
+        }
+
+        #[test]
+        fn factorize_fixed_width_contiguous_utf8_witness_preserves_order() {
+            let col = Column {
+                dtype: DType::Utf8,
+                values: ScalarValues::lazy_contiguous_utf8_arc(
+                    Arc::from(&b"aabbccaa"[..]),
+                    Arc::from([0_usize, 2, 4, 6, 8]),
+                ),
+                validity: ValidityMask::all_valid(4),
+                data: None,
+            };
+
+            let (codes, uniques) = col.factorize().expect("factorize");
+            assert_eq!(
+                codes.values(),
+                &[
+                    Scalar::Int64(0),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(0),
+                ]
+            );
+            assert_eq!(
+                uniques.values(),
+                &[
+                    Scalar::Utf8("aa".into()),
+                    Scalar::Utf8("bb".into()),
+                    Scalar::Utf8("cc".into()),
                 ]
             );
         }

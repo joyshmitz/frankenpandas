@@ -1,5 +1,7 @@
-//! Series.factorize() on a single Float64 or wide-Int64 column, measurable vs
-//! pandas `pd.factorize(s)`. Run: cargo run -p fp-frame --example factorize_bench --release -- 1000000 100000 30 f64
+//! Series.factorize() on a single Float64, wide-Int64, or fixed-width Utf8
+//! column, measurable vs pandas `pd.factorize(s)`.
+//!
+//! Run: cargo run -p fp-frame --example factorize_bench --release -- 1000000 100000 30 utf8
 
 use std::time::Instant;
 
@@ -39,21 +41,40 @@ fn main() {
         z ^ (z >> 31)
     };
     let index = Index::new_known_unique_int64_unit_range(0, rows);
-    let s = if dtype == "i64" {
-        let data: Vec<i64> = (0..rows)
-            .map(|_| (next() % distinct) as i64 * 0x1_0000_0001_i64)
-            .collect();
-        Series::new("c".to_string(), index, Column::from_i64_values(data)).expect("series")
-    } else {
-        let data: Vec<f64> = (0..rows)
-            .map(|_| (next() % distinct) as f64 * 1.5)
-            .collect();
-        Series::new("c".to_string(), index, Column::from_f64_values(data)).expect("series")
+    let column = match dtype {
+        "i64" => {
+            let data: Vec<i64> = (0..rows)
+                .map(|_| (next() % distinct) as i64 * 0x1_0000_0001_i64)
+                .collect();
+            Column::from_i64_values(data)
+        }
+        "utf8" => {
+            let mut bytes = Vec::with_capacity(rows * 9);
+            let mut offsets = Vec::with_capacity(rows + 1);
+            offsets.push(0);
+            for _ in 0..rows {
+                let key = next() % distinct;
+                let label = format!("k{key:08x}");
+                bytes.extend_from_slice(label.as_bytes());
+                offsets.push(bytes.len());
+            }
+            Column::from_utf8_contiguous(bytes, offsets)
+        }
+        _ => {
+            let data: Vec<f64> = (0..rows)
+                .map(|_| (next() % distinct) as f64 * 1.5)
+                .collect();
+            Column::from_f64_values(data)
+        }
     };
+    let make_series =
+        || Series::new("c".to_string(), index.clone(), column.clone()).expect("series");
 
     let ns = best(iters, || {
+        let s = make_series();
         std::hint::black_box(s.factorize().expect("factorize"));
     });
+    let s = make_series();
     let (_codes, uniq) = s.factorize().unwrap();
     eprintln!(
         "factorize_{dtype}: rows={rows} distinct={distinct} uniq={} best={:.1}us",

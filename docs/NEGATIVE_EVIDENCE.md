@@ -9301,3 +9301,28 @@ Measured A/B (same box, same session, INTERLEAVED build/run; box loaded so absol
 | wide-Int64 WARM | 1560.3ms | 58.4ms | 27x |
 | Datetime64 COLD (fresh source/call) | 2253.5ms | 137.8ms | 16x |
 vs pandas quiet-box 41.7ms: WARM 36.0ms = 0.14x -> **1.16x WIN** (the repeated-alignment-loop pattern — pandas caches its index engine identically, so warm-vs-warm is the fair compare and fp now wins). COLD single-call 137.8ms = 0.14x -> ~0.30x (still sub-parity: one cold FxHashMap<i64> build + the IndexLabel->i64 extraction pandas skips — the residual the prior entry correctly identified, but 16x smaller now). fp-frame 3106/0 on the reindex path (the 3 acosh/arccosh golden fails are the known 1-ULP remote-worker libm flake, unrelated — trig, zero overlap with reindex). LESSON: before declaring a resolver "structural", check whether a SIBLING op (here get_indexer) already solved the same lookup — the gap may be a mis-routed call, not a missing algorithm. The open-addr attempt failed because it replaced the wrong thing; the real fix reused existing cached machinery.
+
+### 2026-07-04 BlackThrush - read_parquet exact-width Arrow slice-copy NO-SHIP: 0.93x regression
+Targeted the remaining `read_parquet` all-valid numeric residual (prior clean row: 62.1ms vs pandas/pyarrow 32ms =
+0.52x) after `/alien-graveyard` pointed at vectorized execution with Arrow zero-copy interop. Hypothesis: exact-width
+Arrow `Int64Array` and `Float64Array` arms still used `values().iter().map(|&v| v as T).collect()`, so replacing the
+identity cast with `values().to_vec()` might let Rust lower the conversion to a tighter slice copy while leaving the
+widening/narrowing arms untouched.
+
+Measured on `/tmp/bench_num.parquet` with `crates/fp-io/examples/bench_parquet_num.rs` (1M x 6 numeric, best-of-6),
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-blackthrush-parquet-slicecopy`.
+The literal requested `rch exec -- cargo bench --release -p fp-io` was run and Cargo rejected `--release` for `bench`;
+the valid per-crate gate `rch exec -- cargo bench -p fp-io` completed green (fp-io has no measured bench fns, 605
+ignored). `rch exec` for the fixture-bound example reached a worker but failed after compile because `/tmp/bench_num.parquet`
+was not present there, so the timing A/B below is local fixture-bound execution in the same dedicated target setup.
+
+| workload | current main | exact-width `to_vec()` candidate | ratio | pandas note |
+| --- | ---: | ---: | ---: | --- |
+| `read_parquet` 1M x 6 numeric | 72.49ms | 78.12ms | 0.93x REGRESSION | prior clean pandas/pyarrow 32ms makes this 0.44x -> 0.41x |
+
+An earlier same-target single run looked like a tiny 72.65ms -> 69.52ms gain, but the clean rebuild A/B did not
+reproduce it. Patch was reverted; no source change shipped. Conclusion: LLVM already handles the identity iterator
+well enough, and the real residual remains the structural Arrow-buffer boundary: fp-columnar owns `Vec`/`Arc` typed
+storage and does not depend on Arrow buffers. The next viable lever is an explicit foreign-buffer/Arrow-backed column
+variant or ownership-transfer interface, with row-isomorphism tests and all typed accessors wired through it; that is a
+multi-site storage design, not a safe single-loop perf commit.

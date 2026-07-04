@@ -19893,6 +19893,24 @@ impl Column {
             }
             return Ok(Self::from_i64_values_owned(out));
         }
+        // Bool sibling of the Int64 path: `shift(..., fill_value=false/true)`
+        // over an all-valid Bool column emits only present Bool values, so a
+        // direct copy into the lazy all-valid Bool backing is the same
+        // positional contract without the `Vec<Scalar>` rebuild.
+        if let (Some(data), Scalar::Bool(fill_b)) = (self.as_bool_slice(), &fill) {
+            if abs >= len {
+                return Ok(Self::from_bool_values(vec![*fill_b; len]));
+            }
+            let mut out = Vec::with_capacity(len);
+            if periods > 0 {
+                out.resize(abs, *fill_b);
+                out.extend_from_slice(&data[..len - abs]);
+            } else {
+                out.extend_from_slice(&data[abs..]);
+                out.resize(len, *fill_b);
+            }
+            return Ok(Self::from_bool_values(out));
+        }
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
         if abs >= len {
             for _ in 0..len {
@@ -25247,6 +25265,36 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(shifted.dtype(), DType::Int64);
+                assert_eq!(shifted.values(), expected, "period {p}");
+            }
+        }
+
+        #[test]
+        fn shift_typed_bool_valid_fill_matches_positional_oracle() {
+            let vals = vec![true, false, true, true, false, false];
+            let typed = Column::from_bool_values(vals.clone());
+            for p in [1_i64, 2, -1, -4, 6, 10, -9] {
+                let shifted = typed.shift(p, Scalar::Bool(false)).unwrap();
+                let abs = p.unsigned_abs() as usize;
+                let expected: Vec<Scalar> = (0..vals.len())
+                    .map(|i| {
+                        let vacated = if abs >= vals.len() {
+                            true
+                        } else if p > 0 {
+                            i < abs
+                        } else {
+                            i >= vals.len() - abs
+                        };
+                        if vacated {
+                            Scalar::Bool(false)
+                        } else if p > 0 {
+                            Scalar::Bool(vals[i - abs])
+                        } else {
+                            Scalar::Bool(vals[i + abs])
+                        }
+                    })
+                    .collect();
+                assert_eq!(shifted.dtype(), DType::Bool);
                 assert_eq!(shifted.values(), expected, "period {p}");
             }
         }

@@ -8,12 +8,16 @@ fn main() {
     let fill_mode = a.get(3).map(String::as_str).unwrap_or("null");
     let col = if dt == "i64" {
         Column::from_i64_values((0..n as i64).map(|i| i % 100000).collect())
+    } else if dt == "bool" {
+        Column::from_bool_values((0..n).map(|i| (i & 1) == 0).collect())
     } else {
         Column::from_f64_values((0..n).map(|i| i as f64 * 0.5).collect())
     };
     let fill = if fill_mode == "zero" {
         if dt == "i64" {
             Scalar::Int64(0)
+        } else if dt == "bool" {
+            Scalar::Bool(false)
         } else {
             Scalar::Float64(0.0)
         }

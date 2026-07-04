@@ -19877,6 +19877,22 @@ impl Column {
                 ValidityMask::from_invalid_ranges(Arc::from(vec![vacated].into_boxed_slice()), len);
             return Ok(Self::from_f64_values_with_validity(out, validity));
         }
+        // Typed all-valid-Int64 fast path for an Int64 fill. This is the
+        // dtype-preserving `shift(..., fill_value=0)` shape: the scalar path emits
+        // only Int64 values and `Column::new(Int64, ...)` rebuilds an all-valid
+        // Int64 column, so a direct memmove into an owned i64 buffer is
+        // bit-identical while skipping Vec<Scalar> construction.
+        if let (Some(data), Scalar::Int64(fill_i)) = (self.as_i64_slice(), &fill) {
+            let mut out = vec![*fill_i; len];
+            if abs < len {
+                if periods > 0 {
+                    out[abs..].copy_from_slice(&data[..len - abs]);
+                } else {
+                    out[..len - abs].copy_from_slice(&data[abs..]);
+                }
+            }
+            return Ok(Self::from_i64_values_owned(out));
+        }
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
         if abs >= len {
             for _ in 0..len {
@@ -25202,6 +25218,36 @@ mod tests {
                         .collect();
                     assert_eq!(t.values(), expected, "period {p}");
                 }
+            }
+        }
+
+        #[test]
+        fn shift_typed_i64_valid_fill_matches_positional_oracle() {
+            let vals = vec![10_i64, 20, 30, 40, 50];
+            let typed = Column::from_i64_values(vals.clone());
+            for p in [1_i64, 2, -1, -3, 5, 9, -8] {
+                let shifted = typed.shift(p, Scalar::Int64(-7)).unwrap();
+                let abs = p.unsigned_abs() as usize;
+                let expected: Vec<Scalar> = (0..vals.len())
+                    .map(|i| {
+                        let vacated = if abs >= vals.len() {
+                            true
+                        } else if p > 0 {
+                            i < abs
+                        } else {
+                            i >= vals.len() - abs
+                        };
+                        if vacated {
+                            Scalar::Int64(-7)
+                        } else if p > 0 {
+                            Scalar::Int64(vals[i - abs])
+                        } else {
+                            Scalar::Int64(vals[i + abs])
+                        }
+                    })
+                    .collect();
+                assert_eq!(shifted.dtype(), DType::Int64);
+                assert_eq!(shifted.values(), expected, "period {p}");
             }
         }
 

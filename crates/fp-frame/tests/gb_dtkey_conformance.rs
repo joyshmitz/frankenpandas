@@ -18,20 +18,38 @@ fn df_with_key(key_labels: Vec<IndexLabel>, vals: &[f64]) -> DataFrame {
         IndexLabel::Int64(_) => Column::from_i64_values(
             key_labels
                 .iter()
-                .map(|l| if let IndexLabel::Int64(v) = l { *v } else { unreachable!() })
+                .map(|l| {
+                    if let IndexLabel::Int64(v) = l {
+                        *v
+                    } else {
+                        unreachable!()
+                    }
+                })
                 .collect(),
         ),
         IndexLabel::Datetime64(_) => Column::from_datetime64_values(
             key_labels
                 .iter()
-                .map(|l| if let IndexLabel::Datetime64(v) = l { *v } else { unreachable!() })
+                .map(|l| {
+                    if let IndexLabel::Datetime64(v) = l {
+                        *v
+                    } else {
+                        unreachable!()
+                    }
+                })
                 .collect(),
         ),
         IndexLabel::Timedelta64(_) => Column::new(
             DType::Timedelta64,
             key_labels
                 .iter()
-                .map(|l| if let IndexLabel::Timedelta64(v) = l { Scalar::Timedelta64(*v) } else { unreachable!() })
+                .map(|l| {
+                    if let IndexLabel::Timedelta64(v) = l {
+                        Scalar::Timedelta64(*v)
+                    } else {
+                        unreachable!()
+                    }
+                })
                 .collect(),
         )
         .unwrap(),
@@ -48,9 +66,18 @@ fn ns_cases() -> Vec<Vec<i64>> {
     let base = 1_577_836_800_000_000_000i64;
     let day = 86_400_000_000_000i64;
     vec![
-        (0..5000).map(|i| base + ((i * 2654435761_i64) % 50) * day).collect(),
+        (0..5000)
+            .map(|i| base + ((i * 2654435761_i64) % 50) * day)
+            .collect(),
         (0..3000).map(|i| base + (i % 7) * day).collect(),
-        vec![base + 3 * day, base, base + day, base, base + 3 * day, base + day],
+        vec![
+            base + 3 * day,
+            base,
+            base + day,
+            base,
+            base + 3 * day,
+            base + day,
+        ],
     ]
 }
 
@@ -59,7 +86,10 @@ fn groupby_datetime_key_matches_int64_key() {
     for ns in ns_cases() {
         let n = ns.len();
         let vals: Vec<f64> = (0..n).map(|i| ((i * 131 + 7) % 89) as f64 + 0.5).collect();
-        let dt = df_with_key(ns.iter().map(|&v| IndexLabel::Datetime64(v)).collect(), &vals);
+        let dt = df_with_key(
+            ns.iter().map(|&v| IndexLabel::Datetime64(v)).collect(),
+            &vals,
+        );
         let i64df = df_with_key(ns.iter().map(|&v| IndexLabel::Int64(v)).collect(), &vals);
 
         for func in ["sum", "mean", "count", "max", "min", "std", "nunique"] {
@@ -115,10 +145,17 @@ fn groupby_timedelta_key_matches_int64_key() {
     let ns: Vec<i64> = (0..3000).map(|i| (i % 11) * 1_000_000_000).collect();
     let n = ns.len();
     let vals: Vec<f64> = (0..n).map(|i| (i % 13) as f64).collect();
-    let td = df_with_key(ns.iter().map(|&v| IndexLabel::Timedelta64(v)).collect(), &vals);
+    let td = df_with_key(
+        ns.iter().map(|&v| IndexLabel::Timedelta64(v)).collect(),
+        &vals,
+    );
     let i64df = df_with_key(ns.iter().map(|&v| IndexLabel::Int64(v)).collect(), &vals);
     for func in ["sum", "mean", "count", "max"] {
-        assert_eq!(run(&td, func).1, run(&i64df, func).1, "{func} td value mismatch");
+        assert_eq!(
+            run(&td, func).1,
+            run(&i64df, func).1,
+            "{func} td value mismatch"
+        );
     }
 }
 
@@ -128,7 +165,10 @@ fn groupby_datetime_key_with_nat_bails_and_is_correct() {
     let day = 86_400_000_000_000i64;
     let ns = vec![base, i64::MIN, base + day, base, i64::MIN, base + day];
     let vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-    let dt = df_with_key(ns.iter().map(|&v| IndexLabel::Datetime64(v)).collect(), &vals);
+    let dt = df_with_key(
+        ns.iter().map(|&v| IndexLabel::Datetime64(v)).collect(),
+        &vals,
+    );
     // NaT key bails the temporal fast path -> generic path drops the NaT group
     // (groupby dropna=True default), exactly like pandas. Present rows: base
     // (1+4=5), base+day (3+6=9) -> 14; the two NaT rows (2,5) are excluded.

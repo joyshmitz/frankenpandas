@@ -18,9 +18,18 @@ fn main() {
     let g2: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
     let op = a.get(4).map(String::as_str).unwrap_or("sum");
     let mut cols = BTreeMap::new();
-    cols.insert("k1".to_string(), Column::from_i64_values((0..n).map(|x| (sm(x, 0) % g1 as u64) as i64).collect()));
-    cols.insert("k2".to_string(), Column::from_i64_values((0..n).map(|x| (sm(x, 1) % g2 as u64) as i64).collect()));
-    cols.insert("v".to_string(), Column::from_f64_values((0..n).map(|x| (sm(x, 2) % 100_000) as f64).collect()));
+    cols.insert(
+        "k1".to_string(),
+        Column::from_i64_values((0..n).map(|x| (sm(x, 0) % g1 as u64) as i64).collect()),
+    );
+    cols.insert(
+        "k2".to_string(),
+        Column::from_i64_values((0..n).map(|x| (sm(x, 1) % g2 as u64) as i64).collect()),
+    );
+    cols.insert(
+        "v".to_string(),
+        Column::from_f64_values((0..n).map(|x| (sm(x, 2) % 100_000) as f64).collect()),
+    );
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     let df = DataFrame::new_with_column_order(
         Index::new(labels),

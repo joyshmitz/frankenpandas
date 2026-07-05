@@ -22,7 +22,20 @@ fn is_leap(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }
 fn dim(y: i64, m: i64) -> i64 {
-    [31, if is_leap(y) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][(m - 1) as usize]
+    [
+        31,
+        if is_leap(y) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ][(m - 1) as usize]
 }
 fn dates() -> Vec<(i64, i64, i64)> {
     let mut v = Vec::new();

@@ -17,8 +17,9 @@ fn main() {
     let base = 1_577_836_800_000_000_000i64; // 2020-01-01
     let minute = 60_000_000_000i64;
     // minute-spaced timestamps -> ~694 days for 1M rows
-    let labels: Vec<IndexLabel> =
-        (0..n).map(|i| IndexLabel::Datetime64(base + i as i64 * minute)).collect();
+    let labels: Vec<IndexLabel> = (0..n)
+        .map(|i| IndexLabel::Datetime64(base + i as i64 * minute))
+        .collect();
     let s = Series::new(
         "v",
         Index::new(labels),

@@ -29,7 +29,13 @@ fn main() {
     let s = Series::new(
         "v",
         Index::new(labels),
-        contig(n, |i| format!("user_{:06}-name_{}.bar", sm(i, 0) % 1_000_000, sm(i, 1) % 9999)),
+        contig(n, |i| {
+            format!(
+                "user_{:06}-name_{}.bar",
+                sm(i, 0) % 1_000_000,
+                sm(i, 1) % 9999
+            )
+        }),
     )
     .unwrap();
     let mut best = u128::MAX;

@@ -19,7 +19,12 @@ fn main() {
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     let keys: Vec<i64> = (0..n).map(|i| (sm(i) % g as u64) as i64).collect();
     let vals: Vec<f64> = (0..n).map(|i| (sm(i + 7) % 100_000) as f64).collect();
-    let value = Series::new("v", Index::new(labels.clone()), Column::from_f64_values(vals)).unwrap();
+    let value = Series::new(
+        "v",
+        Index::new(labels.clone()),
+        Column::from_f64_values(vals),
+    )
+    .unwrap();
     let key = Series::new("k", Index::new(labels), Column::from_i64_values(keys)).unwrap();
     let mut best = u128::MAX;
     for _ in 0..6 {

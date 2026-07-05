@@ -41,21 +41,44 @@ fn gb_shift_diff_int64_bykey_matches_utf8_gid() {
         let keys: Vec<i64> = (0..n).map(|i| (sm(i) % g as u64) as i64).collect();
         let vals: Vec<f64> = (0..n).map(|i| (sm(i + 1) % 100_000) as f64).collect();
         let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
-        let value =
-            Series::new("v", Index::new(labels.clone()), Column::from_f64_values(vals)).unwrap();
-        let key_i64 =
-            Series::new("k", Index::new(labels.clone()), Column::from_i64_values(keys.clone()))
-                .unwrap();
+        let value = Series::new(
+            "v",
+            Index::new(labels.clone()),
+            Column::from_f64_values(vals),
+        )
+        .unwrap();
+        let key_i64 = Series::new(
+            "k",
+            Index::new(labels.clone()),
+            Column::from_i64_values(keys.clone()),
+        )
+        .unwrap();
         let key_str = Series::new("k", Index::new(labels), contig_utf8(&keys)).unwrap();
 
         for periods in [1usize, 2, 3] {
-            let s_i = value.groupby(&key_i64).unwrap().shift(periods as i64).unwrap();
-            let s_u = value.groupby(&key_str).unwrap().shift(periods as i64).unwrap();
+            let s_i = value
+                .groupby(&key_i64)
+                .unwrap()
+                .shift(periods as i64)
+                .unwrap();
+            let s_u = value
+                .groupby(&key_str)
+                .unwrap()
+                .shift(periods as i64)
+                .unwrap();
             let d_i = value.groupby(&key_i64).unwrap().diff(periods).unwrap();
             let d_u = value.groupby(&key_str).unwrap().diff(periods).unwrap();
             for r in 0..n {
-                assert_eq!(bits(&s_i.values()[r]), bits(&s_u.values()[r]), "shift g={g} p={periods} r={r}");
-                assert_eq!(bits(&d_i.values()[r]), bits(&d_u.values()[r]), "diff g={g} p={periods} r={r}");
+                assert_eq!(
+                    bits(&s_i.values()[r]),
+                    bits(&s_u.values()[r]),
+                    "shift g={g} p={periods} r={r}"
+                );
+                assert_eq!(
+                    bits(&d_i.values()[r]),
+                    bits(&d_u.values()[r]),
+                    "diff g={g} p={periods} r={r}"
+                );
             }
         }
     }

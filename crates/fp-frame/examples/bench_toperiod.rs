@@ -10,8 +10,9 @@ fn main() {
     let base = 1_577_836_800_000_000_000i64;
     let hour = 3_600_000_000_000i64;
     // Datetime64 INDEX (fp.to_period converts the row index to a PeriodIndex).
-    let labels: Vec<IndexLabel> =
-        (0..n).map(|i| IndexLabel::Datetime64(base + (i as i64 % 90000) * hour)).collect();
+    let labels: Vec<IndexLabel> = (0..n)
+        .map(|i| IndexLabel::Datetime64(base + (i as i64 % 90000) * hour))
+        .collect();
     let s = Series::new(
         "t",
         Index::new(labels),

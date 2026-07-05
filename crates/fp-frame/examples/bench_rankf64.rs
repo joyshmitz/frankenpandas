@@ -1,5 +1,5 @@
-use fp_frame::Series;
 use fp_columnar::Column;
+use fp_frame::Series;
 use fp_index::Index;
 fn main() {
     let g: Vec<String> = std::env::args().collect();
@@ -22,5 +22,9 @@ fn main() {
         std::hint::black_box(r.len());
         best = best.min(t.elapsed().as_nanos());
     }
-    println!("rank(average) f64 {}M: best={:.2}ms", n / 1_000_000, best as f64 / 1e6);
+    println!(
+        "rank(average) f64 {}M: best={:.2}ms",
+        n / 1_000_000,
+        best as f64 / 1e6
+    );
 }

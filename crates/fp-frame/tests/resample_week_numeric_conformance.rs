@@ -21,7 +21,9 @@ fn chrono_sunday_ord(ns: i64) -> i64 {
     // 1970-01-01 == num_days_from_ce 719163.
     let date = NaiveDate::from_num_days_from_ce_opt((dse + 719_163) as i32).unwrap();
     let days_to_sunday = i64::from((7 - date.weekday().num_days_from_sunday()) % 7);
-    let s = date.checked_add_signed(Duration::days(days_to_sunday)).unwrap();
+    let s = date
+        .checked_add_signed(Duration::days(days_to_sunday))
+        .unwrap();
     i64::from(s.num_days_from_ce())
 }
 

@@ -20,17 +20,16 @@ fn main() {
     let base = 1_577_836_800_000_000_000i64;
     let day = 86_400_000_000_000i64;
     let id: Vec<i64> = (0..n).map(|i| (sm(i, 0) % gc) as i64).collect();
-    let ts: Vec<i64> = (0..n).map(|i| base + (sm(i, 1) % gc) as i64 * day).collect();
+    let ts: Vec<i64> = (0..n)
+        .map(|i| base + (sm(i, 1) % gc) as i64 * day)
+        .collect();
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     let mut cols = BTreeMap::new();
     cols.insert("id".to_string(), Column::from_i64_values(id));
     cols.insert("ts".to_string(), Column::from_datetime64_values(ts));
-    let df = DataFrame::new_with_column_order(
-        Index::new(labels),
-        cols,
-        vec!["id".into(), "ts".into()],
-    )
-    .unwrap();
+    let df =
+        DataFrame::new_with_column_order(Index::new(labels), cols, vec!["id".into(), "ts".into()])
+            .unwrap();
     let subset = vec!["id".to_string(), "ts".to_string()];
     let mut best = u128::MAX;
     for _ in 0..6 {
@@ -43,9 +42,7 @@ fn main() {
                 );
             }
             "dup" => {
-                std::hint::black_box(
-                    df.duplicated(Some(&subset), DuplicateKeep::First).unwrap(),
-                );
+                std::hint::black_box(df.duplicated(Some(&subset), DuplicateKeep::First).unwrap());
             }
             _ => panic!("op"),
         };

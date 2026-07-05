@@ -24,7 +24,11 @@ fn main() {
     let s = Series::new(
         "v",
         idx,
-        Column::from_f64_values((0..n).map(|i| (sm(i, 0) % 100_000) as f64 - 50_000.0).collect()),
+        Column::from_f64_values(
+            (0..n)
+                .map(|i| (sm(i, 0) % 100_000) as f64 - 50_000.0)
+                .collect(),
+        ),
     )
     .unwrap();
     let mut best = u128::MAX;

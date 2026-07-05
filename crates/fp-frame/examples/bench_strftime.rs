@@ -25,5 +25,8 @@ fn main() {
             best = e;
         }
     }
-    println!("strftime '{fmt}' n={n}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "strftime '{fmt}' n={n}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

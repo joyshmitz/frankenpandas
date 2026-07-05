@@ -17,10 +17,16 @@ fn main() {
     let ncols: usize = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
     let mut cols = BTreeMap::new();
     let mut order = vec!["id".to_string()];
-    cols.insert("id".to_string(), Column::from_i64_values((0..rows).map(|i| i as i64).collect()));
+    cols.insert(
+        "id".to_string(),
+        Column::from_i64_values((0..rows).map(|i| i as i64).collect()),
+    );
     let value_names: Vec<String> = (0..ncols).map(|c| format!("v{c}")).collect();
     for (c, name) in value_names.iter().enumerate() {
-        cols.insert(name.clone(), Column::from_f64_values((0..rows).map(|i| sm(i, c as u64) as f64).collect()));
+        cols.insert(
+            name.clone(),
+            Column::from_f64_values((0..rows).map(|i| sm(i, c as u64) as f64).collect()),
+        );
         order.push(name.clone());
     }
     let labels: Vec<IndexLabel> = (0..rows as i64).map(IndexLabel::Int64).collect();
@@ -35,5 +41,8 @@ fn main() {
             best = e;
         }
     }
-    println!("melt rows={rows} ncols={ncols} (->{}): best={best}ns", rows * ncols);
+    println!(
+        "melt rows={rows} ncols={ncols} (->{}): best={best}ns",
+        rows * ncols
+    );
 }

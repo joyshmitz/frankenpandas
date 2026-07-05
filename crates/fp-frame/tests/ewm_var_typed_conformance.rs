@@ -19,7 +19,12 @@ fn sm(i: usize, s: u64) -> u64 {
 
 fn typed_series(vals: &[f64]) -> Series {
     let labels: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
-    Series::new("v", Index::new(labels), Column::from_f64_values(vals.to_vec())).unwrap()
+    Series::new(
+        "v",
+        Index::new(labels),
+        Column::from_f64_values(vals.to_vec()),
+    )
+    .unwrap()
 }
 fn scalar_series_with_trailing_nan(vals: &[f64]) -> Series {
     let mut sc: Vec<Scalar> = vals.iter().map(|&v| Scalar::Float64(v)).collect();
@@ -46,9 +51,9 @@ fn bits(s: &Scalar) -> u64 {
 fn cases() -> Vec<Vec<f64>> {
     vec![
         (0..500).map(|i| (sm(i, 0) % 100_000) as f64).collect(),
-        vec![5.0; 300],                                  // constant run (ewm_mean==x guard)
+        vec![5.0; 300], // constant run (ewm_mean==x guard)
         (0..200).map(|i| i as f64 * 0.5 - 50.0).collect(), // monotone, negatives
-        vec![1.0, 1.0, 2.0, 2.0, 3.0],                   // tiny, ties
+        vec![1.0, 1.0, 2.0, 2.0, 3.0], // tiny, ties
     ]
 }
 
@@ -63,7 +68,11 @@ fn ewm_var_typed_matches_scalar_path() {
                 .var()
                 .unwrap();
             for i in 0..k {
-                assert_eq!(bits(&vt.values()[i]), bits(&vs.values()[i]), "var i={i} span={span}");
+                assert_eq!(
+                    bits(&vt.values()[i]),
+                    bits(&vs.values()[i]),
+                    "var i={i} span={span}"
+                );
             }
             let st = typed_series(&vals).ewm(Some(span), None).std().unwrap();
             let ss = scalar_series_with_trailing_nan(&vals)
@@ -71,13 +80,21 @@ fn ewm_var_typed_matches_scalar_path() {
                 .std()
                 .unwrap();
             for i in 0..k {
-                assert_eq!(bits(&st.values()[i]), bits(&ss.values()[i]), "std i={i} span={span}");
+                assert_eq!(
+                    bits(&st.values()[i]),
+                    bits(&ss.values()[i]),
+                    "std i={i} span={span}"
+                );
             }
 
             // cov/corr: second series (a perturbation of the first). Typed path
             // fires only when BOTH are all-valid; the trailing-NaN versions force
             // the Scalar path, whose observed prefix must match bit-for-bit.
-            let other: Vec<f64> = vals.iter().enumerate().map(|(j, &v)| v * 1.5 + j as f64).collect();
+            let other: Vec<f64> = vals
+                .iter()
+                .enumerate()
+                .map(|(j, &v)| v * 1.5 + j as f64)
+                .collect();
             let ct = typed_series(&vals)
                 .ewm(Some(span), None)
                 .cov(&typed_series(&other))
@@ -87,7 +104,11 @@ fn ewm_var_typed_matches_scalar_path() {
                 .cov(&scalar_series_with_trailing_nan(&other))
                 .unwrap();
             for i in 0..k {
-                assert_eq!(bits(&ct.values()[i]), bits(&cs.values()[i]), "cov i={i} span={span}");
+                assert_eq!(
+                    bits(&ct.values()[i]),
+                    bits(&cs.values()[i]),
+                    "cov i={i} span={span}"
+                );
             }
             let rt = typed_series(&vals)
                 .ewm(Some(span), None)
@@ -98,7 +119,11 @@ fn ewm_var_typed_matches_scalar_path() {
                 .corr(&scalar_series_with_trailing_nan(&other))
                 .unwrap();
             for i in 0..k {
-                assert_eq!(bits(&rt.values()[i]), bits(&rs.values()[i]), "corr i={i} span={span}");
+                assert_eq!(
+                    bits(&rt.values()[i]),
+                    bits(&rs.values()[i]),
+                    "corr i={i} span={span}"
+                );
             }
         }
     }

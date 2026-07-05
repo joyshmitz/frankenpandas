@@ -18,7 +18,12 @@ fn sm(i: usize, s: u64) -> u64 {
 }
 fn typed_series(vals: &[f64]) -> Series {
     let labels: Vec<IndexLabel> = (0..vals.len() as i64).map(IndexLabel::Int64).collect();
-    Series::new("v", Index::new(labels), Column::from_f64_values(vals.to_vec())).unwrap()
+    Series::new(
+        "v",
+        Index::new(labels),
+        Column::from_f64_values(vals.to_vec()),
+    )
+    .unwrap()
 }
 fn scalar_series_trailing_nan(vals: &[f64]) -> Series {
     let mut sc: Vec<Scalar> = vals.iter().map(|&v| Scalar::Float64(v)).collect();
@@ -57,30 +62,54 @@ fn rolling_skew_kurt_typed_matches_scalar_path() {
                 let t = typed_series(&vals);
                 let sc = scalar_series_trailing_nan(&vals);
                 let (rt, rs) = if kurt {
-                    (t.rolling(w, None).kurt().unwrap(), sc.rolling(w, None).kurt().unwrap())
+                    (
+                        t.rolling(w, None).kurt().unwrap(),
+                        sc.rolling(w, None).kurt().unwrap(),
+                    )
                 } else {
-                    (t.rolling(w, None).skew().unwrap(), sc.rolling(w, None).skew().unwrap())
+                    (
+                        t.rolling(w, None).skew().unwrap(),
+                        sc.rolling(w, None).skew().unwrap(),
+                    )
                 };
                 for i in 0..k {
-                    assert_eq!(bits(&rt.values()[i]), bits(&rs.values()[i]), "kurt={kurt} w={w} i={i}");
+                    assert_eq!(
+                        bits(&rt.values()[i]),
+                        bits(&rs.values()[i]),
+                        "kurt={kurt} w={w} i={i}"
+                    );
                 }
             }
 
             // cov/corr: second axis (perturbation). Typed path needs BOTH all-
             // valid; trailing-NaN forces the Scalar path, prefix must match.
-            let other: Vec<f64> = vals.iter().enumerate().map(|(j, &v)| v * 0.75 - j as f64).collect();
+            let other: Vec<f64> = vals
+                .iter()
+                .enumerate()
+                .map(|(j, &v)| v * 0.75 - j as f64)
+                .collect();
             for corr in [false, true] {
                 let t = typed_series(&vals);
                 let to = typed_series(&other);
                 let sc = scalar_series_trailing_nan(&vals);
                 let so = scalar_series_trailing_nan(&other);
                 let (rt, rs) = if corr {
-                    (t.rolling(w, None).corr(&to).unwrap(), sc.rolling(w, None).corr(&so).unwrap())
+                    (
+                        t.rolling(w, None).corr(&to).unwrap(),
+                        sc.rolling(w, None).corr(&so).unwrap(),
+                    )
                 } else {
-                    (t.rolling(w, None).cov(&to).unwrap(), sc.rolling(w, None).cov(&so).unwrap())
+                    (
+                        t.rolling(w, None).cov(&to).unwrap(),
+                        sc.rolling(w, None).cov(&so).unwrap(),
+                    )
                 };
                 for i in 0..k {
-                    assert_eq!(bits(&rt.values()[i]), bits(&rs.values()[i]), "corr={corr} w={w} i={i}");
+                    assert_eq!(
+                        bits(&rt.values()[i]),
+                        bits(&rs.values()[i]),
+                        "corr={corr} w={w} i={i}"
+                    );
                 }
             }
         }

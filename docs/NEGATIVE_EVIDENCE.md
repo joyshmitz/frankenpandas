@@ -9531,3 +9531,40 @@ Short per-crate bench used the required target dir and same RCH worker:
 Verdict: NO-SHIP / reverted. Do not retry the separate row-sums plus second-pass `m2` tile for all-valid f64 row variance:
 the extra full output-sized sums buffer and second streaming pass erase the locality/vectorization benefit on this shape.
 The viable frontier would need a different algebraic primitive with a stronger proof story, not this two-pass tiled helper.
+### 2026-07-05 IronQuail — DataFrame.median(axis=1): branchless Batcher sorting-network per-row median — 2.3-3.6x fp-side WIN
+
+`median_axis1` (the hottest axis=1 op, ~107ms at 1M×10 f64) took each row's median via `reduce_rows_func_f64`'s row
+buffer fed to a closure that did **`vals.to_vec()` (a heap allocation PER ROW — 1M mallocs)** + `select_nth_unstable_by`
+with a `partial_cmp` comparator closure. The gather is cheap (isolated: 5.9ms); the cost was the per-row allocation +
+quickselect-with-closure overhead for a tiny k.
+
+FIX (extreme-optimization / alien-graveyard: **sorting networks** — data-oblivious branchless compare-exchange):
+compute each row's median with a fixed **Batcher odd-even mergesort network** — a precomputed sequence of `(i,j)`
+min/max compare-exchanges over a stack buffer `[f64; 20]`. No heap allocation, no comparator indirection, no
+data-dependent branches; `f64::min`/`max` lower to `minsd`/`maxsd` on baseline SSE2, and independent comparators
+within a Batcher layer pipeline instead of forming the serial dependency chain a bubble sort would. The network is
+generated once per call (O(k log²k) comparators) and verified correct by the 0-1 principle (sorts every binary input
+for k ≤ 32). BIT-IDENTICAL to the quickselect path for no-NaN rows: a full sort exposes the SAME two middle order
+statistics (odd k → `buf[mid]`; even k → `(buf[mid-1]+buf[mid])/2`). Micro-bench (`-C target-cpu=x86-64`): 0 bit-diffs
+across k=3..32 on 1M random rows.
+
+Gated to all-Float64 no-NaN columns with **k ∈ [2, 20]** — the range where the network is measured a clear win;
+comparator count O(k log²k) overtakes `select_nth`'s O(k) around k≈26, so k>20 keeps the existing quickselect path
+(NaN/mixed-type frames keep the generic per-row path, unchanged).
+
+Interleaved same-box A/B (ORIG clean-main 0cd7caeee vs candidate, best-of-6 p50, 1M×10 f64):
+
+| workload | ORIG main | network cand | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | --- |
+| `df_median_axis1` | 106607.2us | 47083.9us | **2.26x** | 5.24x→**11.9x** (pandas 561267us) |
+| `df_mean_axis1` (control) | 6253.5us | 6478.6us | ~1.00x | tiled reduction, unchanged (noise) |
+| `df_std_axis1` (control) | 20518.1us | 20608.8us | 1.00x | reduce_rows_func_f64, unchanged |
+
+Micro-bench sweep (network vs current-quickselect, 1M rows): k=3 3.29x, k=4 3.59x, k=6 2.60x, k=10 2.31x, k=16 2.05x,
+k=24 1.16x, k=32 0.87x (crossover ~26 → gate at 20). GREEN: axis1 lib tests + full fp-frame + fp-conformance.
+
+LESSON: a per-row order-statistic over a small fixed number of columns is dominated by the per-row allocation +
+generic quickselect, not the gather. A data-oblivious sorting network (branchless min/max compare-exchanges over a
+stack buffer, parallel Batcher layers) removes the allocation, the comparator closure, AND the branch mispredicts —
+2-3.6x for small k, bit-identical. Same primitive applies to any small-k row order statistic (row-quantile,
+row-nlargest/nsmallest axis=1).

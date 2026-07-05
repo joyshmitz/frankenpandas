@@ -9441,3 +9441,29 @@ Verdict: NO-SHIP / reverted. Reading invalid payloads and branching once per inv
 random sparse invalid slots after the vectorized predicate pass. Do not retry "prove-invalids-already-false" for this workload;
 the remaining gap is the boolean output/validity representation itself (pandas writes a compact native bool/NumPy mask, while
 FrankenPandas emits `Vec<bool>`/typed Bool and still pays validity sidecar traversal).
+
+### 2026-07-05 BlackThrush - Series.between nullable-f64 packed-validity fused predicate NO-SHIP: 1.00x FP-side, still 0.56x vs pandas
+Targeted the same nullable `Series::between` residual after checking scratch/worktree wins. The remaining hot shape is not
+another invalid-payload proof: it is the tradeoff between preserving the vectorized raw f64 predicate and applying the validity
+sidecar. Alien-graveyard mapping: vectorized execution with a sparse validity sidecar; extreme-optimization proof obligation:
+same `valid_bit && predicate(value)` result for every row, with missing rows forced to `false`.
+
+Candidate fused the predicate with `ValidityMask::packed_words_for_scan()` so each output flag was produced as
+`((word >> bit) & 1) == 1 && predicate(d[base + bit])`, skipping the separate `for_each_invalid_range` clear pass. This was
+behavior-preserving, but it moved the validity branch back into the per-element loop and did not beat the current
+vectorized-then-clear strategy on the short benchmark.
+
+Short per-crate timing used the required target dir:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run -q -p fp-frame --example bench_between_bt --release`
+on worker `hz2`. Candidate output was `between_nullable: 6.50ms` (`between_allvalid: 0.79ms`, `gt_allvalid: 0.61ms`,
+`gt_nullable: 0.59ms`). ORIG/current-main comparator is the immediately preceding clean lane for the same workload,
+`6.49ms`; pandas 2.2.3 comparator remains `3.66ms`.
+
+| workload | ORIG current main | packed-validity fused candidate | pandas 2.2.3 | ratio |
+| --- | ---: | ---: | ---: | --- |
+| `Series.between` nullable Float64, 2M rows / 20% NaN | 6.49 ms | 6.50 ms | 3.66 ms | **0.998x FP-side**, **0.56x vs pandas** |
+
+Verdict: NO-SHIP / reverted. Do not retry a fused validity-bit predicate for random sparse nullable Float64 `between`; the
+branch inhibits the SIMD shape that the current implementation deliberately preserves. The viable frontier remains a different
+Bool/validity representation or a policy-approved SIMD/target-feature path, not another rearrangement of the same scalar
+validity bit inside the predicate loop.

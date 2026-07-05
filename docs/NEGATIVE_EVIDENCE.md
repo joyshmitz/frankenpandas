@@ -9468,3 +9468,40 @@ Verdict: NO-SHIP / reverted. Do not retry a fused validity-bit predicate for ran
 branch inhibits the SIMD shape that the current implementation deliberately preserves. The viable frontier remains a different
 Bool/validity representation or a policy-approved SIMD/target-feature path, not another rearrangement of the same scalar
 validity bit inside the predicate loop.
+
+### 2026-07-05 IronQuail — DataFrame axis=1 f64 reductions: tiled column-streaming kernel — 2.5x fp-side WIN (sum/mean/max/min/prod)
+
+The row-axis Float64 reducers (`DataFrame::{sum,mean,max,min,prod}_axis1`, via `reduce_rows_f64` + `mean_axis1`'s
+inline typed path) folded **row-at-a-time**: an outer `for row` loop with an inner `for col in &[&[f64]]` deref
+(`acc = op(acc, col[row_idx])`). On a 1M x 10 Float64 frame that touches k=10 separate 8 MB column arrays per row
+(column-strided — the reduction axis is orthogonal to the column-major storage), and the runtime-trip inner loop
+over `&[&[f64]]` does NOT autovectorize, so it ran scalar at ~5 GB/s — latency-bound, far below DRAM bandwidth,
+i.e. real headroom, not a bandwidth ceiling.
+
+FIX (alien-graveyard: loop tiling / cache blocking + streaming AXPY): sweep a **row TILE of 4096** across all columns
+so the per-tile accumulator stays L1-resident and each column's tile slice becomes a sequential, autovectorizable
+`dst op= src` pass (addpd / maxpd / minpd / mulpd on baseline SSE2 — the release-perf profile has NO target-cpu
+override). BIT-IDENTICAL: for a fixed row r the columns are folded left-to-right in the identical order with the same
+`op` and `empty` seed — vectorization parallelizes across DISTINCT rows (lanes), never reassociating a single row's
+fold. Standalone micro-bench (`-C target-cpu=x86-64`, matching production): mean 15044->5466us, max 15190->6879us,
+**0 bit-diffs** vs the row loop.
+
+Interleaved same-box A/B (ORIG clean-main binary vs candidate binary, best-of-6 p50, 1M x 10 f64):
+
+| workload | ORIG main | tiled cand | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | --- |
+| `df_mean_axis1` | 16623.9us | 6581.0us | **2.53x** | ~9.9x (pandas 65342us) |
+| `df_max_axis1`  | 16672.1us | 6707.4us | **2.49x** | ~9.4x (pandas 62820us) |
+| `df_prod_axis1` | 16463.0us | 6479.6us | **2.54x** | ~19.9x (pandas 129119us) |
+| `df_var_axis1` (control) | 19306.5us | 19251.6us | 1.00x | untouched (`reduce_rows_func_f64`) |
+| `df_std_axis1` (control) | 20671.5us | 20730.8us | 1.00x | untouched |
+| `df_median_axis1` (control) | 105740.7us | 106649.5us | 0.99x | untouched |
+
+`sum_axis1`/`min_axis1` (not in fp-bench) get the same win through the shared `reduce_rows_f64`. GREEN: 79 axis1 lib
+tests + full fp-frame suite pass; bit-identical. **LANDED on main.**
+
+LESSON: a DataFrame reduction whose axis is orthogonal to storage (axis=1 over column-major f64) is BOTH cache-strided
+AND blocks vectorization. Tile the rows + stream columns to convert it into sequential SIMD passes with an L1-resident
+accumulator, without changing the per-row fold order (so it stays bit-identical). Open siblings on the same vein:
+`reduce_rows_func_f64` (var/std/sem/skew axis=1 — needs a tiled two-pass moment kernel: tiled row-sum -> row-means,
+then tiled `(col - mean)^2` accumulation) and `reduce_rows_int64`.

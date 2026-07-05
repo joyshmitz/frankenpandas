@@ -8,10 +8,14 @@ fn main() {
     let mode = a.get(3).map(String::as_str).unwrap_or("dense");
     let data: Vec<i64> = if mode == "wide" || mode == "dt" {
         // Sparse full-range i64, ~5M distinct: no dense bitset possible -> hashset.
-        (0..n as i64).map(|i| i.wrapping_mul(2_654_435_761)).collect()
+        (0..n as i64)
+            .map(|i| i.wrapping_mul(2_654_435_761))
+            .collect()
     } else {
         // ~1M distinct in [0,1M): dense direct-address regime.
-        (0..n as i64).map(|i| (i.wrapping_mul(2_654_435_761)).rem_euclid(1_000_000)).collect()
+        (0..n as i64)
+            .map(|i| (i.wrapping_mul(2_654_435_761)).rem_euclid(1_000_000))
+            .collect()
     };
     let col = if mode == "dt" {
         Column::from_datetime64_values(data)

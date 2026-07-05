@@ -13,7 +13,11 @@ fn main() {
         std::hint::black_box(r.len());
         best = best.min(t.elapsed().as_nanos());
     }
-    println!("filter_by_mask i64 {}M (50%): best={:.2}ms", n / 1_000_000, best as f64 / 1e6);
+    println!(
+        "filter_by_mask i64 {}M (50%): best={:.2}ms",
+        n / 1_000_000,
+        best as f64 / 1e6
+    );
     let mut best = u128::MAX;
     for _ in 0..6 {
         let t = std::time::Instant::now();
@@ -21,5 +25,9 @@ fn main() {
         std::hint::black_box(r.len());
         best = best.min(t.elapsed().as_nanos());
     }
-    println!("filter_by_mask f64 {}M (50%): best={:.2}ms", n / 1_000_000, best as f64 / 1e6);
+    println!(
+        "filter_by_mask f64 {}M (50%): best={:.2}ms",
+        n / 1_000_000,
+        best as f64 / 1e6
+    );
 }

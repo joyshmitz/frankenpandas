@@ -14,7 +14,13 @@ fn main() {
         Column::from_i64_values(vals)
     };
     let needles: Vec<Scalar> = (0..m as i64)
-        .map(|i| if dt { Scalar::Datetime64(i * 7) } else { Scalar::Int64(i * 7) })
+        .map(|i| {
+            if dt {
+                Scalar::Datetime64(i * 7)
+            } else {
+                Scalar::Int64(i * 7)
+            }
+        })
         .collect();
     let mut best = u128::MAX;
     for _ in 0..6 {
@@ -26,5 +32,8 @@ fn main() {
             best = e;
         }
     }
-    println!("searchsorted {n}/{m}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "searchsorted {n}/{m}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

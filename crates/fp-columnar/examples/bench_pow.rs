@@ -12,5 +12,8 @@ fn main() {
         std::hint::black_box(r.len());
         best = best.min(t.elapsed().as_nanos());
     }
-    println!("pow col**col n={n}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "pow col**col n={n}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

@@ -1,6 +1,5 @@
 //! Column::fillna over a 5M nullable column (1/4 missing). bench_fillna <n> <dt>
-use fp_columnar::Column;
-use fp_columnar::ValidityMask;
+use fp_columnar::{Column, ValidityMask};
 use fp_types::Scalar;
 
 fn main() {
@@ -32,5 +31,8 @@ fn main() {
             best = e;
         }
     }
-    println!("fillna {dt} n={n}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "fillna {dt} n={n}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

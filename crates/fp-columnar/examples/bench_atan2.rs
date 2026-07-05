@@ -8,7 +8,12 @@ fn main() {
     let mut best = u128::MAX;
     for _ in 0..6 {
         let t = std::time::Instant::now();
-        let r = if op == "hypot" { x.hypot(&y) } else { x.atan2(&y) }.unwrap();
+        let r = if op == "hypot" {
+            x.hypot(&y)
+        } else {
+            x.atan2(&y)
+        }
+        .unwrap();
         std::hint::black_box(r.len());
         best = best.min(t.elapsed().as_nanos());
     }

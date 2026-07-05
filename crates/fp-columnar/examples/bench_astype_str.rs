@@ -19,5 +19,8 @@ fn main() {
             best = e;
         }
     }
-    println!("astype Int64->Utf8 n={n}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "astype Int64->Utf8 n={n}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

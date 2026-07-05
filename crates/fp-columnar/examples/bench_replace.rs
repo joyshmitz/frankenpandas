@@ -13,7 +13,12 @@ fn main() {
         let r = col.replace(&to_rep, &rep).unwrap();
         std::hint::black_box(r.len());
         let e = t.elapsed().as_nanos();
-        if e < best { best = e; }
+        if e < best {
+            best = e;
+        }
     }
-    println!("replace i64 n={n}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "replace i64 n={n}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

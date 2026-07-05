@@ -18,5 +18,8 @@ fn main() {
             best = e;
         }
     }
-    println!("sort_values datetime n={n}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "sort_values datetime n={n}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

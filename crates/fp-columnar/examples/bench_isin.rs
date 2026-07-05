@@ -5,7 +5,9 @@ use fp_types::Scalar;
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let n: usize = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
-    let data: Vec<i64> = (0..n as i64).map(|i| (i.wrapping_mul(2_654_435_761)).rem_euclid(1_000_000)).collect();
+    let data: Vec<i64> = (0..n as i64)
+        .map(|i| (i.wrapping_mul(2_654_435_761)).rem_euclid(1_000_000))
+        .collect();
     let col = Column::from_i64_values(data);
     let needles: Vec<Scalar> = (0..1000).step_by(2).map(Scalar::Int64).collect();
     let mut best = u128::MAX;

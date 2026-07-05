@@ -8,7 +8,13 @@ fn main() {
     let mut best = u128::MAX;
     for _ in 0..6 {
         let t = std::time::Instant::now();
-        let r = match op { "ln" => col.log(), "sin" => col.sin(), "sqrt" => col.sqrt(), _ => col.exp() }.unwrap();
+        let r = match op {
+            "ln" => col.log(),
+            "sin" => col.sin(),
+            "sqrt" => col.sqrt(),
+            _ => col.exp(),
+        }
+        .unwrap();
         std::hint::black_box(r.len());
         best = best.min(t.elapsed().as_nanos());
     }

@@ -15,7 +15,12 @@ fn main() {
         let r = col.pct_change(1).unwrap();
         std::hint::black_box(r.len());
         let e = t.elapsed().as_nanos();
-        if e < best { best = e; }
+        if e < best {
+            best = e;
+        }
     }
-    println!("pct_change {dt} n={n}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "pct_change {dt} n={n}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

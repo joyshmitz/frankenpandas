@@ -7,9 +7,17 @@ fn main() {
     let k: usize = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
     let dt = a.get(3).map(String::as_str).unwrap_or("f64");
     let col = if dt == "dt" {
-        Column::from_datetime64_values((0..n as i64).map(|i| i.wrapping_mul(2_654_435_761)).collect())
+        Column::from_datetime64_values(
+            (0..n as i64)
+                .map(|i| i.wrapping_mul(2_654_435_761))
+                .collect(),
+        )
     } else if dt == "i64" {
-        Column::from_i64_values((0..n as i64).map(|i| i.wrapping_mul(2_654_435_761)).collect())
+        Column::from_i64_values(
+            (0..n as i64)
+                .map(|i| i.wrapping_mul(2_654_435_761))
+                .collect(),
+        )
     } else {
         Column::from_f64_values(
             (0..n as u64)
@@ -31,5 +39,8 @@ fn main() {
             best = e;
         }
     }
-    println!("nlargest({k}) {dt} n={n}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "nlargest({k}) {dt} n={n}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

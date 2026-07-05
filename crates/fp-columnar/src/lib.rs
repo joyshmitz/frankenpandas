@@ -5564,7 +5564,9 @@ fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Col
     if keep == "first" && n >= 1 && n <= NKEEP_BOUNDED_SCAN_MAX_K {
         if let Some(data) = col.as_i64_slice() {
             if n < data.len() {
-                return Ok(Column::from_i64_values_owned(nkeep_typed_i64(data, n, ascending)));
+                return Ok(Column::from_i64_values_owned(nkeep_typed_i64(
+                    data, n, ascending,
+                )));
             }
         } else if let Some(data) = col.as_f64_slice() {
             if n < data.len() {
@@ -6151,27 +6153,26 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<i64>) {
 /// No `Scalar` boxing on input OR output — the caller wraps via
 /// `from_i64_values` / `from_datetime64_values`.
 fn factorize_i64_typed(data: &[i64], sort: bool) -> (Vec<i64>, Vec<i64>) {
-    let (mut codes, mut uniques) =
-        if let Some((min, range)) = i64_direct_address_range(data) {
-            let mut code_table = vec![-1i64; range];
-            let mut uniques: Vec<i64> = Vec::new();
-            let mut codes: Vec<i64> = Vec::with_capacity(data.len());
-            for &v in data {
-                let slot = (v as i128 - min as i128) as usize;
-                let existing = code_table[slot];
-                if existing < 0 {
-                    let code = uniques.len() as i64;
-                    code_table[slot] = code;
-                    uniques.push(v);
-                    codes.push(code);
-                } else {
-                    codes.push(existing);
-                }
+    let (mut codes, mut uniques) = if let Some((min, range)) = i64_direct_address_range(data) {
+        let mut code_table = vec![-1i64; range];
+        let mut uniques: Vec<i64> = Vec::new();
+        let mut codes: Vec<i64> = Vec::with_capacity(data.len());
+        for &v in data {
+            let slot = (v as i128 - min as i128) as usize;
+            let existing = code_table[slot];
+            if existing < 0 {
+                let code = uniques.len() as i64;
+                code_table[slot] = code;
+                uniques.push(v);
+                codes.push(code);
+            } else {
+                codes.push(existing);
             }
-            (codes, uniques)
-        } else {
-            factorize_i64_wide(data)
-        };
+        }
+        (codes, uniques)
+    } else {
+        factorize_i64_wide(data)
+    };
 
     if sort && !uniques.is_empty() {
         let mut ordering: Vec<usize> = (0..uniques.len()).collect();
@@ -11151,10 +11152,10 @@ impl Column {
                         op,
                         ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv
                     ) {
-                            par_map_vec_f64(l.len(), |i| apply(l[i], r[i]))
-                        } else {
-                            l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect()
-                        };
+                        par_map_vec_f64(l.len(), |i| apply(l[i], r[i]))
+                    } else {
+                        l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect()
+                    };
                     return Some(Ok(Self::from_f64_values_owned(result)));
                 }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Float64);
@@ -12798,7 +12799,10 @@ impl Column {
                 ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
                 ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
             };
-            return Ok(Self::from_bool_values_with_validity(bools, validity.clone()));
+            return Ok(Self::from_bool_values_with_validity(
+                bools,
+                validity.clone(),
+            ));
         }
 
         let values = self
@@ -13016,9 +13020,7 @@ impl Column {
         // Bit-identical: every value is present (cast_fill is never applied) and
         // the output is the same all-valid Int64 column. cast_scalar above has
         // already validated/errored on the fill value.
-        if self.dtype == DType::Int64
-            && self.as_i64_slice().is_some()
-        {
+        if self.dtype == DType::Int64 && self.as_i64_slice().is_some() {
             // `as_i64_slice` is Some only for an all-valid Int64 backing → nothing
             // to fill, output == input. Share in O(1) instead of `to_vec`-copying
             // the whole buffer.
@@ -13621,11 +13623,7 @@ impl Column {
                 }
             }
         }
-        if any {
-            Some(result)
-        } else {
-            None
-        }
+        if any { Some(result) } else { None }
     }
 
     /// Σ(v−mean)² over an all-valid Float64 concat output, folding each chunk
@@ -17136,7 +17134,9 @@ impl Column {
                 // sort_values+take == i64 cmp + position. No-NaT (NaT=i64::MIN is
                 // missing → would sort to the end / be excluded) routes here.
                 if n < data.len() {
-                    return Ok(Self::from_datetime64_values(nkeep_typed_i64(data, n, false)));
+                    return Ok(Self::from_datetime64_values(nkeep_typed_i64(
+                        data, n, false,
+                    )));
                 }
             }
         }
@@ -17322,7 +17322,9 @@ impl Column {
         if let Some(data) = self.as_i64_slice() {
             // Direct VALUE radix (no perm, no gather) — bit-identical sorted
             // values, far faster than argsort+gather for sort_values.
-            return Ok(Self::from_i64_values_owned(radix_sort_i64_values(data, ascending)));
+            return Ok(Self::from_i64_values_owned(radix_sort_i64_values(
+                data, ascending,
+            )));
         }
         if let Some(data) = self.as_f64_slice() {
             let perm = self
@@ -17339,7 +17341,9 @@ impl Column {
             && let Some(data) = self.as_datetime64_slice()
             && !data.contains(&i64::MIN)
         {
-            return Ok(Self::from_datetime64_values(radix_sort_i64_values(data, ascending)));
+            return Ok(Self::from_datetime64_values(radix_sort_i64_values(
+                data, ascending,
+            )));
         }
         // All-valid Utf8: gather by the stable MSD radix permutation. The
         // fallback below sorts (idx, &Scalar) pairs stably with the same
@@ -17465,9 +17469,15 @@ impl Column {
         // ignores a partial mask — see NEGATIVE_EVIDENCE.)
         if abs < len {
             // Leading (periods>0) or trailing (periods<0) `abs` slots are vacated.
-            let boundary: (usize, usize) = if periods > 0 { (0, abs) } else { (len - abs, abs) };
-            let validity =
-                ValidityMask::from_invalid_ranges(Arc::from(vec![boundary].into_boxed_slice()), len);
+            let boundary: (usize, usize) = if periods > 0 {
+                (0, abs)
+            } else {
+                (len - abs, abs)
+            };
+            let validity = ValidityMask::from_invalid_ranges(
+                Arc::from(vec![boundary].into_boxed_slice()),
+                len,
+            );
             // Int64: (x as f64) − (y as f64) is always finite (|i64 as f64| ≤ 9.2e18,
             // difference ≤ 1.8e19) so the body carries no NaN.
             if let Some(data) = self.as_i64_slice() {
@@ -17918,7 +17928,10 @@ impl Column {
         //   * all-valid Int64 → codes + uniques as Int64.
         if let Some(data) = self.as_i64_slice() {
             let (codes, uniques) = factorize_i64_typed(data, sort);
-            return Ok((Self::from_i64_values_owned(codes), Self::from_i64_values_owned(uniques)));
+            return Ok((
+                Self::from_i64_values_owned(codes),
+                Self::from_i64_values_owned(uniques),
+            ));
         }
         //   * all-valid Datetime64 with NO NaT (i64::MIN) → codes as Int64,
         //     uniques re-wrapped as Datetime64. The generic path codes NaT as
@@ -18064,7 +18077,10 @@ impl Column {
             // Bit-identical: valid slots use the SAME `data[i].abs()`; missing
             // slots view as `missing_for_dtype(Float64)` either way.
             let out = par_map_vec_f64(data.len(), |i| data[i].abs());
-            return Ok(Self::from_f64_values_with_validity(out, self.validity.clone()));
+            return Ok(Self::from_f64_values_with_validity(
+                out,
+                self.validity.clone(),
+            ));
         }
 
         let mut out = Vec::with_capacity(self.values.len());
@@ -18120,17 +18136,18 @@ impl Column {
             let out: Vec<f64> = data.iter().map(|&x| -x).collect();
             return Ok(Self::from_f64_all_valid_with_finite_opt(out, witness));
         }
-        // Nullable Float64 fast path (mirror of abs): negate present slots over the
-        // raw &[f64], NaN at invalid slots, re-ingest via `from_f64_values`.
-        // Bit-identical: -x of a present (non-NaN) value is never NaN, so the NaN
-        // set == the original missing set (~584ms / 26x slower than pandas before).
+        // Nullable Float64 fast path (mirror of abs): neg preserves missingness
+        // exactly, so negate every raw slot branchlessly and carry the input
+        // validity mask onto the output. Invalid slot data is hidden by the mask;
+        // valid slots use the same `-x` as the scalar loop.
         if self.dtype == DType::Float64
-            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+            && let Some((data, _)) = self.as_f64_slice_with_validity()
         {
-            let out: Vec<f64> = (0..data.len())
-                .map(|i| if validity.get(i) { -data[i] } else { f64::NAN })
-                .collect();
-            return Ok(Self::from_f64_values(out));
+            let out = par_map_vec_f64(data.len(), |i| -data[i]);
+            return Ok(Self::from_f64_values_with_validity(
+                out,
+                self.validity.clone(),
+            ));
         }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
@@ -18696,14 +18713,16 @@ impl Column {
     /// order (chunk base+j → global index), same from_f64_values_owned output.
     fn typed_float_unary_par<F: Fn(f64) -> f64 + Sync>(&self, f: F) -> Option<Self> {
         if let Some(data) = self.as_f64_slice() {
-            return Some(Self::from_f64_values_owned(par_map_vec_f64(data.len(), |i| {
-                f(data[i])
-            })));
+            return Some(Self::from_f64_values_owned(par_map_vec_f64(
+                data.len(),
+                |i| f(data[i]),
+            )));
         }
         if let Some(data) = self.as_i64_slice() {
-            return Some(Self::from_f64_values_owned(par_map_vec_f64(data.len(), |i| {
-                f(data[i] as f64)
-            })));
+            return Some(Self::from_f64_values_owned(par_map_vec_f64(
+                data.len(),
+                |i| f(data[i] as f64),
+            )));
         }
         None
     }
@@ -18766,10 +18785,7 @@ impl Column {
     /// expensive `f(x)` runs in parallel (par_map_vec_f64); the validity/finiteness
     /// scan stays a single cheap serial pass over the result. Bit-identical to the
     /// serial helper (same `f`, same NaN→invalid rule, same order/witness).
-    fn typed_float_unary_nullable_owned_par<F: Fn(f64) -> f64 + Sync>(
-        &self,
-        f: F,
-    ) -> Option<Self> {
+    fn typed_float_unary_nullable_owned_par<F: Fn(f64) -> f64 + Sync>(&self, f: F) -> Option<Self> {
         let len = self.len();
         let out = if let Some(data) = self.as_f64_slice() {
             par_map_vec_f64(len, |i| f(data[i]))
@@ -18784,7 +18800,13 @@ impl Column {
             // the validity scan below marks missing — bit-identical to those ops'
             // Scalar arm (`missing ⇒ Float64(NaN)`); valid slot ⇒ f(v), itself NaN
             // for e.g. sqrt(negative), also ⇒ missing (same as the Scalar path).
-            par_map_vec_f64(len, |i| if validity.get(i) { f(data[i]) } else { f64::NAN })
+            par_map_vec_f64(len, |i| {
+                if validity.get(i) {
+                    f(data[i])
+                } else {
+                    f64::NAN
+                }
+            })
         } else {
             return None;
         };
@@ -19928,7 +19950,9 @@ impl Column {
         // (`x * x`, same overflow behavior as the scalar loop); Float64 squares
         // over the f64 buffer. Bit-identical.
         if let Some(data) = self.as_i64_slice() {
-            return Ok(Self::from_i64_values_owned(data.iter().map(|&x| x * x).collect()));
+            return Ok(Self::from_i64_values_owned(
+                data.iter().map(|&x| x * x).collect(),
+            ));
         }
         if let Some(data) = self.as_f64_slice() {
             return Ok(Self::from_f64_values(data.iter().map(|&x| x * x).collect()));
@@ -20103,7 +20127,10 @@ impl Column {
             && let Some((data, _)) = self.as_f64_slice_with_validity()
         {
             let out = par_map_vec_f64(data.len(), |i| clamp(data[i]));
-            return Ok(Self::from_f64_values_with_validity(out, self.validity.clone()));
+            return Ok(Self::from_f64_values_with_validity(
+                out,
+                self.validity.clone(),
+            ));
         }
 
         let mut out = Vec::with_capacity(self.values.len());
@@ -20219,7 +20246,10 @@ impl Column {
             let out = par_map_vec_f64(data.len(), |i| {
                 (data[i] * factor).round_ties_even() / factor
             });
-            return Ok(Self::from_f64_values_with_validity(out, self.validity.clone()));
+            return Ok(Self::from_f64_values_with_validity(
+                out,
+                self.validity.clone(),
+            ));
         }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
@@ -21103,7 +21133,9 @@ mod tests {
             matches!(&gathered.values, ScalarValues::LazyAllValidPeriodVec { .. }),
             "Period scattered gather should defer scalar materialization"
         );
-        if let ScalarValues::LazyAllValidPeriodVec { data, freq, values, .. } = &gathered.values
+        if let ScalarValues::LazyAllValidPeriodVec {
+            data, freq, values, ..
+        } = &gathered.values
         {
             assert_eq!(*freq, PeriodFreq::Monthly);
             assert_eq!(data.as_slice(), &[42, 10, -5, 42]);
@@ -21274,7 +21306,10 @@ mod tests {
         // owned `LazyAllValidFloat64Vec` backing (no `Arc::<[f64]>::from` copy —
         // [[f64-arc-copy-on-produce]]); it still defers Scalar materialization.
         assert!(
-            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64Vec { .. }),
+            matches!(
+                &gathered.values,
+                ScalarValues::LazyAllValidFloat64Vec { .. }
+            ),
             "Float64 scattered gather should defer scalar materialization (owned-move backing)"
         );
         if let ScalarValues::LazyAllValidFloat64Vec { data, values, .. } = &gathered.values {
@@ -21306,7 +21341,10 @@ mod tests {
 
         assert_eq!(gathered.values(), expected.values());
         assert!(
-            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64Vec { .. }),
+            matches!(
+                &gathered.values,
+                ScalarValues::LazyAllValidFloat64Vec { .. }
+            ),
             "Float64 gather should stay lazy (owned-move backing) after read"
         );
         if let ScalarValues::LazyAllValidFloat64Vec { values, .. } = &gathered.values {
@@ -21585,7 +21623,10 @@ mod tests {
         // Scattered all-present reindex gathers through the same owned-move path
         // as take_positions (no Arc<[f64]> copy); still defers materialization.
         assert!(
-            matches!(&gathered.values, ScalarValues::LazyAllValidFloat64Vec { .. }),
+            matches!(
+                &gathered.values,
+                ScalarValues::LazyAllValidFloat64Vec { .. }
+            ),
             "all-present Float64 reindex should defer scalar materialization (owned-move backing)"
         );
         if let ScalarValues::LazyAllValidFloat64Vec { data, values, .. } = &gathered.values {
@@ -22345,13 +22386,15 @@ mod tests {
         // Output stays a lazy all-valid typed Float64 backing (not Scalar-
         // materialized). The owned move-not-realloc path uses the `Vec` variant;
         // accept either it or the `Arc<[f64]>` variant.
-        assert!(matches!(
-            &result.values,
-            ScalarValues::LazyAllValidFloat64 { values, .. } if values.get().is_none()
-        ) || matches!(
-            &result.values,
-            ScalarValues::LazyAllValidFloat64Vec { values, .. } if values.get().is_none()
-        ));
+        assert!(
+            matches!(
+                &result.values,
+                ScalarValues::LazyAllValidFloat64 { values, .. } if values.get().is_none()
+            ) || matches!(
+                &result.values,
+                ScalarValues::LazyAllValidFloat64Vec { values, .. } if values.get().is_none()
+            )
+        );
     }
 
     #[test]
@@ -22918,7 +22961,10 @@ mod tests {
                 Scalar::Int64(5),
             ]
         );
-        assert_eq!(column.clone(), Column::from_i64_values_owned(vec![1, 2, 3, 4, 5]));
+        assert_eq!(
+            column.clone(),
+            Column::from_i64_values_owned(vec![1, 2, 3, 4, 5])
+        );
     }
 
     #[test]
@@ -25026,10 +25072,22 @@ mod tests {
                             _ => x == y,
                         })
                 };
-                assert!(vals_eq(typed.cumsum().unwrap().values(), scalar.cumsum().unwrap().values()));
-                assert!(vals_eq(typed.cumprod().unwrap().values(), scalar.cumprod().unwrap().values()));
-                assert!(vals_eq(typed.cummax().unwrap().values(), scalar.cummax().unwrap().values()));
-                assert!(vals_eq(typed.cummin().unwrap().values(), scalar.cummin().unwrap().values()));
+                assert!(vals_eq(
+                    typed.cumsum().unwrap().values(),
+                    scalar.cumsum().unwrap().values()
+                ));
+                assert!(vals_eq(
+                    typed.cumprod().unwrap().values(),
+                    scalar.cumprod().unwrap().values()
+                ));
+                assert!(vals_eq(
+                    typed.cummax().unwrap().values(),
+                    scalar.cummax().unwrap().values()
+                ));
+                assert!(vals_eq(
+                    typed.cummin().unwrap().values(),
+                    scalar.cummin().unwrap().values()
+                ));
             }
         }
 
@@ -25108,7 +25166,10 @@ mod tests {
                 })
                 .collect();
             assert_eq!(got.len(), 3);
-            assert!(got[0] == 0.0 && got[0].is_sign_negative(), "first unique is -0.0");
+            assert!(
+                got[0] == 0.0 && got[0].is_sign_negative(),
+                "first unique is -0.0"
+            );
             assert_eq!(got[1], 1.5);
             assert_eq!(got[2], f64::INFINITY);
 
@@ -25183,7 +25244,10 @@ mod tests {
                     other => panic!("expected Datetime64, got {other:?}"),
                 })
                 .collect();
-            assert_eq!(got, vec![946_684_800_000_000_000, 946_684_837_000_000_000, 100]);
+            assert_eq!(
+                got,
+                vec![946_684_800_000_000_000, 946_684_837_000_000_000, 100]
+            );
 
             // A NaT datum (i64::MIN) must fall through to the generic path, which
             // DROPS NaT — so the open-addressing shortcut must NOT emit it.
@@ -25229,8 +25293,9 @@ mod tests {
             };
             for trial in 0..120 {
                 let n = (next() % 400) as usize + 2;
-                let mut data: Vec<i64> =
-                    (0..n).map(|_| pool[(next() as usize) % pool.len()]).collect();
+                let mut data: Vec<i64> = (0..n)
+                    .map(|_| pool[(next() as usize) % pool.len()])
+                    .collect();
                 data[0] = i64::MIN;
                 data[1] = i64::MAX;
                 assert!(
@@ -25326,7 +25391,9 @@ mod tests {
             };
             for _ in 0..200 {
                 let n = (next() % 50) as usize + 1;
-                let fvals: Vec<f64> = (0..n).map(|_| (next() % 1000) as f64 * 0.5 - 250.0).collect();
+                let fvals: Vec<f64> = (0..n)
+                    .map(|_| (next() % 1000) as f64 * 0.5 - 250.0)
+                    .collect();
                 let typed = Column::from_f64_values(fvals.clone());
                 for p in [1i64, 2, -1, -3, n as i64, n as i64 + 5, -(n as i64) - 2] {
                     let t = typed.shift(p, Scalar::Null(NullKind::NaN)).unwrap();
@@ -25758,7 +25825,9 @@ mod tests {
             ];
             let mut state = 0x9e37_79b9_7f4a_7c15_u64;
             for _ in 0..20_000 {
-                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
                 let exponent = ((state >> 48) % 1200) + 1;
                 let sign = state & (1_u64 << 63);
                 let mantissa = state & 0x000f_ffff_ffff_ffff;
@@ -26049,7 +26118,7 @@ mod tests {
                 let n = (next() % 400) as usize + 1;
                 let ns: Vec<i64> = (0..n)
                     .map(|_| match next() % 9 {
-                        0 => i64::MIN, // NaT (only some trials → exercises fallback)
+                        0 => i64::MIN,            // NaT (only some trials → exercises fallback)
                         1 => (next() % 5) as i64, // ties
                         _ => (next() % 1_000_000) as i64 * 1_000_000,
                     })
@@ -26452,6 +26521,41 @@ mod tests {
         }
 
         #[test]
+        fn neg_nullable_f64_preserves_mask_and_scalar_view() {
+            let data = vec![1.25, -0.0, 5.0, f64::INFINITY, -7.5, f64::NEG_INFINITY];
+            let valid = [true, false, true, true, false, true];
+            let mut mask = ValidityMask::all_valid(data.len());
+            for (idx, is_valid) in valid.iter().copied().enumerate() {
+                if !is_valid {
+                    mask.set(idx, false);
+                }
+            }
+
+            let col = Column::from_f64_values_with_validity(data.clone(), mask);
+            let got = col.neg().expect("nullable neg");
+            let values = got.values();
+            for (idx, is_valid) in valid.iter().copied().enumerate() {
+                if is_valid {
+                    match &values[idx] {
+                        Scalar::Float64(value) => {
+                            assert_eq!(value.to_bits(), (-data[idx]).to_bits(), "idx {idx}");
+                        }
+                        other => panic!("expected Float64 at {idx}, got {other:?}"),
+                    }
+                } else {
+                    assert!(values[idx].is_missing(), "idx {idx} must stay missing");
+                }
+            }
+
+            let (_, out_mask) = got
+                .as_f64_slice_with_validity()
+                .expect("typed nullable output");
+            for (idx, is_valid) in valid.iter().copied().enumerate() {
+                assert_eq!(out_mask.get(idx), is_valid, "validity idx {idx}");
+            }
+        }
+
+        #[test]
         #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
         fn abs_typed_timing_vs_scalar() {
             use std::time::Instant;
@@ -26589,7 +26693,14 @@ mod tests {
             // All-valid, no-NaT Datetime64 takes the open-addressing ns factorize,
             // re-tagging uniques as Datetime64. Codes = first-seen; uniques carry
             // the ns. (default factorize: sort=false, use_na_sentinel=true.)
-            let ns = vec![100i64, 100, 7_000_000_000_000_000_000, 5, 7_000_000_000_000_000_000, 5];
+            let ns = vec![
+                100i64,
+                100,
+                7_000_000_000_000_000_000,
+                5,
+                7_000_000_000_000_000_000,
+                5,
+            ];
             let col = Column::from_datetime64_values(ns);
             let (codes, uniques) = col.factorize().expect("factorize");
             let got_codes: Vec<i64> = codes
@@ -26651,8 +26762,9 @@ mod tests {
             };
             for trial in 0..120 {
                 let n = (next() % 250) as usize + 2;
-                let mut data: Vec<i64> =
-                    (0..n).map(|_| pool[(next() as usize) % pool.len()]).collect();
+                let mut data: Vec<i64> = (0..n)
+                    .map(|_| pool[(next() as usize) % pool.len()])
+                    .collect();
                 // Guarantee a full-range span so i64_direct_address_range declines
                 // and the wide open-addressing path always runs.
                 data[0] = i64::MIN;
@@ -27083,8 +27195,9 @@ mod tests {
             };
             for trial in 0..120 {
                 let n = (next() % 400) as usize + 2;
-                let mut data: Vec<i64> =
-                    (0..n).map(|_| pool[(next() as usize) % pool.len()]).collect();
+                let mut data: Vec<i64> = (0..n)
+                    .map(|_| pool[(next() as usize) % pool.len()])
+                    .collect();
                 data[0] = i64::MIN;
                 data[1] = i64::MAX;
                 assert!(
@@ -27814,8 +27927,10 @@ mod tests {
                         o => panic!("{o:?}"),
                     })
                     .collect();
-                assert_eq!(got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-                           expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
+                assert_eq!(
+                    got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                );
             }
         }
 
@@ -27842,8 +27957,9 @@ mod tests {
             };
             for trial in 0..150 {
                 let n = (next() % 400) as usize + 2;
-                let mut data: Vec<i64> =
-                    (0..n).map(|_| pool[(next() as usize) % pool.len()]).collect();
+                let mut data: Vec<i64> = (0..n)
+                    .map(|_| pool[(next() as usize) % pool.len()])
+                    .collect();
                 data[0] = i64::MIN;
                 data[1] = i64::MAX;
                 assert!(
@@ -28611,8 +28727,7 @@ mod tests {
             for _ in 0..200 {
                 let n = (next() % 80) as usize + 1;
                 // include zeros (→ zero-prev Null) and negatives
-                let fvals: Vec<f64> =
-                    (0..n).map(|_| (next() % 9) as f64 - 4.0).collect();
+                let fvals: Vec<f64> = (0..n).map(|_| (next() % 9) as f64 - 4.0).collect();
                 let ivals: Vec<i64> = fvals.iter().map(|&v| v as i64).collect();
                 let fcol = Column::from_f64_values(fvals.clone());
                 let icol = Column::from_i64_values_owned(ivals.clone());
@@ -28836,8 +28951,11 @@ mod tests {
                         let mut src: Vec<Option<usize>> = vec![None; n];
                         let mut anchor: Option<usize> = None;
                         let mut run = 0usize;
-                        let idxs: Vec<usize> =
-                            if fwd { (0..n).collect() } else { (0..n).rev().collect() };
+                        let idxs: Vec<usize> = if fwd {
+                            (0..n).collect()
+                        } else {
+                            (0..n).rev().collect()
+                        };
                         for &i in &idxs {
                             if present[i] {
                                 src[i] = Some(i);
@@ -28858,7 +28976,11 @@ mod tests {
                     };
                     for (fwd, got_i, got_f) in [
                         (true, icol.ffill(limit).unwrap(), fcol.ffill(limit).unwrap()),
-                        (false, icol.bfill(limit).unwrap(), fcol.bfill(limit).unwrap()),
+                        (
+                            false,
+                            icol.bfill(limit).unwrap(),
+                            fcol.bfill(limit).unwrap(),
+                        ),
                     ] {
                         let src = oracle(fwd);
                         for i in 0..n {
@@ -29835,7 +29957,10 @@ mod tests {
                         .collect();
                     let mut idx: Vec<usize> = (0..len).collect();
                     idx.sort_by(|&a, &b| {
-                        data[b].partial_cmp(&data[a]).unwrap_or(Ordering::Equal).then(a.cmp(&b))
+                        data[b]
+                            .partial_cmp(&data[a])
+                            .unwrap_or(Ordering::Equal)
+                            .then(a.cmp(&b))
                     });
                     let take = k.min(len);
                     let expected: Vec<u64> =
@@ -29912,7 +30037,9 @@ mod tests {
 
                 // Datetime64 (no NaT): exact i64-ns order. vs sort_values+take
                 // (now exact via the Datetime64 comparator arm).
-                let dts: Vec<i64> = (0..len).map(|_| (next() % 1000) as i64 * 86_400_000_000_000).collect();
+                let dts: Vec<i64> = (0..len)
+                    .map(|_| (next() % 1000) as i64 * 86_400_000_000_000)
+                    .collect();
                 let dcol = Column::from_datetime64_values(dts);
                 let dbits = |c: &Column, take: usize| -> Vec<i64> {
                     c.values()[..take]
@@ -30965,8 +31092,7 @@ mod tests {
             };
             for _ in 0..200 {
                 let n = (next() % 300) as usize + 1;
-                let mut vals: Vec<i64> =
-                    (0..n).map(|_| (next() % 40) as i64 - 20).collect();
+                let mut vals: Vec<i64> = (0..n).map(|_| (next() % 40) as i64 - 20).collect();
                 vals.sort_unstable(); // searchsorted requires sorted input
                 let col = Column::from_i64_values_owned(vals.clone());
                 // Scalar-backed twin forces the generic path (Vec<Scalar> has no
@@ -30975,12 +31101,14 @@ mod tests {
                     Column::from_values(vals.iter().map(|&v| Scalar::Int64(v)).collect())
                         .expect("scalar col");
                 let m = (next() % 50) as usize + 1;
-                let needles: Vec<Scalar> =
-                    (0..m).map(|_| Scalar::Int64((next() % 45) as i64 - 22)).collect();
+                let needles: Vec<Scalar> = (0..m)
+                    .map(|_| Scalar::Int64((next() % 45) as i64 - 22))
+                    .collect();
                 for side in ["left", "right"] {
                     let typed = col.searchsorted_values(&needles, side).expect("typed");
-                    let generic =
-                        scalar_col.searchsorted_values(&needles, side).expect("generic");
+                    let generic = scalar_col
+                        .searchsorted_values(&needles, side)
+                        .expect("generic");
                     assert_eq!(typed.values(), generic.values(), "side={side}");
                 }
             }
@@ -30999,8 +31127,7 @@ mod tests {
             };
             for _ in 0..200 {
                 let n = (next() % 300) as usize + 1;
-                let mut vals: Vec<i64> =
-                    (0..n).map(|_| (next() % 50) as i64 * 1_000_000).collect();
+                let mut vals: Vec<i64> = (0..n).map(|_| (next() % 50) as i64 * 1_000_000).collect();
                 vals.sort_unstable();
                 let col = Column::from_datetime64_values(vals.clone());
                 let scalar_col =
@@ -31012,8 +31139,9 @@ mod tests {
                     .collect();
                 for side in ["left", "right"] {
                     let typed = col.searchsorted_values(&needles, side).expect("typed");
-                    let generic =
-                        scalar_col.searchsorted_values(&needles, side).expect("generic");
+                    let generic = scalar_col
+                        .searchsorted_values(&needles, side)
+                        .expect("generic");
                     assert_eq!(typed.values(), generic.values(), "side={side}");
                 }
             }

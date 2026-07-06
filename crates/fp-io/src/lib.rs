@@ -6070,6 +6070,335 @@ fn promote_synthetic_row_multiindex_if_present(frame: &DataFrame) -> Result<Data
 ///   (matching `serde_json`'s `preserve_order` map);
 /// - the frame is assembled with the same `column_from_json_values` +
 ///   `promote_synthetic_row_multiindex_if_present` tail.
+/// Depth- and string-aware scan of a records array `[ {...}, {...}, … ]`: returns the
+/// body byte range `[body_start, body_end)` (just inside `[` … `]`) and the byte offset
+/// of every DEPTH-1 (record-separating) comma. `None` unless the input is a non-empty
+/// top-level array. Used to split a records JSON into whole-record byte ranges for
+/// parallel parsing; correctness is verified by the flat scanner re-parsing each range.
+fn scan_json_record_boundaries(s: &[u8]) -> Option<(usize, usize, Vec<usize>)> {
+    let n = s.len();
+    let mut i = 0;
+    while i < n && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    if i >= n || s[i] != b'[' {
+        return None;
+    }
+    let body_start = i + 1;
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    let mut commas: Vec<usize> = Vec::new();
+    let mut body_end = None;
+    let mut j = i;
+    while j < n {
+        let c = s[j];
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == b'\\' {
+                esc = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else {
+            match c {
+                b'"' => in_str = true,
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = Some(j);
+                        break;
+                    }
+                }
+                b',' if depth == 1 => commas.push(j),
+                _ => {}
+            }
+        }
+        j += 1;
+    }
+    let body_end = body_end?;
+    // Trailing content after the closing `]` must be whitespace only.
+    let mut t = body_end + 1;
+    while t < n && matches!(s[t], b' ' | b'\t' | b'\n' | b'\r') {
+        t += 1;
+    }
+    if t != n {
+        return None;
+    }
+    if body_start >= body_end {
+        return None; // empty array -> generic path
+    }
+    Some((body_start, body_end, commas))
+}
+
+/// Parse a flat records SEQUENCE `{...},{...},…` occupying `s[lo..hi]` (no surrounding
+/// `[` `]`; `hi` is a record boundary or the closing `]` position) into per-column
+/// `Vec<Scalar>` with first-seen column order and `Null` backfill for absent keys —
+/// the exact same value handling as [`try_read_json_records_flat`] (numbers via
+/// `serde_json::from_str::<Number>`), factored out so parallel workers can each parse a
+/// byte range. Returns `None` on anything the flat scanner bails on. `rec` = row count.
+fn parse_json_records_range(
+    s: &[u8],
+    lo: usize,
+    hi: usize,
+) -> Option<(Vec<String>, Vec<Vec<Scalar>>, usize)> {
+    let mut i = lo;
+    macro_rules! ws {
+        () => {
+            while i < hi && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r') {
+                i += 1;
+            }
+        };
+    }
+    let mut col_names: Vec<String> = Vec::new();
+    let mut cols: Vec<Vec<Scalar>> = Vec::new();
+    let mut last_seen: Vec<usize> = Vec::new();
+    let mut name_to_idx: std::collections::HashMap<Vec<u8>, usize> =
+        std::collections::HashMap::new();
+    let mut rec: usize = 0;
+    loop {
+        ws!();
+        if i >= hi {
+            break;
+        }
+        if s[i] != b'{' {
+            return None;
+        }
+        i += 1;
+        loop {
+            ws!();
+            if i < hi && s[i] == b'}' {
+                i += 1;
+                break;
+            }
+            if i >= hi || s[i] != b'"' {
+                return None;
+            }
+            i += 1;
+            let kstart = i;
+            while i < hi && s[i] != b'"' {
+                if s[i] == b'\\' {
+                    return None;
+                }
+                i += 1;
+            }
+            if i >= hi {
+                return None;
+            }
+            let key = &s[kstart..i];
+            i += 1;
+            ws!();
+            if i >= hi || s[i] != b':' {
+                return None;
+            }
+            i += 1;
+            ws!();
+            if i >= hi {
+                return None;
+            }
+            let scalar = match s[i] {
+                b'-' | b'0'..=b'9' => {
+                    let vstart = i;
+                    if s[i] == b'-' {
+                        i += 1;
+                    }
+                    let mut any = false;
+                    while i < hi && matches!(s[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                        any = true;
+                        i += 1;
+                    }
+                    if !any {
+                        return None;
+                    }
+                    let Ok(numstr) = std::str::from_utf8(&s[vstart..i]) else {
+                        return None;
+                    };
+                    match serde_json::from_str::<serde_json::Number>(numstr) {
+                        Ok(num) => {
+                            if let Some(v) = num.as_i64() {
+                                Scalar::Int64(v)
+                            } else if let Some(v) = num.as_f64() {
+                                Scalar::Float64(v)
+                            } else {
+                                Scalar::Utf8(num.to_string())
+                            }
+                        }
+                        Err(_) => return None,
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    let vstart = i;
+                    while i < hi && s[i] != b'"' {
+                        if s[i] == b'\\' {
+                            return None;
+                        }
+                        i += 1;
+                    }
+                    if i >= hi {
+                        return None;
+                    }
+                    let raw = &s[vstart..i];
+                    i += 1;
+                    match std::str::from_utf8(raw) {
+                        Ok(st) => Scalar::Utf8(st.to_owned()),
+                        Err(_) => return None,
+                    }
+                }
+                b't' if s[i..hi].starts_with(b"true") => {
+                    i += 4;
+                    Scalar::Bool(true)
+                }
+                b'f' if s[i..hi].starts_with(b"false") => {
+                    i += 5;
+                    Scalar::Bool(false)
+                }
+                b'n' if s[i..hi].starts_with(b"null") => {
+                    i += 4;
+                    Scalar::Null(NullKind::Null)
+                }
+                _ => return None,
+            };
+            let ci = match name_to_idx.get(key) {
+                Some(&c) => c,
+                None => {
+                    let c = cols.len();
+                    name_to_idx.insert(key.to_vec(), c);
+                    col_names.push(String::from_utf8_lossy(key).into_owned());
+                    let mut v: Vec<Scalar> = Vec::new();
+                    v.resize(rec, Scalar::Null(NullKind::Null));
+                    cols.push(v);
+                    last_seen.push(usize::MAX);
+                    c
+                }
+            };
+            if last_seen[ci] == rec {
+                *cols[ci].last_mut().expect("seen this record => non-empty") = scalar;
+            } else {
+                cols[ci].push(scalar);
+                last_seen[ci] = rec;
+            }
+            ws!();
+            if i < hi && s[i] == b',' {
+                i += 1;
+                continue;
+            }
+        }
+        for c in 0..cols.len() {
+            if last_seen[c] != rec {
+                cols[c].push(Scalar::Null(NullKind::Null));
+            }
+        }
+        rec += 1;
+        ws!();
+        if i < hi && s[i] == b',' {
+            i += 1;
+            continue;
+        }
+        if i >= hi {
+            break;
+        }
+        return None;
+    }
+    Some((col_names, cols, rec))
+}
+
+/// Parallel records fast path: split the array at record boundaries, parse the chunks
+/// concurrently (each a `parse_json_records_range`), and merge. Returns `None` (defer to
+/// the serial scanner / Value path) unless it is a large FULLY-HOMOGENEOUS records array
+/// — every chunk must report the IDENTICAL first-seen `col_names`, which guarantees the
+/// merged columns equal the serial scanner's output (concatenation preserves record
+/// order; the serial first-seen order equals the shared per-chunk order). Bit-identical:
+/// same per-value parsing, same column order, same `column_from_json_values` +
+/// `promote_synthetic_row_multiindex_if_present` assembly.
+fn try_read_json_records_flat_parallel(input: &str) -> Result<Option<DataFrame>, IoError> {
+    let s = input.as_bytes();
+    let Some((body_start, body_end, commas)) = scan_json_record_boundaries(s) else {
+        return Ok(None);
+    };
+    let nrec = commas.len() + 1;
+    const PAR_MIN_RECORDS: usize = 50_000;
+    const PAR_MIN_RECORDS_PER_WORKER: usize = 16_384;
+    if nrec < PAR_MIN_RECORDS {
+        return Ok(None);
+    }
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(16)
+        .min(nrec / PAR_MIN_RECORDS_PER_WORKER)
+        .max(1);
+    if workers < 2 {
+        return Ok(None);
+    }
+    let per = nrec.div_ceil(workers);
+    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(workers);
+    let mut rstart = 0;
+    while rstart < nrec {
+        let rend = (rstart + per).min(nrec);
+        let lo = if rstart == 0 {
+            body_start
+        } else {
+            commas[rstart - 1] + 1
+        };
+        let hi = if rend == nrec {
+            body_end
+        } else {
+            commas[rend - 1]
+        };
+        ranges.push((lo, hi));
+        rstart = rend;
+    }
+    let parsed: Vec<Option<(Vec<String>, Vec<Vec<Scalar>>, usize)>> = std::thread::scope(|scope| {
+        ranges
+            .iter()
+            .map(|&(lo, hi)| scope.spawn(move || parse_json_records_range(s, lo, hi)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().expect("json parse thread"))
+            .collect()
+    });
+    let Some(parts) = parsed.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+    // Homogeneity gate: every chunk must share the FIRST chunk's exact column order.
+    if parts[0].0.is_empty() {
+        return Ok(None);
+    }
+    let names: Vec<String> = parts[0].0.clone();
+    if parts.iter().any(|p| p.0 != names) {
+        return Ok(None);
+    }
+    let k = names.len();
+    let total_rows: usize = parts.iter().map(|p| p.2).sum();
+    // Merge per column (chunk c's cols[j] IS column names[j] since orders match),
+    // then build the typed columns in parallel (columns are independent).
+    let mut merged: Vec<Vec<Scalar>> = (0..k).map(|_| Vec::with_capacity(total_rows)).collect();
+    let mut parts = parts;
+    for p in &mut parts {
+        for (j, col) in p.1.iter_mut().enumerate() {
+            merged[j].append(col);
+        }
+    }
+    let built: Vec<Result<Column, IoError>> = std::thread::scope(|scope| {
+        merged
+            .into_iter()
+            .map(|vals| scope.spawn(move || column_from_json_values(vals)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().expect("json column-build thread"))
+            .collect()
+    });
+    let mut out = BTreeMap::new();
+    for (name, col) in names.iter().zip(built) {
+        out.insert(name.clone(), col?);
+    }
+    let index = Index::from_i64((0..total_rows as i64).collect());
+    let frame = DataFrame::new_with_column_order(index, out, names)?;
+    Ok(Some(promote_synthetic_row_multiindex_if_present(&frame)?))
+}
+
 fn try_read_json_records_flat(input: &str) -> Result<Option<DataFrame>, IoError> {
     let s = input.as_bytes();
     let n = s.len();
@@ -6270,10 +6599,15 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
     // input is ~3.2s via the tree). `try_read_json_records_flat` returns `None` to
     // defer to the generic path below on any non-flat input, so the frame is
     // bit-identical for every input.
-    if matches!(orient, JsonOrient::Records)
-        && let Some(frame) = try_read_json_records_flat(input)?
-    {
-        return Ok(frame);
+    if matches!(orient, JsonOrient::Records) {
+        // Parallel records fast path first (large homogeneous arrays), then the serial
+        // flat scanner, then the generic Value-tree path. All produce bit-identical frames.
+        if let Some(frame) = try_read_json_records_flat_parallel(input)? {
+            return Ok(frame);
+        }
+        if let Some(frame) = try_read_json_records_flat(input)? {
+            return Ok(frame);
+        }
     }
     let parsed = parse_json_value_allowing_pandas_nan(input)?;
 
@@ -14023,6 +14357,27 @@ mod tests {
         assert!(
             csv_large.as_bytes().starts_with(csv_small.as_bytes()),
             "parallel CSV diverges from serial on the shared 0..49000 rows"
+        );
+    }
+
+    #[test]
+    fn json_read_parallel_matches_serial_ironquail() {
+        // 60k >= PAR_MIN_RECORDS so records read via the PARALLEL boundary-split path;
+        // compare it directly to the SERIAL flat scanner on the same input. The Utf8
+        // column carries embedded commas, so this also exercises the string-aware
+        // boundary scan (a comma inside a string must NOT be a record boundary).
+        let frame = csv_bitident_frame_ironquail(60_000);
+        let json = write_json_string(&frame, JsonOrient::Records).expect("write records json");
+        let par = super::try_read_json_records_flat_parallel(&json)
+            .expect("parallel ok")
+            .expect("parallel took its path (>=50k homogeneous)");
+        let ser = super::try_read_json_records_flat(&json)
+            .expect("serial ok")
+            .expect("serial took its path");
+        assert_eq!(par.len(), 60_000);
+        assert!(
+            par.equals(&ser),
+            "parallel json read diverges from the serial flat scanner"
         );
     }
 

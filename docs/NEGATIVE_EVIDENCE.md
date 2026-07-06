@@ -9713,3 +9713,39 @@ String, a floor that neither threading (memory bandwidth shared) nor removing on
 parallel or direct-ryu on the typed json writers. A real json-write lever would need a fundamentally smaller/streamed
 output representation (write to a sink instead of a materialized String) or an output-bandwidth reduction — not a
 formatting or threading rearrangement. (to_csv parallel stays a genuine 5.5x WIN; the divergence is the finding.)
+
+### 2026-07-06 IronQuail — read_json(records): parallel parse via record-boundary split — 2.02x fp-side WIN
+
+`read_json(orient="records")` was the single hottest profiled op (~982 ms, 260 MB records JSON) even after the
+single-pass flat scanner landed it at 3.08x (b7f187ef6). It parses CPU-bound (byte scan + `serde_json::Number` parse
+per value + `column_from_json_values`) — unlike the json WRITE ops which are output/allocation-bound (NO-SHIP last
+round) — so it PARALLELIZES.
+
+FIX (extreme-optimization: parallel parsing via boundary detection — the read analogue of parallel to_csv): a
+depth- and string-aware single scan (`scan_json_record_boundaries`) finds the DEPTH-1 record-separating commas of
+`[ {...}, {...}, … ]` (skipping commas inside string values via `in_str`/escape tracking); the records are split into
+up to 16 whole-record byte ranges, each parsed concurrently by `parse_json_records_range` (the flat scanner's exact
+per-value logic, factored out) on a `std::thread::scope` worker; the per-chunk columns are merged and the typed columns
+are built in a SECOND parallel pass (columns are independent). Returns `None` to defer to the serial scanner / Value
+path unless it is a large FULLY-HOMOGENEOUS array — every chunk must report the IDENTICAL first-seen `col_names`, which
+makes the merge byte-for-byte equal to the serial scanner (concatenation preserves record order; serial first-seen order
+== the shared per-chunk order). Gated `nrec >= 50_000` and `>= 16_384 records/worker`.
+
+BIT-IDENTICAL, verified directly: new test `json_read_parallel_matches_serial_ironquail` reads a 60k-record homogeneous
+frame (whose Utf8 column carries EMBEDDED COMMAS — exercising the string-aware boundary scan) via BOTH the parallel and
+the serial private fns and asserts `parallel.equals(&serial)`. Prototype confirmed the boundary scan finds exactly
+n−1 separators and 0 value bit-diffs.
+
+Interleaved same-box A/B (cand5 serial scanner vs cand8 parallel, best-of-3 p50, 1M×10 f64 records / 260 MB):
+
+| workload | ORIG serial (cand5) | parallel (cand8) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | --- |
+| fp-bench `json_read_records` 1M×10 | 982.3 ms | 487.5 ms | **2.02x** | 7.1x (pandas 3444 ms, was 3.5x) |
+
+GREEN: new bit-identity test + full fp-io suite + fp-conformance. Serial scanner + Value path untouched (fallbacks).
+
+LESSON: a large text/JSON READ whose records are independent parallelizes IF the record boundaries can be found cheaply
+— a depth+string-aware scan yields whole-record byte ranges, then parse chunks concurrently and merge (gate on
+homogeneous column sets so the merge stays bit-identical). This is the READ mirror of parallel to_csv, and the opposite
+outcome to parallel json WRITE (output-bound, NO-SHIP): read is parse-CPU-bound so it scales. UNTRIED siblings: the same
+boundary-split for `read_json(values)` (array of arrays) and a parallel read_csv (newline-boundary split).

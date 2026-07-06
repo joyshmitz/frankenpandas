@@ -9844,3 +9844,35 @@ LESSON: a MultiIndex level build that does per-cell `col.value(i)` pays the Scal
 from `as_i64_slice` (same single-dtype-gate lever as melt/stack/concat/wide_to_long). f64/Utf8/bool levels still stringify
 (a per-cell alloc that `to_string`/Display can't avoid) — only Int64 fully skips the box, but Int64 index columns are the
 common case (default RangeIndex-derived keys, group ids, wide_to_long's numeric j).
+
+### 2026-07-06 IronQuail — to_dict(records) shared-key representation — 1.58x fp-side WIN (hottest op)
+
+`df.to_dict("records")` (~176ms@1M×10 f64) is the single hottest profiled dataframe op. Last round I proved parallelizing
+it REGRESSES (0.91x): the build is allocation-bound. This round attacks the allocation itself. The old result type
+`DataFrameDictResult::Records(Vec<Vec<(String, Scalar)>>)` cloned the column NAME into EVERY one of the n×m cells
+(`(col_name.clone(), value.clone())`) — 10M short-String heap allocations that are ~half the op's cost, and unavoidable
+while the type stores an owned `String` per cell.
+
+RADICAL PRIMITIVE (shared-key representation): changed the variant to
+`Records { columns: Vec<String>, rows: Vec<Vec<Scalar>> }` — the column names are carried ONCE (m Strings), and each row
+stores only its values (`rows[i][j]` aligned to `columns[j]`). The per-cell String clone is GONE; the build now does one
+`Vec<Scalar>` + m Scalar clones per row and m String clones total. Semantically identical (a list of `{column: value}`
+rows is exactly recoverable by zipping `columns` with each row). This is contained to fp-frame: `records` is consumed
+ONLY by the fp-frame impl + one unit test — fp-python's `to_dict` builds its column-oriented dict directly and never
+touches the `Records` variant, and no conformance path consumes it. `as_records()` now returns `(&[String], &[Vec<Scalar>])`;
+the one unit test updated to assert `columns` + `rows`.
+
+Interleaved same-box A/B (cand12 String-per-cell vs cand13 shared-key, best-of-4 p50, 1M×10):
+
+| workload | ORIG (cand12) | shared-key (cand13) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_to_dict_records` 1M×10 f64 | 164.3 ms | 103.9 ms | **1.58x** |
+
+GREEN: full fp-frame suite (updated `dataframe_to_dict_records` test) + fp-conformance.
+
+LESSON: a per-row-object result type that stores the KEY in every cell pays an n×m String-alloc tax when there are only
+m distinct keys; carry the keys once (shared-key / columnar-in-disguise) and store bare values. This is the RIGHT lever
+for the allocation-bound object-output ops that parallelization couldn't touch (to_dict-parallel was 0.91x). SIBLINGS on
+the same tax: `to_dict("index")` (keys per row) and `to_dict("dict")`/`"mapping"` (index-label String cloned per cell,
+`label_str.clone()`) — same shared-key/interned-label fix. NOTE: this changes the public `DataFrameDictResult::Records`
+shape (workspace-internal only), so it is a deliberate representation change, not a bit-for-bit-type-preserving one.

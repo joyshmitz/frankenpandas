@@ -9783,3 +9783,32 @@ tax; when the output columns are just typed REPEATS / RUN-LENGTHS / CONCATENATIO
 from the raw typed slices (`from_*_values_owned`) — the same single-dtype-gate lever already landed for melt/stack/
 concat. UNTRIED siblings: the same for `explode`/`pivot`/`unstack` value columns, and a typed `set_index_multi` build
 (the remaining wide_to_long floor).
+
+### 2026-07-06 IronQuail — reshape MultiIndex + to_dict object-output: two levers BOTH NO-SHIP (1.04x / 0.91x)
+
+After landing the wide_to_long typed column gather (1.70x, a32d59ad4), its residual floor is the trailing
+`set_index_multi(i+j → row MultiIndex)`, and the next hottest winnable ops are `to_dict(records)` (208ms) /
+`to_dict(dict)` (174ms) / `stack` (145ms). Two distinct levers were tried on this surface; BOTH are zero-gain.
+
+(1) **`MultiIndex::to_flat_index(sep)` direct single-buffer build** (fp-index): the old form built a per-row
+`Vec<String>` of each level's `to_string()` + `parts.join(sep)` — ~L+2 String allocs/row for the 1M flat composite
+labels. Rewrote to write each level's Display straight into ONE String/row (1 alloc/row), byte-identical. A/B:
+wide_to_long 159.9→153.6ms = **1.04x**. NO WIN — the per-row allocations are NOT the reshape-MultiIndex bottleneck;
+the residual is `Index::new` hashing 1M composite strings into its dup-check/lookup set + the per-cell `col.value(i)`
+Scalar extraction in `to_multi_index`. Reverted.
+
+(2) **Chunked-parallel `to_dict("records")`** (fp-frame): the records build is `[(col_name.clone(), value.clone()); m]`
+per row — independent rows, a fan-out of many small allocations. Split rows into ≤16 `thread::scope` workers, each
+building its row range, then concat by MOVING the inner row-vecs. Bit-identical (verified by a new prefix test:
+60k-parallel records have the 40k-serial records as an exact prefix). A/B: to_dict_records 167.3→183.6ms = **0.91x
+REGRESSION**. NO WIN — like the json WRITE ops (and OPPOSITE to the json READ parse), the to_dict build is
+allocation/memory-bandwidth-bound (1M `Vec`s + 10M small `String`/`Scalar` clones), so more threads only add
+allocator contention. Reverted (stash to_dict-parallel-NOSHIP).
+
+Verdict: NO-SHIP / both reverted. DON'T re-try direct-buffer `to_flat_index` (allocs aren't the cost) or parallel
+`to_dict` (allocation-bound). The reshape MultiIndex floor is `Index::new`-hash-bound (a real lever would be an
+FxHash / known-unique-composite Index construction, or making the flat legacy-fallback index LAZY so it's not built
+eagerly); the to_dict/to_dict_dict floor is the object-output `Vec<Vec<(String, Scalar)>>` contract itself (a real lever
+would need a shared-key representation — a multi-crate public-API change). LESSON (reconfirmed): parallelization wins
+only for CPU-bound ops (csv-write ryu, json-read parse); it LOSES for allocation/output-bandwidth-bound ops (json
+write, to_dict). Probe whether an op is CPU-bound BEFORE parallelizing.

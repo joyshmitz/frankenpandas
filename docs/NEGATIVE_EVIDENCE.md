@@ -9749,3 +9749,37 @@ LESSON: a large text/JSON READ whose records are independent parallelizes IF the
 homogeneous column sets so the merge stays bit-identical). This is the READ mirror of parallel to_csv, and the opposite
 outcome to parallel json WRITE (output-bound, NO-SHIP): read is parse-CPU-bound so it scales. UNTRIED siblings: the same
 boundary-split for `read_json(values)` (array of arrays) and a parallel read_csv (newline-boundary split).
+
+### 2026-07-06 IronQuail — wide_to_long typed column gather (no Scalar) — 1.70x fp-side WIN
+
+`wide_to_long` was the hottest genuinely-winnable profiled op (~271 ms at 1M; the json writers above it are the
+output-bound NO-SHIP, json_read was parallelized last round). It already WINS pandas ~10x, but its core was the
+melt/stack/concat SINGLE-DTYPE-GATE smell that was fixed for those siblings and never for wide_to_long: a per-cell
+`df.column(name).value(r).cloned()` **Scalar materialization** for every long-frame cell (id + j + stub columns ×
+n_rows × n_suffixes), then `Column::from_values` re-inference.
+
+FIX (typed column gather — the melt/concat lever): the long output columns are PURE TYPED reshapes of the wide columns
+— each id column is REPEATED once per suffix, the numeric `j` column is a RUN-LENGTH of the suffix ints, and each stub
+column is the CONCATENATION of its per-suffix wide columns. When `j` is numeric and every id column + every
+stub-per-suffix wide column is an all-valid Int64/Float64 typed slice of length `n_rows` (each stub's suffixes sharing
+ONE dtype), build those columns directly from the raw `&[i64]`/`&[f64]` slices via `from_{i64,f64}_values_owned` —
+skipping the per-cell Scalar clone + `from_values` re-inference. BIT-IDENTICAL for that shape (owned typed column ==
+`from_values` over the equivalent Scalars, same row order); any missing wide column, null, non-numeric `j`, Utf8/mixed
+stub, or non-typed id bails to the generic Scalar path (untouched). Verified by the existing
+`wide_to_long_basic_and_first_appearance_order` test (asserts the exact concat `A=[10,11,20,21]` / first-appearance
+`ht=[3,4,5,6]` values the typed path produces) + the full suite.
+
+Interleaved same-box A/B (cand8 generic vs cand9 typed, best-of-4 p50, 1M):
+
+| workload | ORIG generic (cand8) | typed gather (cand9) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | --- |
+| fp-bench `wide_to_long` 1M | 271.6 ms | 159.9 ms | **1.70x** | 17.2x (pandas 2753 ms, was 10.3x) |
+
+GREEN: full fp-frame suite + fp-conformance. RESIDUAL floor: the trailing `set_index_multi(i+j)` (promotes id+j to a row
+MultiIndex) is now the bulk of the 160 ms — a separate typed-MultiIndex-build lever.
+
+LESSON: a reshape/melt-class op that builds its output cell-by-cell via `value(r).cloned()` is paying the Scalar-box
+tax; when the output columns are just typed REPEATS / RUN-LENGTHS / CONCATENATIONS of the input columns, gather them
+from the raw typed slices (`from_*_values_owned`) — the same single-dtype-gate lever already landed for melt/stack/
+concat. UNTRIED siblings: the same for `explode`/`pivot`/`unstack` value columns, and a typed `set_index_multi` build
+(the remaining wide_to_long floor).

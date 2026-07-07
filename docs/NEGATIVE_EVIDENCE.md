@@ -9977,3 +9977,36 @@ off when the strided access is genuinely cache-miss-bound AND you don't have to 
 writes; here the prefetcher already covered the strided reads, so the extra `vec![0; n]` made it a net loss. stack's
 residual is the structural composite-label string build (a lazy composite Index backing would be the bold next lever, but
 that's a deeper fp-index change).
+
+### 2026-07-07 IronQuail — stack composite-label build PARALLELIZED — 1.33x fp-side WIN (hottest op)
+
+df_stack (~140-150ms@1M×10) is the persistent hottest profiled dataframe op. Its floor (after the predecessor's
+contiguous-Utf8 label buffer + typed value column) is the n*m composite-label byte assembly. Last round's cache-blocked
+value transpose was a NO-SHIP (0.92x — the value gather is not the bottleneck). This round attacks the LABEL build, which
+is CPU-BOUND: 30M+ `extend_from_slice`/`push` ops + a per-row label format for 1M×10, NOT raw bandwidth (120MB / 10GB/s is
+~12ms « observed ~90ms). Unlike to_dict (allocation-bound, parallel LOST to allocator contention), stack's label build
+grows ONE `Vec<u8>` per worker — no per-cell allocation — so it parallelizes cleanly.
+
+RADICAL PRIMITIVE (parallel composite-label build): split the rows across ≤16 `std::thread::scope` workers; each fills its
+OWN local byte buffer + relative offsets for its row range, then the chunk buffers are concatenated in row order with each
+chunk's offsets shifted by the running byte base. Bit-identical to the serial build — same rows, same column order, same
+composite bytes, same offsets (verified by a new prefix test: a 60k-row PARALLEL stack has the 40k-row SERIAL stack's index
+labels AND value column as exact prefixes, catching any chunk-boundary offset error). The value build stays serial (it was
+never the bottleneck). Gated ≥50k rows / ≥16k rows-per-worker; small frames keep the serial path.
+
+Interleaved same-box A/B (alternating cand17/cand18 per trial to cancel the busy box's time-varying load, min-of-9, 1M×10):
+
+| workload | ORIG (cand17) | parallel label (cand18) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_stack` 1M×10 | 139.7 ms | 105.3 ms | **1.33x** |
+| fp-bench `df_apply_row` (control, untouched) | 79.4 ms | 79.1 ms | 1.00x (validates the measurement) |
+
+(A first non-interleaved best-of-6 showed the control at 0.81x — pure time-varying-load noise on the busy box; true
+interleaving pinned it to 1.00x and the stack win to 1.33x.) GREEN: full fp-frame (+ new parallel prefix test) +
+fp-conformance.
+
+LESSON: a per-cell composite-string BUILD (n*m extend/format ops into one buffer) is CPU-bound, not bandwidth-bound, and
+parallelizes cleanly with PER-THREAD local buffers + a row-order concat — the OPPOSITE outcome to to_dict's per-cell-alloc
+parallel loss, because the discriminator is allocator contention, not thread count. ALWAYS interleave A/B on a loaded box:
+a 0.81x on an untouched control is the tell that best-of-N didn't cancel the load. RESIDUAL: the value gather + the ~120MB
+concat copy; a lazy composite Index backing (skip the build entirely for construct-and-drop) is still the bolder unclaimed lever.

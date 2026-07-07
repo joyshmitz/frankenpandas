@@ -10040,3 +10040,35 @@ so it caps at ~1.05x. Reconfirms: SAFE per-thread-buffer parallelism is concat-b
 is unsafe direct-scatter (off-limits here) or a length-prepass direct-write for the labels. The genuinely bigger unclaimed
 stack lever remains the LAZY composite Index backing (skip the ~120MB label build entirely for construct-and-drop / consumed-
 as-MultiIndex cases) — a deeper fp-index change, deferred.
+
+### 2026-07-07 IronQuail — to_dict(records) parallelized (shared-key UNLOCKED it) — 1.96x fp-side WIN (hottest op)
+
+df.to_dict("records") is again the hottest profiled dataframe op (~106ms@1M×10). It has a NO-SHIP in this very ledger:
+the original `Vec<Vec<(String, Scalar)>>` form did NOT parallelize (0.91x REGRESSION) because it was allocation-bound on
+n*m = 10M per-CELL `String` clones — mimalloc's per-thread arenas couldn't outrun that many small heap ops, so more threads
+just added allocator contention.
+
+KEY INSIGHT: the shared-key rewrite (be0c1fd7d, `Records { columns, rows: Vec<Vec<Scalar>> }`) removed the per-cell String
+clone — the build now does only n = 1M per-ROW `Vec<Scalar>` allocations (10x FEWER, one per row not per cell) + cheap
+`Float64` value clones. That CHANGED THE ALLOCATION PROFILE enough that the op is no longer allocator-contention-bound, so
+the SAME parallelization primitive that lost 0.91x on the old form now WINS. Split rows across ≤16 `thread::scope` workers,
+each building a contiguous row range into its own `Vec<Vec<Scalar>>`, then concatenate by MOVING the inner row-Vec pointers
+(no per-cell copy). Bit-identical (new prefix test: 60k-row PARALLEL records have the 40k-row SERIAL records + shared columns
+as exact prefixes, across chunk boundaries).
+
+Interleaved same-box A/B (alternating cand19/cand20 per trial, min-of-9, 1M×10 f64):
+
+| workload | serial (cand19) | parallel (cand20) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_to_dict_records` 1M×10 | 106.0 ms | 54.2 ms | **1.96x** |
+| fp-bench `df_to_dict_dict` (control, untouched) | 95.8 ms | 95.0 ms | 1.01x (validates the measurement) |
+
+GREEN: full fp-frame (+ new parallel prefix test) + fp-conformance.
+
+LESSON (the important one): a "does-not-parallelize, allocation-bound" verdict is NOT permanent — it is a property of the
+CURRENT data representation, not the op. The per-cell-String form was alloc-contention-bound; the shared-key form (10x
+fewer, per-row allocs) is not, so the identical thread::scope split flips from 0.91x to 1.96x. When a parallel attempt loses
+to allocator contention, the lever is to REDUCE THE ALLOCATION COUNT first (fewer/larger allocs), then re-try parallelism —
+the two levers COMPOUND. SIBLING: `to_dict("dict")`/`("index")` are now also shared-key (`Mapping { keys, values:
+BTreeMap<String, Vec<Scalar>> }`) — same per-column/per-label `Vec<Scalar>` structure, so the same parallel gather should
+win there too (untried this round).

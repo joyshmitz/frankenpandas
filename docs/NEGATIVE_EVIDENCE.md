@@ -10010,3 +10010,33 @@ parallelizes cleanly with PER-THREAD local buffers + a row-order concat — the 
 parallel loss, because the discriminator is allocator contention, not thread count. ALWAYS interleave A/B on a loaded box:
 a 0.81x on an untouched control is the tell that best-of-N didn't cancel the load. RESIDUAL: the value gather + the ~120MB
 concat copy; a lazy composite Index backing (skip the build entirely for construct-and-drop) is still the bolder unclaimed lever.
+
+### 2026-07-07 IronQuail — stack value gather parallelized — 1.05x fp-side WIN (marginal, concat-limited)
+
+Direct follow-on to last round's parallel stack LABEL build (1.33x, 85857999b). df_stack is still the hottest profiled
+dataframe op (~104ms). Its remaining residual is the row-major VALUE gather (`for row { for col { push x_col[row] } }`) —
+strided per-cell reads across m column arrays, memory-latency-bound. Parallelized it the same way as the label build: each
+worker gathers its row range into a LOCAL Vec (more memory-level parallelism hides the strided-read latency), then concat in
+row order. Bit-identical (same cell order — already covered by the parallel prefix test, which checks the value column
+prefix `vl[..40k*3] == vs`). Reuses the label build's worker count / ≥50k gate.
+
+Interleaved same-box A/B (alternating cand18/cand19 per trial on a LOADED box (load ~5.6), min-of-9, 1M×10):
+
+| workload | label-only (cand18) | +parallel value (cand19) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_stack` 1M×10 | 103.7 ms | 98.4 ms | **1.05x** |
+| fp-bench `df_apply_row` (control, untouched) | 79.2 ms | 79.6 ms | 1.00x (validates the measurement) |
+
+MARGINAL (1.05x, not 0-gain — control pinned at 1.00x across 9 interleaved trials). Small because, unlike the LABEL build
+(a big CPU-bound extend/format residual → 1.33x), the value gather was already a SMALL residual: the strided reads are
+largely covered by the hardware prefetcher, and the per-thread `Vec<f64>` + row-order CONCAT (an 80MB copy) caps the gain.
+The concat is the ceiling: eliminating it needs either an unsafe uninit scatter (the codebase has exactly ONE `unsafe` block
+in 161k lines — deliberately avoided) or a `chunks_mut` write into a `vec![0.0; total]` (whose 80MB zeroing costs the same
+as the concat). GREEN: full fp-frame (+ existing parallel prefix test now also exercising the parallel value path) +
+fp-conformance.
+
+LESSON: parallelizing a sub-dominant residual yields a sub-dominant win — the value gather is ~1/7th the label build's cost,
+so it caps at ~1.05x. Reconfirms: SAFE per-thread-buffer parallelism is concat-bound (80-120MB copy); the only way past it
+is unsafe direct-scatter (off-limits here) or a length-prepass direct-write for the labels. The genuinely bigger unclaimed
+stack lever remains the LAZY composite Index backing (skip the ~120MB label build entirely for construct-and-drop / consumed-
+as-MultiIndex cases) — a deeper fp-index change, deferred.

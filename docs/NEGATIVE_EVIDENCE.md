@@ -10718,3 +10718,36 @@ Additional gates run before the rebase exposed the superseding main commit:
 
 LESSON: do not land a path-specific RangeIndex fast path after a newer generic output-contract primitive already wins on the
 same hot row. Rebase evidence matters: a measured win versus an older original can become a regression against current main.
+### 2026-07-09 BlackThrush — idxmax/idxmin/argmax_axis1 row-parallel name build — NO-SHIP (~1.00x, wrong bottleneck)
+
+Third dig of the session (after to_dict("index") 3.22x + rank_axis1 3.70x). Fresh sweep tier below those: the axis=1
+arg-extrema family `df_idxmax_axis1` / `df_idxmin_axis1` / `df_argmax_axis1` (~41ms each @1M×10 f64) — three benched ops
+sharing one shape, still SINGLE-THREADED in their typed-f64 fast paths. Each scans hoisted `&[f64]` column slices per row for
+the winning column index, then emits a per-row `Scalar::Utf8(column_order[ci].clone())`.
+
+Primitive tried: one shared `arg_axis1_names_parallel(col_f64, label, find_best)` helper carrying each caller's EXACT
+comparison closure (idxmin `v<best`, idxmax `v>best`, argmax `sign*v>best`), routing all three typed fast paths through a
+50k-gated row-range-partition + per-thread-arena build + row-order concat (same lever as rank_axis1). Compiled clean, focused
+60k parallel-path test passed (idxmin/idxmax/argmax, 3-worker chunk boundaries).
+
+Interleaved same-box A/B (min-of-4+, 1M×10 f64):
+
+| workload | ORIG | row-parallel build | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_idxmax_axis1` 1M×10 | ~41.2 ms | ~41.0 ms | **~1.00x** |
+| fp-bench `df_idxmin_axis1` 1M×10 | ~41.0 ms | ~41.2 ms | **~1.00x** |
+| fp-bench `df_argmax_axis1` 1M×10 | ~40.3 ms | ~41.3 ms | **~0.98x** |
+| fp-bench `df_stack` (control) | ~92 ms | ~93 ms | ~1.00x |
+
+Verdict: **NO-SHIP / reverted** (change lived only in a scratch worktree; main untouched). Parallelizing the compare + the
+per-row `Scalar::Utf8` clone did NOT move the total, so the compare+clone is NOT the bottleneck: the cost is the SERIAL
+`Column::from_values(values)` that materializes the 1M `Scalar::Utf8` into a contiguous Utf8 column (dtype-infer + copy every
+name's bytes + offsets) AFTER the parallel region. Amdahl: the parallelized fraction is small, so ~1.00x.
+
+LESSON: for a per-row op whose output is a Utf8 column, the hot cost is the SERIAL `Vec<Scalar::Utf8> -> Column::from_values`
+Utf8 materialization, NOT the per-row compute — so parallelizing only the compute/clone is ~0-gain (unlike rank_axis1, whose
+output is an f64 `Column::from_f64_values` with a cheap finalize). Do NOT retry the simple compare-parallel for the
+arg-extrema axis=1 family. The real lever (untried) is to BYPASS `from_values`: build the output contiguous-Utf8 column
+DIRECTLY in the parallel workers (per-thread name-byte buffers + offsets, `Null(NaN)` rows as empty+validity, concat with
+byte-base shift — same contiguous-Utf8 parallel build as stack/to_flat_index), since the output is only m≈10 distinct short
+column names repeated n times (tiny real byte content); or emit a dict-encoded/categorical output (dtype change, deferred).

@@ -10271,3 +10271,33 @@ LESSON: (1) the composite-string-build parallel lever generalizes from the stack
 MultiIndex primitive — one fix, every reshape that flattens a MultiIndex benefits. (2) On a saturated box, re-measure the SAME
 A/B once load eases: a contention-muted ratio (1.19x @ load 58) and a clean ratio (1.47x @ load 39) are the SAME code — the
 control disagreement (1.01x vs 1.11x) is the tell that the first read was untrustworthy.
+
+### 2026-07-08 IronQuail — melt "variable" column: doubling repeat + arithmetic offsets — 1.39x fp-side WIN (single-threaded)
+
+df_melt (~71ms@1M×10) is a hot reshape. df_transpose (~2s) is hotter but is a peer-owned structural floor (descriptor-chunk
++ block-repr NO-SHIPs in the ledger), and df_stack (~100ms) is at its safe parallel concat floor (200MB label+value copies
+that any safe direct-write must re-pay as a zeroing pass — the codebase forbids unsafe). So melt was the hottest CLEANLY
+winnable op, and its lever is single-threaded → robust to the currently-saturated box.
+
+melt's "variable" column is the value-var NAME repeated n_rows times per var, built by INTERLEAVING
+`var_bytes.extend_from_slice(vb)` + `var_offsets.push(len)` for every one of the total_rows cells — total_rows tiny memcpies
++ total_rows Vec pushes, cache/pipeline-hostile. But each segment is a PURE REPEAT: (1) the bytes are `vb` repeated n_rows
+times, buildable by DOUBLING via `extend_from_within` (O(log n_rows) large in-place memcpies, no temp alloc); (2) the offsets
+are ARITHMETIC — row k's name ends at `seg_start + k*l` — emitted with one dependency-free `extend((1..=n_rows).map(...))`.
+Bit-identical (same bytes, same offsets; empty-name segment handled explicitly). Not threshold-gated, so the existing 8 melt
+unit tests exercise the new path directly.
+
+Interleaved same-box A/B (alternating cand23/cand24 per trial, min-of-11, load ~13, 1M×10 f64):
+
+| workload | ORIG (cand23) | doubling+arith (cand24) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_melt` 1M×10 | 71.1 ms | 51.1 ms | **1.39x** |
+| fp-bench `df_stack` (control, untouched) | 98.0 ms | 98.2 ms | 1.00x (validates the measurement) |
+
+GREEN: full fp-frame (8 melt tests + all) + fp-conformance.
+
+LESSON: when a contiguous-Utf8 column's rows are a REPEAT of a small string (melt variable, get_dummies-style, any
+tile-a-name build), don't emit it row-by-row — build the bytes by `extend_from_within` doubling and the offsets by closed-form
+ARITHMETIC. This is a single-threaded lever that beats the parallel-concat family on a saturated box (no thread contention,
+no bandwidth-bound concat). The residual in melt is now the value-column concat (80MB typed memcpy) + the id tile — both
+bandwidth-bound, at the safe floor.

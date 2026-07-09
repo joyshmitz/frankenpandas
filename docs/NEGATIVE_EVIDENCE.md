@@ -10621,3 +10621,42 @@ LESSON: the transpose lexicographic BTree bulk-build primitive does not automati
 `to_dict(index)` still has to allocate one row `Vec<Scalar>` per output row and clone every row value; sorting the outer key
 stream is not enough to create a measured keep. Do not retry this RangeIndex lexicographic bulk-build for `to_dict(index)`
 unless the row-value representation changes first or an in-process A/B produces a completing timing vector.
+### 2026-07-09 BlackThrush — to_dict("index") parallel pair-build + BTreeMap bulk finalization — 3.22x fp-side WIN
+
+`df_to_dict_index` (~334ms@1M×10 f64) is the hottest CLEANLY-winnable dataframe op by a wide margin: `df_transpose` (~2s) is
+the peer-owned architectural wall (descriptor-chunk + block-repr NO-SHIPs), `df_rank_axis1` (~147ms) and `df_stack` (~106ms)
+are the next tier. A fresh `fp-bench` sweep (min-of-25, 1M×10, transpose excluded) ranked: `df_to_dict_index` 334 · rank_axis1
+147 · stack 106 · wide_to_long 70 · mode 68 · to_records 54 · idxmax_axis1 42 · get_dummies 31 · unstack 22 · pivot 20.
+
+`to_dict("index")`'s `dict` and `records` siblings were parallelized (1.86x, 1.96x) but `index` was still fully SERIAL:
+`for (row,label) { values.insert(label.to_string(), gather_row()); }` — n `label.to_string()` (1M String allocs) + n
+`Vec<Scalar>` row gathers (1M small allocs) + n String-keyed `BTreeMap::insert` (O(n log n) with per-insert rebalancing). The
+prior `to_dict("index")` NO-SHIP was per-worker-BTreeMap shards + `BTreeMap::append`, rejected because the append-merge still
+re-materializes the tree. This lever ATTACKS THE OUTPUT CONTRACT directly, per that lesson: the outer BTreeMap is keyed by the
+(deduplicated-above) UNIQUE row label, so it is fully determined by its key→value SET — insertion order is irrelevant. So build
+the flat `Vec<(String, Vec<Scalar>)>` pairs in per-thread arenas over contiguous row ranges (alloc-bound → scales even on a
+saturated box, same lever as the siblings), then bulk-build the tree ONCE via `pairs.into_iter().collect()` (Rust's BTreeMap
+`FromIterator` = one sort + O(n) bottom-up build, cheaper than n rebalancing inserts). NOT per-worker shards; the tree is
+materialized exactly once, from one flat pair list. Bit-identical: same unique keys, same row values, order-independent map.
+
+DISTINCT from the immediately-preceding same-day NO-SHIP (183ac5c52, "to_dict(index) RangeIndex lexicographic BTree bulk
+build"): that lever was SINGLE-THREADED — it only reordered the outer key stream into lexicographic order to skip std's
+internal sort, never produced a completing timing vector (RCH runaway), and its own LESSON flagged the real unaddressed cost
+as "allocate one row Vec<Scalar> per output row and clone every row value ... unless an in-process A/B produces a completing
+timing vector." THIS lever attacks exactly that flagged per-row alloc/clone cost by PARALLELIZING it across per-thread arenas,
+and produces the completing in-process A/B (local ORIG/CAND binaries, min-of-9, control-validated) their lesson asked for.
+
+Interleaved same-box A/B (alternating ORIG/CAND per trial, min-of-9, load ~23/64 cores, 1M×10 f64):
+
+| workload | ORIG | parallel pairs + bulk collect | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_to_dict_index` 1M×10 | 333.89 ms | 103.59 ms | **3.223x** |
+| fp-bench `df_stack` (control, untouched) | 97.70 ms | 96.38 ms | 1.014x (validates the measurement) |
+
+GREEN: full fp-frame lib (3124 passed / 0 failed, incl. 21 to_dict tests) + fp-conformance (1596/1596).
+
+LESSON: for a SERIAL op whose output is a large map/set keyed by UNIQUE keys, the finalization is order-independent — so you can
+(1) parallelize the expensive per-element materialization (string keys + value gathers) into flat pairs across per-thread arenas
+(alloc-bound, saturated-box-robust), and (2) replace the n-insert build with a single `collect()`/`FromIterator` bulk build (one
+sort + bottom-up, no per-insert rebalancing). This flipped the hottest cleanly-winnable frame op 3.22x. The rejected shard+append
+form failed because it tried to parallelize the TREE; the win is to parallelize the PAIRS and build the tree once.

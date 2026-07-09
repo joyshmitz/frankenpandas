@@ -10537,3 +10537,50 @@ LESSON: the winning transpose indirection is a shared semantic row plan, not one
 not a parallel staging buffer. The plan deletes one million tiny f64 row allocations/copies while preserving the existing
 `Column` and `BTreeMap` cardinality. The remaining frontier is architectural: a block-backed or genuinely lazy DataFrame
 that can avoid constructing one independent `Column` object and one map entry per source row.
+
+### 2026-07-09 BlackThrush - df.transpose lexicographic BTree bulk build - 2.61x fp-side WIN
+
+Consulted this ledger first. This does not retry descriptor-backed one-element chunks, flattened pair buffers, all-valid
+owned row columns, the slab-backed row-copy idea, or per-worker BTreeMap shards. It composes with the existing shared lazy
+Float64 transpose row plan and attacks the remaining construction cost: one million public column keys inserted into a
+`BTreeMap<String, Column>`.
+
+Profile target: current-main `df_transpose` 1M x 10 Float64 on RCH `ovh-a` still spent hundreds of ms constructing the
+transposed frame even after lazy row materialization. The benchmark is construction-only (`df.T`), so the hot path is column
+name generation plus map population, not row-value reads. Graveyard/artifact match: communication-avoiding / packed-tree
+construction. Instead of repeated online B-tree inserts in numeric row order, the candidate generates the certified
+`RangeIndex(0..n)` output column entries in lexicographic key order and feeds them to `BTreeMap::from_iter`, letting std bulk
+build packed B-tree nodes while preserving `column_order` in pandas-observable numeric row order. Generic/mixed labels and
+nonzero Int64 ranges keep the existing insertion/collision path.
+
+Same-worker RCH proof, LEGACY ORIGINAL current `main` (`c80154d7d`) vs candidate, `df_transpose` 1M x 10 Float64 on
+`ovh-a`:
+
+| workload | LEGACY ORIGINAL | candidate | fp-side |
+| --- | ---: | ---: | --- |
+| best of 25 | 310.317 ms | 122.587 ms | **2.531x** |
+| median of 25 | 326.257 ms | 125.067 ms | **2.609x** |
+| p95 of 25 | 559.503 ms | 141.702 ms | **3.948x** |
+| p99/max of 25 | 608.354 ms | 146.173 ms | **4.162x** |
+
+Intermediate rejected screen: naive `BTreeMap::from_iter` in numeric-string order improved best/median but created huge
+sort-tail spikes (`median 316.666 ms`, `p95 2320.240 ms`, `p99/max 2622.176 ms` on the same `ovh-a` comparator). Do not
+retry unsorted numeric-string bulk collection here; the keep is specifically lexicographic entry generation before bulk
+build.
+
+Commands/evidence:
+
+- ORIG same-worker comparator: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 1M --dtype float64 --json`; RCH selected `ovh-a`, best `310316.935 us`, median `326257.067 us`, p95 `559503.205 us`, p99/max `608354.116 us`.
+- Candidate same-worker run: `AGENT_NAME=BlackThrush RCH_WORKER=ovh-a RCH_WORKERS=ovh-a RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 1M --dtype float64 --json`; best `122587.250 us`, median `125066.526 us`, p95 `141702.354 us`, p99/max `146173.340 us`.
+- Focused parity: `AGENT_NAME=BlackThrush RCH_WORKER=ovh-a RCH_WORKERS=ovh-a RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo test -p fp-frame dataframe_transpose --lib -- --nocapture`; PASS, 8/8.
+- Conformance: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo test -p fp-conformance --lib --quiet`; PASS on `ovh-a`, 1596/1596.
+- Requested per-crate bench: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo bench --profile release -p fp-frame`; PASS on `hz1`, fp-frame bench harness built under `release` profile and reported 0 measured / 3141 ignored.
+- Workspace check: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo check --workspace --all-targets`; PASS on `hz1` with pre-existing example warnings.
+- `git diff --check`: PASS before ledger.
+- `cargo fmt -p fp-frame --check`: blocked by unrelated pre-existing fp-frame formatting drift; after manually adjusting the touched hunk, the remaining fmt diff was outside this change.
+- `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo clippy --workspace --all-targets -- -D warnings`: blocked by pre-existing `fp-columnar` lint inventory (`unnecessary_cast`, `manual_range_contains`, `collapsible_if`, `manual_repeat_n`) before this touched hunk.
+- `timeout 180s ubs crates/fp-frame/src/lib.rs`: timed out with exit 124 and no focused finding output, matching the known fp-frame scanner timeout/stall behavior.
+
+LESSON: for certified `RangeIndex(0..n)` transpose, the public column map can be built as a packed lexicographic B-tree
+without changing observable `column_order`. The failed subvariant proves the tree builder is only a win when the key stream
+is already lexicographic; sorting one million numeric strings in the timed path destroys tail latency.

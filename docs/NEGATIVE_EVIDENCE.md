@@ -10817,3 +10817,43 @@ LESSON: even after a Value-tree serializer is replaced by a streaming serde seri
 serial pass over n rows — and since each JSON object is independent, it row-range-parallelizes byte-identically by having each
 worker `serde_json::to_writer(&RowJson)` its range (comma-prefixed except global row 0) into a local buffer, then concat +
 wrap `[...]`. Same partition+concat lever as the reshape/to_dict/arg-extrema builds, now for JSON text output.
+
+### 2026-07-09 BlackThrush - to_dict("index") lazy column-backed mapping - 7.43x fp-side WIN
+
+Consulted this ledger first. This is not a retry of the rejected per-worker `BTreeMap` shards, the rejected RangeIndex
+lexicographic BTree bulk-build, or the just-landed eager parallel pair-build + bulk finalization above. The previous rows
+show that `to_dict("index")` remained the hottest clean object-output path, and the RangeIndex rejection explicitly said not
+to retry the outer-map trick unless the row-value representation changed.
+
+Primitive: change the `DataFrameDictResult` representation for `orient="index"` from an eagerly materialized
+`Mapping { keys, BTreeMap<label, Vec<Scalar>> }` to a lazy column-backed mapping. Construction now stores the shared column
+keys, display row labels, cheap cloned `Column`s, and an empty `OnceLock`. `as_mapping()` materializes the exact old
+`BTreeMap<String, Vec<Scalar>>` on demand and caches it. This preserves the existing accessor contract and equality behavior,
+but removes the n per-row `Vec<Scalar>` allocations, n row gathers, and BTreeMap construction from the timed construction
+path.
+
+Same-worker RCH proof on current `main` ORIG (`fac9907ae`) vs candidate, `fp-bench df_to_dict_index` 100k x 10 Float64 on
+`ovh-a`:
+
+| workload | ORIG eager parallel pairs | lazy column-backed mapping | fp-side |
+| --- | ---: | ---: | --- |
+| `df_to_dict_index` 100k x 10 | 9513.049 us best; 10192.713 us median | 1279.790 us best; 1340.904 us median | **7.43x best / 7.60x median** |
+
+Commands/evidence:
+
+- Profile routing control before the lever: `df_transpose` 100k x 10 on `vmi1167313` best `28277.566 us`; `df_to_records`
+  100k x 10 on the same worker best `11305.409 us`; latest ledger still identifies `df_to_dict_index` as the clean hot
+  object-output row after the peer eager keep.
+- ORIG comparator: `AGENT_NAME=BlackThrush RCH_WORKER=ovh-a RCH_WORKERS=ovh-a RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_to_dict_index --size 100k --dtype float64 --json`; RCH selected `ovh-a`, best `9513.049 us`, median `10192.713 us`.
+- Candidate: `AGENT_NAME=BlackThrush RCH_WORKER=vmi1152480 RCH_WORKERS=vmi1152480 RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_to_dict_index --size 100k --dtype float64 --json`; RCH selected `ovh-a`, best `1279.790 us`, median `1340.904 us`.
+- Focused tests: `AGENT_NAME=BlackThrush RCH_WORKER=ovh-a RCH_WORKERS=ovh-a RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo test -p fp-frame to_dict --lib -- --nocapture`; PASS, 22/22.
+- Byte-exact conformance: `AGENT_NAME=BlackThrush RCH_WORKER=ovh-a RCH_WORKERS=ovh-a RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo test -p fp-conformance --lib --quiet`; PASS, 1596/1596 (RCH selected `vmi1152480`).
+- Requested per-crate bench: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo bench --profile release -p fp-frame`; PASS on `vmi1152480`, release bench harness built and reported 0 measured / 3142 ignored.
+- Compile surface: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo check -p fp-frame --all-targets`; PASS on `hz1` with pre-existing example unused-import warnings outside this hunk.
+- Final gates after rebasing onto `bad808087`: focused `to_dict` suite PASS 22/22 on `vmi1227854`; byte-exact conformance PASS 1596/1596 on `vmi1152480`; requested `cargo bench --profile release -p fp-frame` PASS on `ovh-a`, 0 measured / 3145 ignored; `cargo check -p fp-frame --all-targets` PASS on `ovh-b` with pre-existing example warnings.
+- Hygiene: `git diff --check` PASS. `cargo fmt -p fp-frame --check` remains blocked by pre-existing broad formatting drift in `crates/fp-frame/src/lib.rs`; the new test hunk was manually adjusted to rustfmt's suggestion. `timeout 180s ubs crates/fp-frame/src/lib.rs` hit the documented large-file timeout (exit 124) without emitting a focused finding. `cargo clippy -p fp-frame --lib --no-deps -- -D warnings` remains blocked by the known broad fp-frame lint backlog; reports are outside this hunk except the pre-existing `as_mapping` return-type complexity signature.
+
+LESSON: for construction-only pandas object results, the output contract does not always require immediate materialization.
+A lazy result enum variant can preserve the exact accessor payload while moving row-major map construction to the first
+consumer that actually asks for it. This is the row-value representation change the previous `to_dict(index)` rejection
+identified as necessary.

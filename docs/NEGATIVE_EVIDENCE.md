@@ -10751,3 +10751,40 @@ arg-extrema axis=1 family. The real lever (untried) is to BYPASS `from_values`: 
 DIRECTLY in the parallel workers (per-thread name-byte buffers + offsets, `Null(NaN)` rows as empty+validity, concat with
 byte-base shift — same contiguous-Utf8 parallel build as stack/to_flat_index), since the output is only m≈10 distinct short
 column names repeated n times (tiny real byte content); or emit a dict-encoded/categorical output (dtype change, deferred).
+
+### 2026-07-09 BlackThrush — idxmax/idxmin/argmax_axis1 PARALLEL contiguous-Utf8 build — ~7.5x fp-side WIN (the diagnosed lever from the NO-SHIP above)
+
+The NO-SHIP directly above (93e8caeee) proved the arg-extrema axis=1 bottleneck is the SERIAL `Column::from_values`
+Utf8 materialization, NOT the per-row compare (parallelizing only compare+`Scalar::Utf8` clone was ~1.00x), and named the
+real lever: build the output contiguous-Utf8 column DIRECTLY in the parallel workers, bypassing `from_values`. This entry
+IMPLEMENTS that lever and lands it.
+
+One shared `arg_axis1_names_parallel(col_f64, label, find_best)` helper: each worker, over its 50k-gated row range, runs
+`find_best` (each caller's EXACT comparison closure — idxmin `v<best`/+INF, idxmax `v>best`/-INF, argmax `sign*v>best`) AND
+appends the winning column NAME's bytes into a local byte buffer with per-row end offsets — parallelizing the compare AND the
+Utf8 materialization. The chunks concat into ONE `(bytes, offsets)` with a running byte base → `Column::from_utf8_contiguous`
+(NO `Scalar` round-trip, NO serial `from_values`). Bit-identical to the `Scalar`+`from_values` path for the all-valid case
+(same name bytes, same offsets, same order). If any row has no winner (all-NaN row → `Null(NaN)`, which the contiguous form
+can't represent), it falls back to the exact serial `Scalar`+`from_values` path (rare; correctness-preserving). All three
+typed fast paths (idxmin_axis1 / idxmax_axis1 / arg_extrema_axis1) route through it. New test
+`dataframe_arg_axis1_parallel_matches_serial_blackthrush` (60k×4, idxmin/idxmax/argmax, 3-worker chunk boundaries 20000/40000).
+
+Interleaved same-box A/B (alternating ORIG/CAND per trial, min-of-9, 1M×10 f64; ORIG binary reused from the NO-SHIP cycle —
+same serial lib.rs, the rejection was docs-only):
+
+| workload | ORIG | parallel contiguous-Utf8 | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_idxmax_axis1` 1M×10 | 40.85 ms | 5.49 ms | **7.44x** |
+| fp-bench `df_idxmin_axis1` 1M×10 | 40.77 ms | 5.42 ms | **7.52x** |
+| fp-bench `df_argmax_axis1` 1M×10 | 41.07 ms | 5.25 ms | **7.83x** |
+| fp-bench `df_stack` (control, untouched) | 93.94 ms | 93.78 ms | 1.002x (validates the measurement) |
+
+Also 100k: ~3.32 ms → ~1.24 ms (~2.7x) — wins well below 1M too (the NO-SHIP compare-parallel was SLOWER at 100k). GREEN:
+fp-frame lib 3128/0 (incl. new parallel-path test) + focused axis1 81/0 + fp-conformance 1596/1596.
+
+LESSON: when a per-row op's output is a Utf8 column, the hot cost is the SERIAL `Vec<Scalar::Utf8> -> from_values`
+materialization — so the winning lever is to PARALLELIZE THE CONTIGUOUS-Utf8 BUILD ITSELF (per-thread name-byte + offset
+buffers, concat with byte-base shift → `from_utf8_contiguous`), not the compute. This is the exact complement of rank_axis1
+(f64 output, cheap finalize → parallelize compute). It flipped the SAME op family from a measured 1.00x NO-SHIP to 7.5x by
+moving the parallel boundary to include the output materialization. The `find_best`-closure design DRYs three benched ops into
+one lever, bit-identical, with a serial `Scalar` fallback for the rare null-row case.

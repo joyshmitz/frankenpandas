@@ -10788,3 +10788,32 @@ buffers, concat with byte-base shift → `from_utf8_contiguous`), not the comput
 (f64 output, cheap finalize → parallelize compute). It flipped the SAME op family from a measured 1.00x NO-SHIP to 7.5x by
 moving the parallel boundary to include the output materialization. The `find_best`-closure design DRYs three benched ops into
 one lever, bit-identical, with a serial `Scalar` fallback for the rare null-row case.
+
+### 2026-07-09 BlackThrush — to_json(orient="records") row-range PARALLEL serialization — WIN (hottest winnable op)
+
+Session's 4th landed lever (after to_dict_index 3.22x, rank_axis1 3.70x, arg-extrema-axis1 7.5x). A cross-category sweep with
+the current-main binary put `io/json_write_records` at ~370ms@1M×10 as the HOTTEST winnable op (df_transpose ~150ms is
+peer-active; df_stack ~97ms is a floor; json_read_records ~350ms is IronQuail's read-side). The old Value-tree root cause was
+already fixed (a streaming `RecordsJson`/`RowJson`/`CellJson` serde serializer — no `Vec<Value::Object>` tree), but the
+records path still called `serde_json::to_string(&RecordsJson)` on ONE thread — a serial walk of all n rows' `{...}` objects.
+
+Each row's `{...}` object is independent. Parallelize: each worker serializes its contiguous row range's objects
+(comma-prefixed except global row 0 — exactly how `SerializeSeq` separates elements) into a local `Vec<u8>` via
+`serde_json::to_writer(&RowJson)`, then the chunks concat in row order wrapped in `[` .. `]`. BYTE-IDENTICAL to the serial
+array serialization (same compact formatter, same `RowJson` map bytes / `CellJson` cell bytes, same commas). 50k-row gated.
+New test `dataframe_to_json_records_parallel_matches_serial_blackthrush` (60k×3, mixed f64/i64/Utf8 + nulls) asserts the
+parallel output equals `serde_json::to_string(&RecordsJson)` byte-for-byte.
+
+Interleaved same-box A/B (min-of-9, 1M×10 f64; ORIG binary = current-main serial to_json):
+
+| workload | ORIG | row-range parallel serialize | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `json_write_records` 1M×10 | 370.64 ms | 75.33 ms | **4.92x** |
+| fp-bench `df_stack` (control, untouched) | 94.67 ms | 94.46 ms | 1.002x (validates the measurement) |
+
+GREEN: full fp-frame lib (incl. new byte-identity test) + fp-conformance (1596/1596).
+
+LESSON: even after a Value-tree serializer is replaced by a streaming serde serializer, the records `to_string` is a SINGLE
+serial pass over n rows — and since each JSON object is independent, it row-range-parallelizes byte-identically by having each
+worker `serde_json::to_writer(&RowJson)` its range (comma-prefixed except global row 0) into a local buffer, then concat +
+wrap `[...]`. Same partition+concat lever as the reshape/to_dict/arg-extrema builds, now for JSON text output.

@@ -10660,3 +10660,36 @@ LESSON: for a SERIAL op whose output is a large map/set keyed by UNIQUE keys, th
 (alloc-bound, saturated-box-robust), and (2) replace the n-insert build with a single `collect()`/`FromIterator` bulk build (one
 sort + bottom-up, no per-insert rebalancing). This flipped the hottest cleanly-winnable frame op 3.22x. The rejected shard+append
 form failed because it tried to parallelize the TREE; the win is to parallelize the PAIRS and build the tree once.
+
+### 2026-07-09 BlackThrush — rank_axis1("average"/min/max/first) row-parallel kernel — 3.70x fp-side WIN
+
+After the to_dict("index") 3.22x keep, a fresh `fp-bench` sweep put `df_rank_axis1` (~145ms@1M×10 f64) as the hottest
+CLEANLY-winnable frame op: `df_transpose` (~585ms) is peer-active (their trusted-constructor 2.70x just landed + they are
+still iterating), `df_stack` (~106ms) is at its parallel-concat floor, and `to_dict_index` dropped to ~104ms. rank_axis1's
+vectorized fast path (method ∈ {average,min,max,first}, all-valid Float64, no NaN, not pct — added 2026-06-21, already a
+2.87x pandas WIN) was still fully SINGLE-THREADED: an O(n_rows·n_cols²) branchless pairwise-count kernel (per row, per
+column b: `less=Σ(a<b)`, `equal=Σ(a==b)` over the row's m register-resident values → the exact average/min/max/first rank).
+
+Each output row's ranks depend ONLY on that row's m values → the row loop is embarrassingly parallel and CPU-bound (100M
+comparisons @ 1M×10, tiny per-row output writes, inputs/outputs streamed once). Partition rows into per-thread ranges, each
+running the IDENTICAL per-row kernel into its own column buffers, then concatenate in row order (ascending worker ranges
+preserve row order → bit-identical). Below a 50k-row gate it stays single-threaded. Load ~23/64 cores gave the CPU-bound
+parallelism room (unlike a saturated box, where CPU-bound levers mute — this is the complement of the alloc-bound to_dict
+win). New focused test `dataframe_rank_axis1_parallel_matches_serial_blackthrush` (60k×4, avg/min/max/first, worker-boundary
+rows 14999/15000/15001/44999/45000/59999) independently recomputes each rank and asserts bit-equality.
+
+Interleaved same-box A/B (alternating ORIG/CAND per trial, min-of-9, load ~23/64 cores, 1M×10 f64):
+
+| workload | ORIG | row-parallel kernel | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_rank_axis1` 1M×10 | 142.96 ms | 38.66 ms | **3.698x** |
+| fp-bench `df_stack` (control, untouched) | 93.28 ms | 93.29 ms | 1.000x (validates the measurement) |
+
+GREEN: full fp-frame lib (3127 passed / 0 failed, incl. the new 60k parallel-path test) + fp-conformance (1596/1596).
+
+LESSON: a per-row-independent CPU-bound kernel (rank/argmax/sort-per-row axis=1 family) parallelizes cleanly with the same
+row-range-partition + column-buffer-concat pattern as the reshape/to_dict builds — but it is CPU-bound, so it wins when the
+box has core headroom (here ~40 free cores → 3.70x) and mutes under saturation. Pair with the alloc-bound levers: prefer
+alloc-bound parallelism on a loaded box, CPU-bound parallelism on an idle one. RESIDUAL: the row-order concat re-copies the
+n×m f64 output (80MB) serially — a preallocated disjoint-slice write (avoiding the concat) is the next lever if this op
+re-surfaces as hot.

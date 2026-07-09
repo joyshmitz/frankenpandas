@@ -10488,3 +10488,52 @@ LESSON: after the trusted-constructor keep, the remaining transpose wall is not 
 The durable cost is the public representation cardinality: one `String`, one `Column`, and one `BTreeMap` entry per source
 row. Do not retry all-valid owned-unchecked row columns for transpose; the next viable frontier is still a representation
 change that removes the 100k-1M independent public-column objects.
+
+### 2026-07-09 BlackThrush - df.transpose shared lazy Float64 row plan - 1.16x fp-side WIN
+
+Consulted this ledger first. This does not retry the rejected descriptor-backed one-element chunks, flattened pair-buffer
+morsels, or per-worker `BTreeMap` shard levers. It builds on the trusted-constructor and Int64-label-certificate transpose
+keeps, then attacks the remaining all-valid Float64 row-copy cost without changing the public `DataFrame` representation.
+
+Profile target: `df_transpose` is still the hottest reached dataframe row. On current main, 1M x 10 Float64 transpose
+measured hundreds of ms, while `df_to_dict_index` and `wide_to_long` were lower in the same profiling pass
+(`df_transpose` best 508.773 ms, `df_to_dict_index` best 385.813 ms, `wide_to_long` best 82.289 ms in the routing probes).
+Graveyard/artifact match: section 8.2 vectorized execution and selection-vector style indirection, plus the optimization-loop
+contract: keep a proof-carrying indirection only when the materialized values are byte-identical to the eager row.
+
+Primitive: for homogeneous Arc-backed all-valid Float64 transpose, build one shared row plan over the original source column
+buffers and source starts. Each output column stores `source_row` plus an `Arc` to that plan and lazily materializes exactly
+`[src_col_0[row], src_col_1[row], ...]` on scalar/typed reads (`values()` or `as_f64_slice()`). Non-Float64, nullable,
+non-Arc-backed, and generic-label paths keep the eager fallback and the existing stringified-label collision guard. This is
+not a descriptor chunk view and not a parallel pair buffer: the indirection is plan-level and materializes the same f64 row
+the old inner loop copied eagerly.
+
+Same-worker RCH proof, LEGACY ORIGINAL vs candidate, `df_transpose` 1M x 10 Float64 on `vmi1149989`:
+
+| workload | LEGACY ORIGINAL | candidate | fp-side |
+| --- | ---: | ---: | --- |
+| best of 25 | 536.631 ms | 462.960 ms | **1.159x** |
+| median of 25 | 622.822 ms | 518.191 ms | **1.202x** |
+| p95 of 25 | 703.793 ms | 578.582 ms | **1.216x** |
+
+Candidate sanity probe on a different worker also found a lower best row (`353.832 ms` on `vmi1227854`), but the keep score
+above uses the same-worker comparator only.
+
+Commands/evidence:
+
+- ORIG same-worker comparator: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush RCH_WORKER=vmi1149989 RCH_REQUIRE_REMOTE=1 rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 1M --dtype float64 --json`; best `536631.273 us`, median `622821.839 us`, p95 `703792.985 us`.
+- Candidate same-worker run: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 1M --dtype float64 --json`; RCH selected `vmi1149989`, best `462960.489 us`, median `518191.096 us`, p95 `578581.598 us`.
+- Focused parity: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo test -p fp-frame dataframe_transpose_f64_int64_index_certificate_blackthrush --lib -- --nocapture`; PASS, including row materialization checks through `values()` and `as_f64_slice()`.
+- Conformance: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo test -p fp-conformance --lib --quiet`; PASS, 1596/1596 (fell open locally because RCH had no admissible worker slots).
+- Requested per-crate bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo bench --profile release -p fp-frame`; PASS on `vmi1149989`, fp-frame bench harness built under `release` profile and reported 0 measured / 3141 ignored.
+- Workspace check: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo check --workspace --all-targets`; PASS on `ovh-b` with pre-existing example warnings.
+- `git diff --check`: PASS.
+- `cargo fmt -p fp-columnar --check`: PASS.
+- `cargo fmt -p fp-frame --check`: still blocked by unrelated pre-existing fp-frame formatting drift outside the touched hunk.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo clippy --workspace --all-targets -- -D warnings`: blocked by pre-existing `fp-columnar` lint inventory (`unnecessary_cast`, `manual_range_contains`, `collapsible_if`, `manual_repeat_n`, `needless_range_loop`) outside this touched hunk.
+- `timeout 180s ubs crates/fp-columnar/src/lib.rs crates/fp-frame/src/lib.rs`: timed out with exit 124 and no focused finding output, matching the known broad scanner timeout/stall behavior for these large files.
+
+LESSON: the winning transpose indirection is a shared semantic row plan, not one descriptor object per tiny output chunk and
+not a parallel staging buffer. The plan deletes one million tiny f64 row allocations/copies while preserving the existing
+`Column` and `BTreeMap` cardinality. The remaining frontier is architectural: a block-backed or genuinely lazy DataFrame
+that can avoid constructing one independent `Column` object and one map entry per source row.

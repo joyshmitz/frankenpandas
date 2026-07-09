@@ -1121,6 +1121,52 @@ impl Float64PairwiseStatMatrixPlan {
     }
 }
 
+#[derive(Clone)]
+struct Float64TransposeInput {
+    data: Arc<[f64]>,
+    start: usize,
+}
+
+impl Float64TransposeInput {
+    fn new(data: Arc<[f64]>, start: usize, len: usize) -> Self {
+        debug_assert!(start.checked_add(len).is_some_and(|end| end <= data.len()));
+        Self { data, start }
+    }
+
+    fn value_at(&self, row: usize) -> f64 {
+        self.data[self.start + row]
+    }
+}
+
+struct Float64TransposeRowsPlan {
+    cols: Arc<[Float64TransposeInput]>,
+    row_len: usize,
+}
+
+impl Float64TransposeRowsPlan {
+    fn new(cols: Arc<[Float64TransposeInput]>, row_len: usize) -> Self {
+        Self { cols, row_len }
+    }
+
+    fn column_len(&self) -> usize {
+        self.cols.len()
+    }
+
+    fn materialize_row(&self, source_row: usize) -> Vec<f64> {
+        debug_assert!(source_row < self.row_len);
+        self.cols
+            .iter()
+            .map(|col| col.value_at(source_row))
+            .collect()
+    }
+}
+
+#[derive(Clone)]
+#[doc(hidden)]
+pub struct Float64TransposeRows {
+    plan: Arc<Float64TransposeRowsPlan>,
+}
+
 fn pairwise_stat_gram_partial_rows(
     col_data: &[&[f64]],
     n: usize,
@@ -2062,6 +2108,18 @@ enum ScalarValues {
         data: OnceLock<Vec<f64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Deferred all-valid Float64 row produced by a homogeneous transpose.
+    ///
+    /// All output columns share one plan over the original source columns.
+    /// Output row `j` materializes `[src_col_0[j], src_col_1[j], ...]`,
+    /// preserving the eager transpose loop's source-column order while avoiding
+    /// one tiny `Vec<f64>` allocation and copy for every transposed source row.
+    LazyAllValidFloat64TransposeRow {
+        plan: Arc<Float64TransposeRowsPlan>,
+        source_row: usize,
+        data: OnceLock<Vec<f64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Deferred all-valid Float64 `combine_first` select.
     ///
     /// Output row `i` is `left[i]` when the left validity bit is set and the
@@ -2678,6 +2736,19 @@ impl ScalarValues {
         Self::LazyAllValidFloat64PairwiseStatMatrixColumn {
             plan,
             col,
+            data: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_all_valid_float64_transpose_row(
+        plan: Arc<Float64TransposeRowsPlan>,
+        source_row: usize,
+    ) -> Self {
+        debug_assert!(source_row < plan.row_len);
+        Self::LazyAllValidFloat64TransposeRow {
+            plan,
+            source_row,
             data: OnceLock::new(),
             values: OnceLock::new(),
         }
@@ -3854,6 +3925,22 @@ impl ScalarValues {
         None
     }
 
+    fn transpose_row_float64_data(&self) -> Option<&[f64]> {
+        if let Self::LazyAllValidFloat64TransposeRow {
+            plan,
+            source_row,
+            data,
+            ..
+        } = self
+        {
+            return Some(
+                data.get_or_init(|| plan.materialize_row(*source_row))
+                    .as_slice(),
+            );
+        }
+        None
+    }
+
     fn materialize_float64_chunks(chunks: &[Float64Chunk], len: usize) -> Vec<f64> {
         let mut out = Vec::with_capacity(len);
         for chunk in chunks {
@@ -4120,6 +4207,20 @@ impl ScalarValues {
             } => values
                 .get_or_init(|| {
                     data.get_or_init(|| plan.materialize_column(*col))
+                        .iter()
+                        .copied()
+                        .map(Scalar::Float64)
+                        .collect()
+                })
+                .as_slice(),
+            Self::LazyAllValidFloat64TransposeRow {
+                plan,
+                source_row,
+                data,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data.get_or_init(|| plan.materialize_row(*source_row))
                         .iter()
                         .copied()
                         .map(Scalar::Float64)
@@ -4759,6 +4860,7 @@ impl ScalarValues {
             Self::LazyAllValidFloat64Slice { len, .. } => *len,
             Self::LazyAllValidFloat64Dot { len, .. } => *len,
             Self::LazyAllValidFloat64PairwiseStatMatrixColumn { plan, .. } => plan.column_len(),
+            Self::LazyAllValidFloat64TransposeRow { plan, .. } => plan.column_len(),
             Self::LazyCombineFirstFloat64 { len, .. } => *len,
             Self::LazyStridedFloat64 { len, .. } => *len,
             Self::LazyNullableFloat64 { data, .. } => data.len(),
@@ -5080,6 +5182,9 @@ impl Clone for ScalarValues {
             Self::LazyAllValidFloat64PairwiseStatMatrixColumn { plan, col, .. } => {
                 Self::lazy_all_valid_float64_pairwise_stat_matrix_column(Arc::clone(plan), *col)
             }
+            Self::LazyAllValidFloat64TransposeRow {
+                plan, source_row, ..
+            } => Self::lazy_all_valid_float64_transpose_row(Arc::clone(plan), *source_row),
             Self::LazyCombineFirstFloat64 {
                 left,
                 right,
@@ -8225,6 +8330,42 @@ impl Column {
             .collect()
     }
 
+    /// Build a shared lazy row plan for a homogeneous all-valid Float64
+    /// transpose. Each `(Arc, start)` source is one original column with
+    /// `row_len` readable rows.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn f64_transpose_rows_plan(
+        cols: Vec<(Arc<[f64]>, usize)>,
+        row_len: usize,
+    ) -> Float64TransposeRows {
+        let inputs: Vec<Float64TransposeInput> = cols
+            .into_iter()
+            .map(|(data, start)| Float64TransposeInput::new(data, start, row_len))
+            .collect();
+        Float64TransposeRows {
+            plan: Arc::new(Float64TransposeRowsPlan::new(Arc::from(inputs), row_len)),
+        }
+    }
+
+    /// Build one all-valid Float64 output row over a shared transpose plan.
+    /// Scalar and typed reads materialize exactly the eager row-copy order.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_f64_transpose_row(plan: &Float64TransposeRows, source_row: usize) -> Self {
+        debug_assert!(source_row < plan.plan.row_len);
+        let len = plan.plan.column_len();
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_transpose_row(
+                Arc::clone(&plan.plan),
+                source_row,
+            ),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
     /// Public (hidden) for fp-join's fused dense outer-merge builder
     /// (br-frankenpandas-343ho); invalid slots carry the 0.0-datum convention
     /// and materialize `Scalar::Null(NullKind::NaN)`.
@@ -8621,6 +8762,9 @@ impl Column {
                 return Some(data);
             }
             if let Some(data) = self.values.pairwise_stat_float64_data() {
+                return Some(data);
+            }
+            if let Some(data) = self.values.transpose_row_float64_data() {
                 return Some(data);
             }
             if let Some(data) = self.values.combine_first_float64_data() {

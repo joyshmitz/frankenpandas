@@ -10329,3 +10329,45 @@ fp-conformance.
 LESSON: a per-output-row `IndexLabel` build over an Int64 source index pays the 24 B/enum boxing tax; carry it as raw i64 →
 `Index::from_i64_values` (same typed-output lever as melt/stack). RESIDUAL: explode is split/byte-append-bound — a
 byte-level (memchr) split for single-char separators + a bulk part-append is the next single-threaded lever (untried).
+
+### 2026-07-09 BlackThrush - df.transpose trusted construction certificate - 2.70x fp-side WIN
+
+This is NOT the rejected descriptor-backed 1-element chunk lever above, and it does not try to fake a pandas-style
+zero-copy transposed view. The profile target was still `df_transpose`: on current main, `fp-bench df_transpose` for
+1M x 10 f64 sat around 1.5-1.7s median, while `df_stack` and `df_to_dict_dict` were far lower and more variable. The
+hot path was not just copying 10 f64s per output row; it also built 1M output `Column` objects and then paid the generic
+constructor's redundant column-length validation and column-order normalization over those same 1M columns.
+
+Primitive: treat transpose as a proof-carrying internal producer. After transpose itself has generated every output column
+with exactly the original column count and has pushed the matching `column_order`, it can construct the `DataFrame` through
+a private trusted constructor instead of re-validating the just-built table through `new_with_column_order`. To preserve
+observable semantics before bypassing the generic constructor, the hunk adds an explicit guard for stringified index-label
+collisions: distinct source labels such as `IndexLabel::Int64(1)` and `IndexLabel::Utf8("1")` both map to output column name
+`"1"`, so transpose now rejects that ambiguous case instead of silently losing one output column in the map.
+
+Same-worker RCH proof, current `main` ORIG vs candidate, `df_transpose` 1M x 10 f64 on `vmi1227854`:
+
+| workload | ORIG median | candidate median | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_transpose` 1M x 10 f64 | 1577.778 ms | 585.249 ms | **2.70x** |
+
+Best-row sanity check: ORIG best `1469.091 ms`, candidate best `541.811 ms`, ratio `2.71x`.
+
+Commands / gates:
+
+- ORIG: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod RCH_WORKER=vmi1227854 RCH_REQUIRE_REMOTE=1 rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 1M --dtype float64 --json`
+- Candidate: same command from `/data/projects/.scratch/frankenpandas-blackthrush-digdeeper-20260709-2` with the trusted-constructor hunk.
+- `rch exec -- cargo test -p fp-frame dataframe_transpose --lib -- --nocapture`: PASS, 7/7 focused transpose tests including the stringified-label collision guard.
+- `rch exec -- cargo test -p fp-conformance --lib --quiet`: PASS, 1596/1596 conformance tests.
+- `rch exec -- cargo bench --profile release -p fp-frame`: PASS, fp-frame bench harness built under the requested profile; libtest reported 0 measured / 3139 ignored.
+- `rch exec -- cargo check --workspace --all-targets`: PASS with pre-existing example warnings.
+- `git diff --check`: PASS.
+- `cargo fmt -p fp-frame --check`: blocked by pre-existing formatting drift in unrelated fp-frame regions; touched hunk is diff-check clean.
+- `rch exec -- cargo clippy --workspace --all-targets -- -D warnings`: blocked before this lane by pre-existing `fp-columnar` lint failures.
+- `rch exec -- cargo clippy --no-deps -p fp-frame --lib -- -D warnings`: blocked by pre-existing broad fp-frame lint inventory outside the transpose hunk.
+- `timeout 180s ubs crates/fp-frame/src/lib.rs`: reproduced the known fp-frame scanner timeout/stall behavior without a focused finding.
+
+LESSON: proof-carrying internal constructors are a strong primitive for self-generated wide tables. When an operator has
+already established shape/order invariants locally, generic public-constructor validation can become a second O(number of
+output columns) pass. The safety rule is to guard any semantic compression boundary first; here that boundary is
+`IndexLabel::to_string()` turning distinct source labels into public column names.

@@ -10408,3 +10408,43 @@ transpose wall. The final shape still creates one owned `Column` per source row 
 pair buffers add thread orchestration and an extra staging vector without deleting that cardinality. Do not retry f64
 transpose flattened pair buffers. The remaining real frontier is still the architectural `br-frankenpandas-l4vzc` class:
 lazy transposed views or homogeneous 2D block-backed storage that avoids constructing 100k-1M independent `Column` objects.
+
+### 2026-07-09 BlackThrush - df.transpose affine Int64 label certificate - 1.033x fp-side WIN
+
+Consulted this ledger first. This does not retry the rejected descriptor-backed 1-element chunks, flattened pair-buffer
+morsels, or per-worker `BTreeMap` shard levers. It builds on the trusted-constructor transpose keep, then attacks a
+different residual cost: materializing and walking a full `Vec<IndexLabel>` just to stringify the default Int64 row labels
+into output column names.
+
+Profile target: `df_transpose` remains the hottest reached dataframe row after the trusted-constructor keep. In a fresh
+RCH probe, 1M x 10 Float64 transpose still measured in the hundreds of ms, while `df_melt` and `df_explode` were lower and
+`df_stack` was materially below transpose on the same scale. The selected primitive came from the proof/vectorized
+execution family in the graveyard: treat typed index representations as semantic certificates. For all-valid Float64
+transpose, if the source index is an affine Int64 unit range or a stored typed Int64 index, generate the output column name
+directly from the certified Int64 label stream and skip `self.index.labels()` entirely. Generic and mixed-label indexes
+still use the old label materialization and collision guard.
+
+Same-worker RCH proof, current `main` ORIG vs candidate, `df_transpose` 1M x 10 Float64 on `ovh-a`:
+
+| workload | ORIG | candidate | fp-side |
+| --- | ---: | ---: | --- |
+| best of 25 | 382.523 ms | 370.392 ms | **1.033x** |
+| median of 25 | 391.483 ms | 374.211 ms | **1.046x** |
+
+Commands/evidence:
+
+- ORIG: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 1M --dtype float64 --json`; RCH selected `ovh-a`, best `382523.458 us`, median `391482.767 us`.
+- Candidate: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush RCH_WORKERS=ovh-a RCH_REQUIRE_REMOTE=1 rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 1M --dtype float64 --json`; RCH selected `ovh-a`, best `370392.063 us`, median `374211.260 us`.
+- Focused parity: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo test -p fp-frame dataframe_transpose_f64_int64_index_certificate_blackthrush --lib -- --nocapture`; PASS, 1/1.
+- Conformance: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo test -p fp-conformance --lib --quiet`; PASS, 1596/1596 (fell open locally because RCH had no admissible worker slots).
+- Requested per-crate bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo bench --profile release -p fp-frame`; PASS on `hz2`, fp-frame bench harness built under `release` profile and reported 0 measured / 3141 ignored.
+- Workspace check: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo check --workspace --all-targets`; PASS on `hz2` with pre-existing example warnings.
+- `git diff --check`: PASS.
+- `cargo fmt -p fp-frame --check`: still blocked by unrelated pre-existing fp-frame formatting drift; the touched transpose test was adjusted manually after the first fmt diff and no longer appears in the tail of the rerun.
+- `timeout 180s ubs crates/fp-frame/src/lib.rs`: timed out with exit 124, matching the known fp-frame scanner timeout/stall behavior and producing no focused finding before the timeout.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo clippy --workspace --all-targets -- -D warnings`: blocked by pre-existing `fp-columnar` lints (`unnecessary_cast`, `manual_range_contains`, `collapsible_if`, `manual_repeat_n`) before this touched hunk.
+
+LESSON: keep the semantic certificate at the storage boundary instead of reconstructing public labels when an operator only
+needs their public spelling. For default RangeIndex-shaped transposes, affine Int64 metadata is enough to preserve pandas
+observable column names and avoid one full label-vector allocation/walk. Do not generalize this to mixed labels: distinct
+typed labels can still collide after `to_string()`, so the generic collision guard remains mandatory there.

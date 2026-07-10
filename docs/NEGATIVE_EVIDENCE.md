@@ -13338,3 +13338,45 @@ likely precision issue AND a perf gap); `std`/`var`/`sem` Timedelta64 (dtype-out
 buggy** — `nanmean` has a Timedelta64 arm but NO Datetime64 arm, so a Datetime64 column returns `Scalar::Float64` (lossy f64
 mean of nanos, wrong TYPE vs pandas' Timestamp); fixing it needs care on the exact pandas rounding (float-mean-then-cast vs
 integer division), so it is a separate correctness bead, not a drop-in perf lever.
+
+### 2026-07-10 cc_fp — WIN: contiguous-Utf8 `unique` dedups over `&[u8]` spans — 1.457x fp-side, bit-identical (back on the original Utf8-materialization lane)
+
+`Column::unique` had typed fast paths for Int64/Float64/Datetime64/Timedelta64 but NONE for Utf8: a contiguous-Utf8 column
+(`LazyContiguousUtf8`, the output of every string op) fell to the generic `Key::Utf8` path, which iterates `&self.values` and
+so forces `as_slice()` to **materialize a `Vec<Scalar::Utf8>` — one heap `String` per row** — before hashing each `&str` and
+cloning the first-seen `Scalar`s. Added a fast path before the generic `Key` enum: for an all-valid contiguous-Utf8 backing
+(`as_utf8_contiguous()`), dedup the byte spans first-seen via `FxHashSet<&[u8]>` (byte-equality == `&str`-equality for valid
+UTF-8) and rebuild ONE contiguous output via `from_utf8_contiguous` — **zero per-row `String` allocation**. The saving is paid
+per ROW (not per distinct), so it holds across cardinalities.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG reference fn vs CAND `unique()` interleaved, per-arm
+adjacent A/A null control; 2M rows, 50k distinct `"val_{:07}"` labels; ORIG = a bench-only fn that replays the generic path
+exactly — `col.values.as_slice()` materialize + `FxHashSet<&str>` first-seen + `Scalar` clone — so it is if anything a
+CONSERVATIVE floor: it omits the shipped arm's per-elem `is_missing()` and the `Key` enum discriminant hash):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `d3cc6c3f41a8d299a1a06d196e3609064f15d4b9ef8b2ade3d99f93f65703673` |
+| worker | `fixmydocuments` |
+| ORIG generic `Scalar::Utf8` dedup | 411.187 ms (cv 18.77%) |
+| CAND contiguous `&[u8]` dedup | 282.156 ms (cv 6.89%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0052x -> 0.52% floor** |
+| **fp-side ratio (min-of-blocks)** | **1.457x (+45.7%) — DECIDABLE (45.7% is ~88x the 0.52% floor)** |
+
+BIT-IDENTICAL: the A/B parity block asserts `orig.dtype()==cand.dtype()` AND `orig.values.as_slice() == cand.values.as_slice()`
+(same first-seen distinct sequence, same bytes). GREEN remote fail-closed: fp-columnar lib **475/0**; rustfmt clean; clippy
+clean in the hunk (collapsed the ORIG ref's nested `if let`+`if` into a let-chain). No local build. `crates/fp-frame` untouched.
+
+⚠️ TUNING PITFALL RECORDED (this is the interesting part). The FIRST candidate was a **0.550x LOSS** (CAND 1292 ms vs ORIG 710 ms,
+worker `vmi1227854`, cv 2.78%, DECIDABLE-against). Cause: I pre-sized the dedup structures to the ROW count —
+`seen.reserve(n)` and `out_offsets = Vec::with_capacity(n+1)` with n=2M — but only 50k distinct are ever inserted. That builds a
+~64 MB mostly-empty hash table that **thrashes cache on every one of the 2M probes**, while the generic reference grows a
+naturally-small ~50k table that stays resident in L2. Removing the reservations (grow-on-demand, matching the generic path's
+`Vec::new()`) flipped it to the 1.457x win. **Lesson: reserve to the expected OUTPUT cardinality, never to the INPUT length,
+when the two can diverge by orders of magnitude — an oversized probe table is slower than an undersized one that grows.** The
+loss row is genuine evidence (same lever, one impl knob), not a separate rejected lever.
+
+This lever is the ORIGINAL assigned lane — the "Utf8 materialization bypass" — landing on a hot columnar op (`Series.unique` /
+`drop_duplicates` underpinning) rather than the astype/dt producers. Same tax (`Vec<Scalar::Utf8>` per-row `String`), same fix
+(read `as_utf8_contiguous` byte spans, rebuild via `from_utf8_contiguous`). NEXT sibling candidate: `value_counts` on
+contiguous-Utf8 pays the identical `set_member_key(value)` materialization — a separate ONE-lever commit.

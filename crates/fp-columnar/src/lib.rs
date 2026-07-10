@@ -20770,6 +20770,36 @@ impl Column {
             return Ok(Self::from_f64_values(unique_f64_wide(data)));
         }
 
+        // Contiguous-Utf8 fast path: the generic path below iterates
+        // `&self.values`, which forces `as_slice()` to materialize a
+        // `Vec<Scalar::Utf8>` -- one heap `String` per row -- then hashes each
+        // `&str` and clones the first-seen `Scalar`s. Reading the byte buffer
+        // directly lets us dedup over `&[u8]` spans (byte-equality is exactly
+        // `&str`-equality for valid UTF-8) with ZERO per-row `String` alloc, then
+        // rebuild ONE contiguous output buffer. Bit-identical: all-valid means
+        // nothing is skipped as missing, first-seen order is preserved, and
+        // `from_utf8_contiguous` yields the same distinct `Scalar::Utf8` sequence
+        // the generic arm produces (`as_utf8_contiguous` only matches all-valid
+        // Utf8 backings).
+        if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+            // Grow the seen-set and the output buffers on demand (like the generic
+            // path's `Vec::new()`): the distinct count is unknown, and reserving
+            // for all `n` rows builds a huge, mostly-empty hash table that thrashes
+            // cache on every probe when the cardinality is low.
+            let mut seen: FxHashSet<&[u8]> = FxHashSet::default();
+            let mut out_bytes: Vec<u8> = Vec::new();
+            let mut out_offsets: Vec<usize> = Vec::new();
+            out_offsets.push(0);
+            for w in offsets.windows(2) {
+                let span = &bytes[w[0]..w[1]];
+                if seen.insert(span) {
+                    out_bytes.extend_from_slice(span);
+                    out_offsets.push(out_bytes.len());
+                }
+            }
+            return Ok(Self::from_utf8_contiguous(out_bytes, out_offsets));
+        }
+
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Bool(bool),
@@ -34555,6 +34585,173 @@ mod ab_timedelta_unique_ccfp {
         );
         println!(
             "  CAND i64 open-addr+re-tag min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_statements)]
+mod ab_utf8_unique_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, DType, FxHashSet, Scalar};
+
+    /// Seeded (splitmix64) contiguous-Utf8 buffer: `n` rows drawn from `distinct`
+    /// fixed-width `"val_{:07}"` labels. Every label is a distinct heap `String`
+    /// once materialized, so the generic path pays one alloc per row.
+    fn mk(n: usize, distinct: usize) -> (Vec<u8>, Vec<usize>) {
+        let mut s: u64 = 0x1234_5678_9ABC_DEF1;
+        let mut bytes: Vec<u8> = Vec::with_capacity(n * 11);
+        let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        for _ in 0..n {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let key = (z as usize) % distinct;
+            bytes.extend_from_slice(b"val_");
+            let mut buf = [0u8; 7];
+            let mut k = key;
+            for slot in buf.iter_mut().rev() {
+                *slot = b'0' + (k % 10) as u8;
+                k /= 10;
+            }
+            bytes.extend_from_slice(&buf);
+            offsets.push(bytes.len());
+        }
+        (bytes, offsets)
+    }
+
+    /// Reference for the pre-lever generic path: force the `Vec<Scalar::Utf8>`
+    /// materialization (one `String` per row) via `as_slice`, then FxHashSet
+    /// `&str` first-seen dedup with `Scalar` clone -- byte-for-byte the shipped
+    /// `Key::Utf8` arm's cost, minus the fast-path interception.
+    fn orig_unique_utf8(col: &Column) -> Column {
+        let scalars = col.values.as_slice();
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        let mut out: Vec<Scalar> = Vec::new();
+        for v in scalars {
+            if let Scalar::Utf8(s) = v
+                && seen.insert(s.as_str())
+            {
+                out.push(v.clone());
+            }
+        }
+        Column::new(DType::Utf8, out).expect("utf8 column")
+    }
+
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_utf8_unique() {
+        const N: usize = 2_000_000;
+        const DISTINCT: usize = 50_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let (bytes, offsets) = mk(N, DISTINCT);
+
+        // Parity: the fast-path distinct sequence == the generic reference's,
+        // element-for-element (same first-seen order, same bytes, same dtype).
+        {
+            let orig = orig_unique_utf8(&Column::from_utf8_contiguous(
+                bytes.clone(),
+                offsets.clone(),
+            ));
+            let cand = Column::from_utf8_contiguous(bytes.clone(), offsets.clone())
+                .unique()
+                .expect("utf8 unique");
+            assert_eq!(orig.dtype(), cand.dtype(), "dtype diverged");
+            assert_eq!(
+                orig.values.as_slice(),
+                cand.values.as_slice(),
+                "distinct utf8 sequence diverged"
+            );
+        }
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_unique_utf8(&Column::from_utf8_contiguous(
+                bytes.clone(),
+                offsets.clone(),
+            )));
+            std::hint::black_box(
+                Column::from_utf8_contiguous(bytes.clone(), offsets.clone())
+                    .unique()
+                    .unwrap(),
+            );
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = Column::from_utf8_contiguous(bytes.clone(), offsets.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(orig_unique_utf8(std::hint::black_box(&co)));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = Column::from_utf8_contiguous(bytes.clone(), offsets.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).unique().unwrap());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = Column::from_utf8_contiguous(bytes.clone(), offsets.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).unique().unwrap());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB utf8 unique (ONE binary, ONE invocation) N={N} distinct={DISTINCT}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic Scalar::Utf8 dedup min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND contiguous &[u8] dedup     min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

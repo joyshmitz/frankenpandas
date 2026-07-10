@@ -13086,3 +13086,46 @@ plus a witness/affine field; box the cold `OnceLock<Option<Witness>>` caches (fa
 across ALL variants tied at the current max in ONE commit so the enum actually drops; the inline-witness join lanes need a
 separate, measured decision (their witnesses are hot-ish construction data). Cumulative footprint already banked: Column
 288 -> 232 B (19%), bit-identical, cold-path-only.
+
+### 2026-07-10 cc_fp — DEAD-END confirmed: single-cold-cache ScalarValues shrink cannot break the 144 B floor (Rust enum layout packing). No ship; do not retry per-field boxing.
+
+Follow-up to the plateau surface (392e74d6c). Tried to break 144 B by boxing the one remaining nominally-144 cold cache and,
+when that didn't obviously work, by exhaustively measuring every variant. Definitive result: **the single-cold-cache
+enum-shrink lever is exhausted.** No production change landed this turn (reverted to HEAD).
+
+**EVIDENCE.** Generated an exhaustive per-variant size probe (46 struct-variants). Filtered to the top:
+
+| variant | tuple size |
+| --- | ---: |
+| ScalarValues (enum, ground truth via `size_of::<ScalarValues>()`) | **144 B** |
+| LazyShiftedBool | 144 B |
+| LazyDenseCycleProbeRepeatInt64 / LazyLeftJoinDenseCycle{Left,Right}Int64 | 136 B |
+| (all others) | <= 136 B |
+
+`LazyShiftedBool` is the only nominal-144 variant, and its `affine_selection: OnceLock<Option<BoolAffineSelectionWitness>>`
+(40 B) is a genuine cold cache. **Boxing it left `size_of::<ScalarValues>()` at 144 B — measured THREE times on three
+workers (hz2/ovh-a and earlier).** So boxing the sole nominal-144 cold field does NOT reduce the real enum.
+
+**ROOT CAUSE.** Two facts make per-field boxing futile here: (1) a hand-written field TUPLE is not laid out like the real enum
+VARIANT — Rust reorders variant fields for packing, so tuple sizes only approximately rank variants and cannot identify the
+true binder; (2) more decisively, the ground-truth `size_of::<ScalarValues>()` did not drop when the only obvious 144 cold
+cache was boxed, so whatever binds 144 is either a differently-packed variant or the collective layout, not a single boxable
+cold field. The two increments that DID work (factorize 200->160, lower_hex 160->144) worked only because `LazyContiguousUtf8`
+was, at those moments, the sole binder by a clear margin (56 B / 40 B fields). That margin is gone.
+
+**WHAT REMAINS IS A STRUCTURAL EPIC, NOT A COLD-CACHE LEVER.** Breaking below 144 B needs one of: (a) boxing the INLINE
+`Int64DenseCycleWitness` pairs (2 x 24 B) across the ~5 dense-cycle join variants at 136 AND simultaneously re-shrinking
+whatever packs to 144 — a multi-variant change whose inline-witness boxes add a heap alloc per join-lane construction
+(join-path regression risk, must be measured); or (b) a representation change (e.g., hoist the ubiquitous
+`values: OnceLock<Vec<Scalar>>` cache — 32 B in every variant — into `Column` once, or behind one shared box). Both are
+multi-turn, gated on hot-path/join-path regression measurement. **Do not retry single-field cold-cache boxing to shrink the
+enum; it is empirically a no-op past 144 B.**
+
+**BANKED THIS SESSION (unchanged, real):** Column 288 -> 232 B (19% smaller) via the factorize + lower_hex cold-cache boxes
+(a3d702ec5, 4468c219c), bit-identical, cold-path-only. That footprint reduction stands. This turn added no code (the
+exhaustive probe and the affine box were experimental and reverted; tree at HEAD). `crates/fp-frame` untouched.
+
+**HONEST HANDOFF.** The clean columnar cold-path levers measurable under the current disk freeze are exhausted. Further
+columnar footprint work is the structural epic above; further columnar CPU work needs a fresh profile (blocked: no local
+`fp-bench` binary). The higher-leverage open item remains the AVX2 build decision (repo-owner scope). Surfacing rather than
+forcing a no-op or corrupted ship.

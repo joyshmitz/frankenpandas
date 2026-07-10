@@ -13645,3 +13645,37 @@ duplicated/drop_duplicates 3.44x.** The `as_i64_slice()` gate excludes i64-backe
 Int64 fast path is a temporal-sibling candidate. STILL OPEN in this vein: `nunique` (falls to `nannunique` — same gap, count
 output, trivially bit-identical), `mode`, `isin` for temporal. NEXT could be temporal `nunique` (cleanest) or a pivot to
 groupby/io.
+
+### 2026-07-10 cc_fp — WIN: Datetime64/Timedelta64 `nunique` routes through the i64 distinct count — 2.675x fp-side, bit-identical
+
+Next temporal-vein sibling. `nunique_with_dropna` had typed distinct-count paths for Int64 (dense bitset / `count_distinct_i64_wide`)
+and (my earlier) contiguous-Utf8, but Datetime64/Timedelta64 — i64-ns-backed, failing the `as_i64_slice()` `dtype==Int64` gate —
+fell to `nannunique(&self.values)`, which materializes `Vec<Scalar::Datetime64>` and keys each by `ScalarKey::Datetime64(ns)`.
+Added a temporal branch: for an all-valid, no-NaT column, count distinct raw ns via the existing `count_distinct_i64_wide`. The
+count is **dtype-independent — no re-tag**, the cleanest possible temporal lever.
+
+BIT-IDENTITY: a non-NaT temporal value's key is its ns, so the distinct count of ns equals the distinct count of timestamps;
+all-valid ⇒ no missing so `dropna` never adds a bucket (identical for BOTH dropna values); NaT (`i64::MIN`)/nullable falls through
+to `nannunique`.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG generic vs CAND fast interleaved, per-arm adjacent A/A null
+control; 2M Datetime64 rows, 50k distinct; ORIG forces the REAL `nannunique` path via one planted NaT the CAND gate skips):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `90c9ce8220bd84e09783f92bc2055cd178b80318dfcff83052a86ff57b95b303` |
+| worker | `vmi1227854` |
+| ORIG generic `nannunique` count | 348.924 ms (cv 9.38%) |
+| CAND raw-i64 ns distinct count | 130.420 ms (cv 12.09%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0566x -> 5.66% floor** |
+| **fp-side ratio (min-of-blocks)** | **2.675x (+167.5%) — DECIDABLE (167.5% is ~30x the 5.66% floor)** |
+
+⚠️ NOISY WORKER: `vmi1227854` gave a high per-arm cv (9–12%) and a high A/A null floor (5.66%) this run — but the min-of-blocks
+ratio (2.675x) clears the floor by ~30x, so the verdict is robust despite the noise (the noise inflated the FLOOR, not the
+ratio). BIT-IDENTICAL: the A/B parity block asserts the count equals a ground-truth `FxHashSet<i64>` distinct count AND the
+conformance-verified Int64-column `nunique` AND `nunique_with_dropna(false)`. GREEN remote fail-closed: fp-columnar lib
+**475/0**, fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. No local build. `crates/fp-frame` untouched.
+
+**TEMPORAL-TYPED-FAST-PATH VEIN (cc_fp): argsort 8.36x, min/max 35.4x, sum/mean 27.0x, value_counts 15.2x, unique 2.12x,
+duplicated/drop_duplicates 3.44x, nunique 2.675x.** STILL OPEN: `mode`, `isin` for temporal. NEXT could be temporal `mode` or a
+pivot to groupby/io.

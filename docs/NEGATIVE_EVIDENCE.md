@@ -13042,3 +13042,47 @@ easy cold-cache increments in this variant are EXHAUSTED (factorize + lower_hex 
 `strictly_increasing` 8 B are small and also cold but yield <=8 B enum shrink each after alignment). Next real step: re-probe
 for the NEW widest variant (now that `LazyContiguousUtf8` is 144 B, another variant may tie/exceed it) and repeat only if its
 widest field is cold. Recorded so the next agent re-probes rather than assuming this variant is still the target.
+
+### 2026-07-10 cc_fp — SURFACE: the cold-cache boxing lever PLATEAUED at 144 B (Column 232). affine_selection box was a no-op (multiple variants co-max) — REVERTED. Enhanced the size probe; next step is a multi-variant sweep, not one lever.
+
+Continued the columnar cold-cache lever profile-first. After the factorize + lower_hex boxes (Column 288 -> 232),
+re-probed all wide variants via `scalarvalues_size_breakdown_ccfp` (extended this turn to print per-variant field tuples):
+
+| variant | size |
+| --- | ---: |
+| **ScalarValues (enum)** | **144 B** |
+| Column | 232 B |
+| LazyContiguousUtf8 | **128 B** (shrunk below the max by the two prior boxes) |
+| **LazyShiftedBool** | **144 B** |
+| LazyAllValidInt64Chunks | 128 B |
+| LazyLeftJoinDenseCycleLeftInt64 | 136 B |
+
+`LazyShiftedBool` (144) appeared to be the sole max, and its `affine_selection: OnceLock<Option<BoolAffineSelectionWitness>>`
+(40 B) is a genuine cold cache — read only by `bool_affine_selection_witness()`, never on the hot `values()` path, witness is
+`Copy`. So I boxed it (in both `LazyAllValidBool` and `LazyShiftedBool`, + both access sites via `.map(Box::new)` /
+`.as_deref().copied()`), bit-identical.
+
+**BUT the enum stayed at 144 B.** A `Column` always occupies `sizeof(enum)` = the MAX variant, regardless of which variant
+is active, so shrinking `LazyShiftedBool` (144 -> 120) is a **no-op on `Column` footprint** while another variant also sits at
+144. I measured ~10 variants; the max among them besides `LazyShiftedBool` is the join lane at 136, so the co-max at 144 is
+among the ~37 UNMEASURED variants. **The `affine_selection` box therefore delivered zero footprint benefit and only added a
+cold-path deref, so it was REVERTED.** (This is the whack-a-mole property of shrinking a max-over-variants enum: one variant
+is not a lever; you must shrink EVERY variant tied at the max simultaneously.)
+
+**PLATEAU, stated as the surface.** The two shipped cold-cache increments (factorize 200->160, lower_hex 160->144) each
+worked because `LazyContiguousUtf8` was the *sole* max at the time. It no longer is (128 now). Breaking below 144 B requires:
+(a) enumerating EVERY variant at 144 B (a handful, among the join/dense-cycle lanes with two inline 24 B `Int64DenseCycleWitness`
+and other complex variants), and (b) shrinking ALL of them in one commit — a MULTI-VARIANT sweep, and some of those fields are
+INLINE always-present join data (not cold caches), so boxing them adds a heap alloc per join-lane construction and needs a
+join-path regression measurement. That is an epic, not a single cold-cache lever.
+
+Shipped this turn: only the enhanced `scalarvalues_size_breakdown_ccfp` diagnostic (permanent, `#[cfg(test)] #[ignore]`) that
+prints per-variant field-tuple sizes, so the next agent enumerates the 144-variants directly instead of rediscovering the
+plateau. No production code changed (affine_selection reverted); fp-columnar 475/0, rustfmt clean, clippy clean in the probe
+region, no local build. `crates/fp-frame` untouched.
+
+**HANDOFF for the multi-variant sweep:** run the extended probe over all variants that carry two `OnceLock<Vec<_>>` caches
+plus a witness/affine field; box the cold `OnceLock<Option<Witness>>` caches (factorize/lower_hex/affine/dense_cycle patterns)
+across ALL variants tied at the current max in ONE commit so the enum actually drops; the inline-witness join lanes need a
+separate, measured decision (their witnesses are hot-ish construction data). Cumulative footprint already banked: Column
+288 -> 232 B (19%), bit-identical, cold-path-only.

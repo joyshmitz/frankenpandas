@@ -33108,6 +33108,73 @@ mod ab_transpose_row_typed_ccfp {
             "  factorize_default field: {cur} B -> {boxed} B  (saves {} B)",
             cur - boxed
         );
+        use fp_types::Scalar as Sc;
+        println!("--- widest-variant field tuples (find the current enum max) ---");
+        macro_rules! vt {
+            ($n:literal, $t:ty) => {
+                println!("  {:>4} B  {}", std::mem::size_of::<$t>(), $n);
+            };
+        }
+        vt!(
+            "LazyContiguousUtf8",
+            (
+                std::sync::Arc<[u8]>,
+                std::sync::Arc<[usize]>,
+                OnceLock<bool>,
+                OnceLock<Option<usize>>,
+                OnceLock<Option<Box<super::Utf8LowerHexSequence>>>,
+                OnceLock<Box<super::Utf8FactorizeDefaultWitness>>,
+                OnceLock<Vec<Sc>>,
+            )
+        );
+        vt!(
+            "LazyShiftedBool",
+            (
+                std::sync::Arc<[bool]>,
+                i64,
+                bool,
+                usize,
+                OnceLock<Vec<bool>>,
+                OnceLock<Option<super::BoolAffineSelectionWitness>>,
+                OnceLock<Vec<Sc>>,
+            )
+        );
+        vt!(
+            "LazyAllValidInt64Chunks",
+            (
+                std::sync::Arc<[u8]>,
+                usize,
+                OnceLock<Vec<i64>>,
+                OnceLock<Option<super::Int64DenseCycleWitness>>,
+                OnceLock<Vec<Sc>>,
+            )
+        );
+        vt!(
+            "OL<Option<BoolAffineSelectionWitness>>",
+            OnceLock<Option<super::BoolAffineSelectionWitness>>
+        );
+        vt!(
+            "OL<Option<Box<BoolAffineSelectionWitness>>>",
+            OnceLock<Option<Box<super::BoolAffineSelectionWitness>>>
+        );
+        vt!(
+            "OL<Option<Int64DenseCycleWitness>>",
+            OnceLock<Option<super::Int64DenseCycleWitness>>
+        );
+        // The join dense-cycle lanes carry TWO INLINE 24 B witnesses (not OnceLock
+        // caches -- always-present join data), so they tie the enum max at ~144 B.
+        // This is the plateau: shrinking one variant is a no-op while these remain.
+        vt!(
+            "LazyLeftJoinDenseCycleLeftInt64",
+            (
+                std::sync::Arc<[i64]>,
+                super::Int64DenseCycleWitness,
+                super::Int64DenseCycleWitness,
+                usize,
+                OnceLock<Vec<i64>>,
+                OnceLock<Vec<Sc>>,
+            )
+        );
     }
 
     /// ISA-baseline probe (cc_fp): prints what the CURRENT BINARY was COMPILED for

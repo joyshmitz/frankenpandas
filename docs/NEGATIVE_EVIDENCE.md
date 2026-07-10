@@ -13219,3 +13219,44 @@ columns, groupby min/max, time-range queries. NAT-bearing / nullable temporal co
 in fp-types still compare Datetime64 via lossy `to_f64()` for any caller that reaches them directly (e.g. a NAT-bearing
 datetime column, which my fast path skips) — the proper fix is an exact `Scalar::Datetime64` arm in `nanmin`/`nanmax`
 mirroring the Timedelta64 arm. My Column-level guard fixes the common all-valid path; the fp-types helpers should get the arm too.
+
+### 2026-07-10 cc_fp — WIN: Timedelta64 sum/mean via raw-i64 i128 fold — 27.0x fp-side, FULLY bit-identical
+
+Third temporal-reduction lever (after argsort 8.36x, min/max 35.4x). `Column::sum`/`mean` have typed Float64 folds then fall
+to `nansum`/`nanmean(&self.values)` for everything else — so a Timedelta64 column materializes its `Scalar` Vec and reduces
+through the na-last helper. Unlike the min/max Datetime64 case, `nansum`/`nanmean` already accumulate Timedelta64 in EXACT
+i128 (via `collect_timedelta_ns`), so this is a pure perf lever with no correctness angle.
+
+LEVER (one branch each in `sum`/`mean`): for `validity.all()`, non-empty, no-NAT (`i64::MIN`) Timedelta64 columns, fold the
+raw `&[i64]` in i128 and clamp to i64 — the SAME accumulation + clamp as `collect_timedelta_ns`, without materializing the
+`Scalar` Vec. `mean` divides the i128 sum by `len` (== count) exactly as `nanmean`. Empty / NAT / nullable falls to
+`nansum`/`nanmean` (whose empty arm returns `Float64(0.0)` / `Null(NaN)` and whose fold skips missing) — so those edge
+contracts are untouched.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `nansum(col.values())` vs CAND `col.sum()` interleaved,
+FRESH column per rep so ORIG pays the `Scalar` materialization, per-arm adjacent A/A null control; 2M random Timedelta64 ns):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `d7e46dbe002446726d603f667e973fc8f92353032a5284fb3ada47e6043ebb22` |
+| worker | `hetzner2` |
+| ORIG `nansum` (materialize 2M `Scalar` + i128) | 28.584 ms (cv 0.52%) |
+| CAND raw-i64 i128 fold | 1.058 ms (cv 1.15%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0163x -> 1.63% floor** |
+| **fp-side ratio** | **27.027x (+2602.7%) — DECIDABLE (2602% >> 1.63% floor)** |
+
+BIT-IDENTICAL: the A/B asserts `col.sum() == nansum(col.values())` AND `col.mean() == nanmean(col.values())` before timing —
+both pass (same i128 accumulation, same clamp, same `Scalar::Timedelta64` output). GREEN remote fail-closed: fp-columnar
+**475/0**, fp-conformance **2048/0**, fp-frame lib **3133/0** (the acosh/arccosh target-cpu flake did NOT fire on this worker,
+retroactively confirming the 3 failures in `6141d3cfe` were the documented build-worker flake, not the min/max change).
+`rustfmt --check` clean; clippy clean in the changed hunks. No local build. `crates/fp-frame` untouched.
+
+SCOPE: `Column::sum`/`mean` and consumers — `Series.sum()/mean()`, `DataFrame.sum()/mean()`, `describe()` on Timedelta64,
+etc. Permanent A/B `ab_timedelta_sum_ccfp`.
+
+**TEMPORAL-REDUCTION VEIN SO FAR (all cc_fp, this session): argsort 8.36x, min/max 35.4x (+Datetime64 precision fix),
+Timedelta64 sum/mean 27.0x.** The pattern is uniform: a typed Int64/Float64 fast path exists but the i64-backed temporal
+sibling materialized `Scalar`s through `nan*`. Remaining un-scanned reductions with the same shape: `median`/`quantile`
+(temporal sort — could reuse the new argsort radix), `std`/`var`/`sem` (Timedelta64), `value_counts`/`unique` (Timedelta64;
+Datetime64 unique already fast). Datetime64 `mean` also reaches `nanmean`'s lossy `to_f64` catch-all (no Datetime64 arm) — a
+likely precision bug like min/max, worth a scan.

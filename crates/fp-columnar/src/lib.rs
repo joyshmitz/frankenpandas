@@ -13958,6 +13958,20 @@ impl Column {
             }
             return Scalar::Float64(s);
         }
+        // Timedelta64 (i64-ns): an all-valid, non-empty, no-NAT column sums exactly
+        // in i128 over the raw &[i64] and clamps to i64 — the same accumulation and
+        // clamp as nansum's `collect_timedelta_ns` arm, without materializing the
+        // `Scalar` Vec. Empty / NAT / nullable falls to `nansum` (whose empty arm
+        // returns `Float64(0.0)` and whose fold skips missing).
+        if self.validity.all()
+            && let Some(data) = self.as_timedelta64_slice()
+            && !data.is_empty()
+            && !data.contains(&i64::MIN)
+        {
+            let sum: i128 = data.iter().map(|&v| i128::from(v)).sum();
+            let clamped = sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+            return Scalar::Timedelta64(clamped as i64);
+        }
         nansum(&self.values)
     }
 
@@ -13983,6 +13997,19 @@ impl Column {
                 s += x;
             }
             return Scalar::Float64(s / data.len() as f64);
+        }
+        // Timedelta64 (see `sum`): all-valid, non-empty, no-NAT -> i128 `sum / len`
+        // (count == len), clamped, dtype-preserved. Bit-identical to nanmean's
+        // `collect_timedelta_ns` arm; empty / NAT / nullable falls to `nanmean`.
+        if self.validity.all()
+            && let Some(data) = self.as_timedelta64_slice()
+            && !data.is_empty()
+            && !data.contains(&i64::MIN)
+        {
+            let sum: i128 = data.iter().map(|&v| i128::from(v)).sum();
+            let mean = sum / data.len() as i128;
+            let clamped = mean.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+            return Scalar::Timedelta64(clamped as i64);
         }
         nanmean(&self.values)
     }
@@ -34077,6 +34104,133 @@ mod ab_temporal_minmax_ccfp {
         );
         println!(
             "  CAND i64-scan             min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+/// A/B for routing all-valid, non-empty, NaT-free Timedelta64 sum/mean through the
+/// raw-i64 i128 fold instead of materializing the `Scalar` Vec for `nansum`/
+/// `nanmean` (cc_fp). Bit-identical: `nansum`/`nanmean` already accumulate
+/// Timedelta64 in exact i128 via `collect_timedelta_ns`; this reads the same nanos
+/// from the raw backing. Fresh column per rep so ORIG pays materialization; per-arm
+/// adjacent A/A null control; median gate.
+#[cfg(test)]
+mod ab_timedelta_sum_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, ValidityMask};
+
+    fn ns(n: usize) -> Vec<i64> {
+        let mut s: u64 = 0xD1B5_4A32_D192_ED03;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                // durations in [-5e11, 5e11) ns (~ +/- 8 minutes), never i64::MIN
+                (z % 1_000_000_000_000) as i64 - 500_000_000_000
+            })
+            .collect()
+    }
+    fn mk(src: &[i64]) -> Column {
+        Column::from_timedelta64_values_with_validity(
+            src.to_vec(),
+            ValidityMask::all_valid(src.len()),
+        )
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_timedelta_sum() {
+        const N: usize = 2_000_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 5;
+        let src = ns(N);
+
+        // Parity: col.sum()/mean() == nansum/nanmean over the materialized Scalars.
+        {
+            let col = mk(&src);
+            assert_eq!(col.sum(), fp_types::nansum(col.values()), "sum diverged");
+            assert_eq!(col.mean(), fp_types::nanmean(col.values()), "mean diverged");
+        }
+
+        for _ in 0..2 {
+            std::hint::black_box(fp_types::nansum(mk(&src).values()));
+            std::hint::black_box(mk(&src).sum());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let col = mk(&src);
+                let t0 = Instant::now();
+                std::hint::black_box(fp_types::nansum(std::hint::black_box(&col).values()));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let col2 = mk(&src);
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&col2).sum());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let col3 = mk(&src);
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&col3).sum());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB timedelta sum (ONE binary, ONE invocation) N={N}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG nansum(materialize)  min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND i128-fold            min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

@@ -12324,3 +12324,39 @@ nor REJECT", not the original row.
 `(Vec<u8>, Vec<usize>)` under `std::thread::scope` → concat with running byte base → fp-frame:67127
 `Column::from_utf8_contiguous(bytes, offsets)`. The only `Vec<Scalar::Utf8>` remaining is the documented null-row
 correctness fallback (a contiguous buffer cannot represent a null). Nothing to apply.
+
+### 2026-07-10 cod_fp — flattened pair-buffer materializing rerun attempt 1 INVALID; old 0.61x stays withdrawn
+
+Ledger-grep came first and confirmed the historical row's explicit reopened condition: its ORIG and candidate were timed
+on different workers, it retained no candidate vector/CV, and it had no candidate profile. This audit reconstructs the
+discarded candidate exactly on its measured 100,000 x 10 finite Float64 domain: the 50,000-row gate, 16,384 rows per
+worker, six scoped workers, ordered `Vec<(String, Column)>` morsels, then serial main-thread `BTreeMap::insert` finalization.
+The named `pair_buffer_build_morsel_candidate_cod_fp` wrapper makes the worker body profile-addressable. ORIG is the exact
+serial row-column construction reference. Both arms eagerly construct output columns, observe all **1,000,000** values,
+black-box input and output, and include destruction in the timer.
+
+Substrate v2: one release-perf binary and one fail-closed RCH invocation; four warmups and 15 measured blocks alternate
+AB/BA inside one routine, with four full calls batched per arm sample. The first bounded 600-second invocation on
+`vmi1149989` expired during remote LTO before the benchmark body, so it produced no measurement. The finishable retry was:
+
+`timeout 900s sh -c 'RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR RUSTFLAGS="-C force-frame-pointers=yes" rch exec -- cargo test -p fp-frame --profile release-perf --lib transpose_reject_reaudit_cod_fp::audit_pair_buffer_materialized_cod_fp -- --ignored --exact --nocapture --test-threads=1'`
+
+RCH selected **`hz2`**; test hostname **`hetzner2`**; binary SHA-256
+**`261c86b2f3c94f5c59f448172234eb7e4ea2535b7ec4de5326fa2243d0187b5a`**; exactly six candidate workers. Observable
+parity passed before timing.
+
+| arm | median | p95 | cv_pct | candidate profile self-time |
+| --- | ---: | ---: | ---: | ---: |
+| ORIG serial materialized rows | 112.978615 ms | 118.351880 ms | **2.0216%** | n/a |
+| candidate flattened pair-buffer morsels | 107.738268 ms | 123.860988 ms | **5.8331%** | **UNMEASURED: `perf` absent on `hz2`** |
+
+Raw ORIG ms: `[118.35188000000001, 109.7340055, 110.1996855, 113.5227825, 110.9234565, 111.85323925, 112.978615, 112.45212000000001, 113.17075075, 114.37713225, 114.00083775, 110.678133, 116.67605375, 112.8096165, 114.83526950000001]`.
+
+Raw candidate ms: `[116.63925625, 103.178617, 106.772423, 107.70986275, 106.14379725, 123.86098824999999, 107.25580775, 106.20063725, 116.17894625, 112.165803, 110.6934505, 108.88262875, 101.99623100000001, 107.73826775, 123.431556]`.
+
+The same-binary materializing direction is **ORIG/candidate 1.048640x**, the opposite of the historical cross-worker
+**0.61x**. It is still **INVALID**, neither WIN nor REJECT: candidate CV exceeds 5%, and `hz2` again failed the required
+profile-integrity gate with `perf must be installed on the RCH worker: Os { code: 2, kind: NotFound }`, so candidate
+self-time and the >=0.1% ranked frame table are unmeasured. The historical do-not-retry row remains withdrawn and this
+lever remains OPEN. Retry condition: a perf-equipped fail-closed worker plus a robust paired estimator with both CVs below
+5%; the present 1.048640x is routing evidence only and must not be shipped as a win.

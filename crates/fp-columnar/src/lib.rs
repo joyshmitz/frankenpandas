@@ -20777,6 +20777,31 @@ impl Column {
             }
         }
 
+        // Contiguous-Utf8 fast path (cardinality/dedup-vein sibling of
+        // unique/value_counts/nunique/mode/duplicated): the generic scan below
+        // iterates `&self.values`, forcing `as_slice()` to materialize a
+        // `Vec<Scalar::Utf8>` (one heap `String` per row) then per row calls
+        // `key_of` + `lookup.contains`. Test membership directly over `&[u8]`
+        // byte spans with ZERO per-row `String` alloc. The needle set keys on
+        // each Utf8 needle's bytes: a Utf8 value's generic key is `Key::Utf8`,
+        // which only matches a Utf8 needle (other-dtype needles carry a distinct
+        // dtype-tagged key), so non-Utf8 needles are inert here exactly as they
+        // are inert against a Utf8 value in the generic path. `as_utf8_contiguous`
+        // matches only all-valid, so no missing value maps to false spuriously.
+        if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+            let mut lookup: FxHashSet<&[u8]> = FxHashSet::default();
+            for n in needles {
+                if let Scalar::Utf8(s) = n {
+                    lookup.insert(s.as_bytes());
+                }
+            }
+            let out: Vec<bool> = offsets
+                .windows(2)
+                .map(|w| lookup.contains(&bytes[w[0]..w[1]]))
+                .collect();
+            return Ok(Self::from_bool_values(out));
+        }
+
         let mut lookup: FxHashSet<Key<'_>> = FxHashSet::default();
         for n in needles {
             if let Some(k) = key_of(n) {
@@ -35717,6 +35742,195 @@ mod ab_utf8_duplicated_ccfp {
         );
         println!(
             "  CAND contiguous &[u8] flags  min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_statements)]
+mod ab_utf8_isin_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, DType, FxHashSet, Scalar};
+
+    /// Seeded (splitmix64) contiguous-Utf8 buffer: `n` rows drawn from `distinct`
+    /// fixed-width `"val_{:07}"` labels.
+    fn mk(n: usize, distinct: usize) -> (Vec<u8>, Vec<usize>) {
+        let mut s: u64 = 0x1234_5678_9ABC_DEF1;
+        let mut bytes: Vec<u8> = Vec::with_capacity(n * 11);
+        let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        for _ in 0..n {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let key = (z as usize) % distinct;
+            bytes.extend_from_slice(b"val_");
+            let mut buf = [0u8; 7];
+            let mut k = key;
+            for slot in buf.iter_mut().rev() {
+                *slot = b'0' + (k % 10) as u8;
+                k /= 10;
+            }
+            bytes.extend_from_slice(&buf);
+            offsets.push(bytes.len());
+        }
+        (bytes, offsets)
+    }
+
+    /// `count` needle labels `"val_{:07}"` for keys `0..count` (same alphabet as
+    /// `mk`), so ~`count/distinct` of the rows match.
+    fn needle_scalars(count: usize) -> Vec<Scalar> {
+        (0..count)
+            .map(|k| Scalar::Utf8(format!("val_{k:07}")))
+            .collect()
+    }
+
+    /// Reference for the pre-lever generic scan: build the `&str` needle set,
+    /// force `Vec<Scalar::Utf8>` materialization via `as_slice`, probe membership
+    /// per row -- byte-for-byte the shipped `Key::Utf8` scan minus the fast-path
+    /// interception (CONSERVATIVE: omits the per-elem `key_of` is_missing/enum
+    /// wrap the shipped arm pays).
+    fn orig_isin_utf8(col: &Column, needles: &[Scalar]) -> Column {
+        let mut lookup: FxHashSet<&str> = FxHashSet::default();
+        for n in needles {
+            if let Scalar::Utf8(s) = n {
+                lookup.insert(s.as_str());
+            }
+        }
+        let scalars = col.values.as_slice();
+        let out: Vec<Scalar> = scalars
+            .iter()
+            .map(|v| {
+                Scalar::Bool(match v {
+                    Scalar::Utf8(s) => lookup.contains(s.as_str()),
+                    _ => false,
+                })
+            })
+            .collect();
+        Column::new(DType::Bool, out).expect("bool")
+    }
+
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_utf8_isin() {
+        const N: usize = 2_000_000;
+        const DISTINCT: usize = 50_000;
+        const NEEDLES: usize = 5_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let (bytes, offsets) = mk(N, DISTINCT);
+        let mk_col = || Column::from_utf8_contiguous(bytes.clone(), offsets.clone());
+        let needles = needle_scalars(NEEDLES);
+
+        // Parity: fast path == generic reference (~10% hit); empty needle set =>
+        // all false; a mixed non-Utf8 (Int64) needle is inert (only Utf8 matches).
+        {
+            let orig = orig_isin_utf8(&mk_col(), &needles);
+            let cand = mk_col().isin(&needles).expect("isin");
+            assert_eq!(orig.dtype(), cand.dtype(), "dtype diverged");
+            assert_eq!(
+                orig.values.as_slice(),
+                cand.values.as_slice(),
+                "isin flags diverged"
+            );
+
+            let empty: Vec<Scalar> = Vec::new();
+            assert_eq!(
+                mk_col().isin(&empty).expect("isin empty").values.as_slice(),
+                orig_isin_utf8(&mk_col(), &empty).values.as_slice(),
+                "empty-needle isin diverged"
+            );
+
+            let mut mixed = needles.clone();
+            mixed.push(Scalar::Int64(42));
+            assert_eq!(
+                mk_col().isin(&mixed).expect("isin mixed").values.as_slice(),
+                cand.values.as_slice(),
+                "non-Utf8 needle was not inert"
+            );
+        }
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_isin_utf8(&mk_col(), &needles));
+            std::hint::black_box(mk_col().isin(&needles).unwrap());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_isin_utf8(std::hint::black_box(&co), &needles));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).isin(&needles).unwrap());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).isin(&needles).unwrap());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!(
+            "AB utf8 isin (ONE binary, ONE invocation) N={N} distinct={DISTINCT} needles={NEEDLES}"
+        );
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic Key::Utf8 probe min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND contiguous &[u8] probe  min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

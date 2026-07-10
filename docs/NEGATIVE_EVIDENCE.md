@@ -13531,3 +13531,40 @@ untouched.
 1.570x, `duplicated`/`drop_duplicates` 2.076x.** The per-ROW `Vec<Scalar::Utf8>` materialization is bypassed for the entire
 cardinality/dedup surface on contiguous-Utf8; `factorize` was already covered. NEXT candidate still open: `isin` (Utf8 membership
 scan materializes `self.values`).
+
+### 2026-07-10 cc_fp — WIN: contiguous-Utf8 `isin` probes membership over byte spans — 1.844x fp-side, bit-identical (sixth vein win)
+
+Sixth Utf8-materialization-bypass win. `isin` had a typed dense-membership fast path for all-valid Int64 (direct-address
+presence bitset) but a contiguous-Utf8 column fell to the generic scan `self.values.iter().map(|v| lookup.contains(key_of(v)))`,
+which forces `as_slice()` to materialize a **`Vec<Scalar::Utf8>` (one heap `String` per row)** then per row calls `key_of` +
+`FxHashSet<Key>::contains`. Added a fast path: for an all-valid contiguous-Utf8 backing, build the needle set from each Utf8
+needle's bytes (`FxHashSet<&[u8]>`) and probe each self byte span — **zero per-row `String` alloc**.
+
+BIT-IDENTITY of the needle semantics: a Utf8 self value's generic key is `Key::Utf8`, which only matches a Utf8 needle (an
+Int64/Float64 needle carries a distinct dtype-tagged key), so non-Utf8 needles are inert against a Utf8 column in BOTH paths —
+the fast path just keys the needle set on Utf8 needles' bytes and ignores the rest. `as_utf8_contiguous` matches only all-valid,
+so no missing value maps to `false` spuriously. Output form (`from_bool_values`) is identical to the generic arm's.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG reference vs CAND `isin(&needles)` interleaved, per-arm
+adjacent A/A null control; 2M rows, 50k distinct, 5k needles ≈ 10% hit; ORIG replays the generic scan — needle `FxHashSet<&str>` +
+`as_slice()` materialize + per-row probe — CONSERVATIVE, omits the shipped `key_of` is_missing/enum wrap):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `5a32bed4f3bdcda2250dfd28e7a3494612cb53acfc951b483ab2f952ea452edd` |
+| worker | `hetzner2` |
+| ORIG generic `Key::Utf8` probe | 636.480 ms (cv 0.75%) |
+| CAND contiguous `&[u8]` probe | 345.253 ms (cv 0.39%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0029x -> 0.29% floor** |
+| **fp-side ratio (min-of-blocks)** | **1.844x (+84.4%) — DECIDABLE (84.4% is ~290x the 0.29% floor)** |
+
+BIT-IDENTICAL: the A/B parity block asserts the Bool flags equal the generic reference (~10% hit) AND the empty-needle case
+(all false) AND that a mixed non-Utf8 (Int64) needle is inert (result unchanged). Very clean cv (0.29–0.75%). GREEN remote
+fail-closed: fp-columnar lib **475/0**, fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. No local build.
+`crates/fp-frame` untouched.
+
+**UTF8-MATERIALIZATION-BYPASS VEIN (cc_fp, all bit-identical): `unique` 1.457x, `value_counts` 1.430x, `nunique` 1.486x, `mode`
+1.570x, `duplicated`/`drop_duplicates` 2.076x, `isin` 1.844x.** SIX wins. The per-ROW `Vec<Scalar::Utf8>` materialization is now
+bypassed across the whole cardinality/dedup/membership surface on contiguous-Utf8. `factorize` already covered; set ops route
+through `unique`. The core `&self.values`-iterating consumers are now exhausted — NEXT lever should re-profile a FRESH area
+(groupby / temporal / io) rather than mine further here.

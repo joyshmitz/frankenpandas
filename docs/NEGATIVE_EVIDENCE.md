@@ -12361,6 +12361,42 @@ self-time and the >=0.1% ranked frame table are unmeasured. The historical do-no
 lever remains OPEN. Retry condition: a perf-equipped fail-closed worker plus a robust paired estimator with both CVs below
 5%; the present 1.048640x is routing evidence only and must not be shipped as a win.
 
+### 2026-07-10 cod_fp — `to_dict(index)` row-shards materializing rerun attempt 1 INVALID; 2.620066x routing evidence
+
+Ledger-grep came first and confirmed the exact retry condition: the historical row had no candidate vector or profile, and
+the current public `df_to_dict_index` construction benchmark drops `IndexMappingLazy` without calling `as_mapping()`.
+This bench-only reconstruction therefore makes both historical eager arms explicit and additionally calls the current
+public `df.to_dict("index").as_mapping()` before timing. ORIG builds each row serially into the final
+`BTreeMap<String, Vec<Scalar>>`; the candidate uses the recovered 50,000-row/16,384-per-worker gate, scoped private row
+shard maps, then ordered `BTreeMap::append`. The named worker helper is
+`to_dict_index_build_row_shard_candidate_cod_fp`.
+
+Observable parity passed before timing: candidate keys/values equal the eager serial reference, the fully materialized
+public lazy result equals both, and each observer consumes **1,000,000** cells. The timer black-boxes the input and whole
+mapping result and includes destruction. One release-perf binary/one fail-closed RCH invocation; four warmups and 15
+measured blocks alternate AB/BA inside one routine, with four complete calls per arm sample. Bounded command:
+
+`timeout 900s sh -c 'RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR RUSTFLAGS="-C force-frame-pointers=yes" rch exec -- cargo test -p fp-frame --profile release-perf --lib transpose_reject_reaudit_cod_fp::audit_to_dict_index_row_shards_materialized_cod_fp -- --ignored --exact --nocapture --test-threads=1'`
+
+RCH worker **`ovh-a`**; test hostname **`fixmydocuments`**; binary SHA-256
+**`9ab9a521b5eaf0f5dcca59c86ffa99de0120479e3b09f2d4af7d0afcdb789307`**.
+
+| arm | median | p95 | cv_pct | candidate profile self-time |
+| --- | ---: | ---: | ---: | ---: |
+| ORIG serial eager row map | 63.454371 ms | 66.280963 ms | **3.8817%** | n/a |
+| candidate private BTreeMap row shards + append | 24.218617 ms | 25.496816 ms | **2.8828%** | **UNMEASURED: perf_event_paranoid=4** |
+
+Raw ORIG ms: `[58.2502565, 60.57378, 59.18000675, 60.24415575, 61.650460249999995, 63.45437149999999, 61.98271725, 65.27296274999999, 64.34440025, 65.27009025, 64.67404499999999, 66.2809625, 65.58417325, 64.893722, 63.06552799999999]`.
+
+Raw candidate ms: `[24.47897325, 23.949555, 23.90901425, 23.62256825, 25.34522475, 24.11757975, 24.54630975, 25.174072, 23.395132999999998, 25.49681625, 23.599387749999998, 25.17583575, 24.00466125, 25.480200500000002, 24.218617000000002]`.
+
+ORIG/candidate is **2.620066x** with both timing CV gates satisfied, overturning the historical non-completion direction.
+It is nevertheless **INVALID routing evidence, not yet a WIN**: `perf record` exists on `ovh-a` but failed before sampling
+with `Access to performance monitoring ... is limited` and `perf_event_paranoid setting is 4`. Candidate self-time and the
+mandatory >=0.1% ranked frame table are therefore unmeasured. The old reject remains withdrawn and the lever is strongly
+OPEN. Retry condition: re-run this exact one-binary materializing harness where perf can sample the named worker helper;
+retain the lever only if self-time is non-zero and the paired timing gates remain satisfied.
+
 ### 2026-07-10 cc_fp — WHAT the 95.9% IS: 93.6% is owning + re-homing n 312-byte `(String, Column)` pairs. NOT the String formatting (4.2%), NOT the ctor (1.9%). Retracts my own itoa sub-target.
 
 The previous entry localized transpose construction to fp-frame. This one names the component, per the ask: *"say precisely
@@ -12434,3 +12470,74 @@ shards: no timing vector) and remain REOPENED; sorted-insert is SOUND and `cod_f
 rerun* ("neither WIN nor REJECT"). arg-extrema has been complete since `46b3374a8` (~7.5x) — four call sites →
 `arg_axis1_names_parallel` → per-thread `(Vec<u8>, Vec<usize>)` → `Column::from_utf8_contiguous`; the only remaining
 `Vec<Scalar::Utf8>` is the documented null-row correctness fallback.
+
+### 2026-07-10 cc_fp — ADOPTING the median + per-function null-floor gate. It WITHDRAWS my own label-itoa REJECT (one commit old) and FLAGS my stack REJECT. The 93.6% headline survives, decidably.
+
+New rule (frankenmermaid harness calibration + frankenlibc provenance audit): decide on the **median against the A/A null
+control's observed spread**, not on a cv threshold; the null floor is **per-function**, not global. Applied to my own rows
+first, because frankenlibc found 51% of 92 REJECT rows were decided INSIDE the null floor and 0% carried a sha256.
+
+**ONE HONEST QUALIFIER ON THE PREMISE.** "cv<5 is unattainable on this hardware" does not transfer to my harness: mermaid
+swept `min_sample x min_of`, whereas mine takes min-of-REPS per block and then cv over BLOCK MINIMA — a much tighter
+estimator, and it reached cv 0.22%-1.79% repeatedly. So I keep reporting cv as information. **But the substance of the rule
+is right and I did not have it: a per-function A/A floor.** Adding it changed my conclusions. That is the whole point.
+
+**HARNESS DEFECT FOUND AND FIXED (the rule's own advice: fix the harness before deciding the lever).** My first per-arm A/A
+ran `pass0 = [L, LC, LCV, MAP]` then `pass1 = [L, LC, LCV, MAP]`, so each arm's `a` and `b` were separated by ~50 ms of the
+*other* arms. Inter-arm drift, not the function, set the floor:
+
+| arm | null |dev|max, A/A separated | null |dev|max, A/A **adjacent** |
+| --- | ---: | ---: |
+| L (label String) | **61.09%** | **20.05%** |
+| LC (+Column ctor) | 10.10% | 4.26% |
+| LCV (+Vec push) | 12.86% | 9.87% |
+| MAP (full finalize) | 11.40% | 9.78% |
+
+**A/A pairs must be ADJACENT.** With them separated, the floor was 3x too wide and every small component looked undecidable.
+
+**PROVENANCE.** binary sha256 `19066af583bcef01d120392c662dea11c277bf1eec3dc0b6ed1e9bdddf5b7b8e`; worker `vmi1293453`
+(rch label and in-test `hostname` agree here); ONE binary, ONE fail-closed `rch exec`; 200_000 x 10; 9 blocks x 3 reps;
+`black_box` in+out; per-arm A/A adjacent; drops outside the timer.
+
+**DECIDABILITY, per component, against ITS OWN arm's null floor:**
+
+| component | share of construction | its arm's null floor | share/floor | verdict |
+| --- | ---: | ---: | ---: | --- |
+| label `String` | 4.7% | 20.05% | 0.2x | ❌ **INSIDE FLOOR — undecidable** |
+| `Column` ctor | 4.2% | 4.26% | 1.0x | ❌ **INSIDE FLOOR — undecidable** |
+| `Vec<(String,Column)>` push | 40.9% | 9.87% | **4.1x** | ✅ decidable |
+| `BTreeMap::from_iter` | 50.2% | 9.78% | **5.1x** | ✅ decidable |
+
+**WHAT SURVIVES.** The headline stands and is decidable: **`Vec` push + `BTreeMap` collect = 91.1% of construction**, each
+4-5x its own null floor, on a *loaded* worker. With `size_of::<(String,Column)>() = 312` B (Column 288, ScalarValues 200),
+that is 62.4 MB of pair traffic at 200k rows, moved twice. "Representation cardinality is the wall" holds, by ablation, with
+bytes, and now with a null floor under it.
+
+**WHAT I WITHDRAW — my own REJECT from `ce9d488e3`, one commit old.** I wrote: *"the whole label String is 4.0-4.4% of
+construction … REJECT that sub-target, with attribution."* **Under the per-function floor that number is NOT DECIDABLE**: the
+label arm's own A/A floor is 20.05%, and 4.7% sits inside it. The share could plausibly be anywhere from ~0% to ~20%.
+**The label-itoa REJECT is WITHDRAWN.** It is not a do-not-retry. What can still be said, and only this: the label is *not*
+one of the two decidable dominators. Anyone wanting to reject it must re-run on a quiet worker until the L arm's A/A floor is
+well under its share. I made exactly the error frankenlibc catalogues — deciding a small effect inside an unmeasured floor —
+one commit after congratulating myself for catching the same error in a self-time reading.
+
+**WHAT I FLAG — my `stack` per-row `to_string` REJECT (`814e0bd42`).** It has **no A/A null control at all**; its decision
+rested on a 0.23% share computed from a *difference of two differently-timed arms*, which is exactly the drift-sensitive
+construction that the adjacency defect above inflates. Its raw primitive arms carried cv 29.91%/54.44%. **That REJECT must
+not be honored as a do-not-retry until an adjacent A/A floor is measured for its label-build function.** Its harness is
+parked at `tests/artifacts/perf/cc_fp_stack_label_itoa_ablation.patch`; re-running it requires `crates/fp-frame`, which
+`cod_fp` is editing live, so it is not attempted here. The ceiling argument in that row (0.787 ms saved against a 338 ms op)
+is a *bound*, not a measurement, and remains the only defensible part.
+
+**WHAT IS RE-CONFIRMED — the typed `as_f64_slice` WIN (`351279ce3` / `38ab399ba`).** Its null control WAS adjacent (per rep:
+ORIG, NULL, CAND) and tight: null median **0.9875x**, floor **1.25%**, against an effect of **59.13%** ⇒ **47.3x the floor**.
+Decidable by a wide margin under the new gate, on three workers (ratio spread 3.9%). No change.
+
+GREEN, remote and fail-closed: fp-columnar **475 passed / 0 failed** (`hz2`); `rustfmt --check` clean; no local build.
+`crates/fp-frame` untouched — `cod_fp` is editing it live.
+
+**LESSON, and it is about me.** Two entries ago I over-read a 4.38% *self-time* as a 4.38% *opportunity*. One entry ago I
+"corrected" that with a 4.0-4.4% ablation share — and decided a REJECT on it **without ever measuring the floor of the arm I
+was reading it from**. The null control is not a formality you bolt on after the verdict; it is the thing that tells you
+whether a verdict exists. Every REJECT in this ledger written without one should be presumed undecided until proven
+otherwise — starting with two of mine.

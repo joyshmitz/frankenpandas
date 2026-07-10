@@ -32864,6 +32864,27 @@ mod ab_transpose_row_typed_ccfp {
         xs.iter().copied().fold(f64::INFINITY, f64::min)
     }
 
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        let n = v.len();
+        if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            0.5 * (v[n / 2 - 1] + v[n / 2])
+        }
+    }
+
+    fn spread_of(xs: &[f64]) -> (f64, f64) {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &x in xs {
+            lo = lo.min(x);
+            hi = hi.max(x);
+        }
+        (lo, hi)
+    }
+
     fn cv_of(xs: &[f64]) -> f64 {
         let mean = xs.iter().sum::<f64>() / xs.len() as f64;
         let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / xs.len() as f64;
@@ -32944,63 +32965,65 @@ mod ab_transpose_row_typed_ccfp {
             drop(arm_map(o, h));
         }
 
-        let (mut ln, mut lc, mut lcv, mut map, mut null) = (
+        // PER-ARM A/A NULL CONTROL. The null floor is per-FUNCTION, not global
+        // (frankenlibc), so every arm is run twice per block and its own a/b ratio
+        // calibrates its own floor. Decisions are made on MEDIANS against the null's
+        // observed SPREAD, not on a cv threshold (frankenmermaid harness calibration).
+        // cv is still reported, as information.
+        let mut t: [Vec<f64>; 4] = [
             Vec::with_capacity(BLOCKS),
             Vec::with_capacity(BLOCKS),
             Vec::with_capacity(BLOCKS),
             Vec::with_capacity(BLOCKS),
+        ];
+        let mut nullr: [Vec<f64>; 4] = [
             Vec::with_capacity(BLOCKS),
-        );
+            Vec::with_capacity(BLOCKS),
+            Vec::with_capacity(BLOCKS),
+            Vec::with_capacity(BLOCKS),
+        ];
         for _ in 0..BLOCKS {
-            let (mut b_l, mut b_lc, mut b_lcv, mut b_map, mut b_null) = (
-                f64::INFINITY,
-                f64::INFINITY,
-                f64::INFINITY,
-                f64::INFINITY,
-                f64::INFINITY,
-            );
+            let mut best = [f64::INFINITY; 4];
+            let mut a_of = [f64::INFINITY; 4];
+            let mut b_of = [f64::INFINITY; 4];
             for _ in 0..REPS {
                 let (o, h) = (std::hint::black_box(&order), std::hint::black_box(&handle));
 
-                // A/A floor first, per the rule: paired(base, base) before paired(base, cand).
-                let t0 = Instant::now();
-                let m = arm_map(o, h);
-                b_map = b_map.min(t0.elapsed().as_secs_f64() * 1e3);
-                drop(m);
+                // A/A pairs must be ADJACENT: the previous layout separated each
+                // arm's a and b by ~50 ms of the other arms, so inter-arm drift, not
+                // the function, set the floor (L read |dev| 61%). Run each arm's two
+                // passes back-to-back, then move to the next arm.
+                macro_rules! pair {
+                    ($idx:expr, $run:expr) => {{
+                        let t0 = Instant::now();
+                        $run;
+                        let a = t0.elapsed().as_secs_f64() * 1e3;
+                        let t0 = Instant::now();
+                        $run;
+                        let b = t0.elapsed().as_secs_f64() * 1e3;
+                        a_of[$idx] = a_of[$idx].min(a);
+                        b_of[$idx] = b_of[$idx].min(b);
+                        best[$idx] = best[$idx].min(a.min(b));
+                    }};
+                }
 
-                let t0 = Instant::now();
-                let m = arm_map(o, h);
-                b_null = b_null.min(t0.elapsed().as_secs_f64() * 1e3);
-                drop(m);
-
-                let t0 = Instant::now();
-                std::hint::black_box(arm_l(o));
-                b_l = b_l.min(t0.elapsed().as_secs_f64() * 1e3);
-
-                let t0 = Instant::now();
-                std::hint::black_box(arm_lc(o, h));
-                b_lc = b_lc.min(t0.elapsed().as_secs_f64() * 1e3);
-
-                let t0 = Instant::now();
-                let v = arm_lcv(o, h);
-                b_lcv = b_lcv.min(t0.elapsed().as_secs_f64() * 1e3);
-                drop(v);
+                pair!(0, std::hint::black_box(arm_l(o)));
+                pair!(1, std::hint::black_box(arm_lc(o, h)));
+                pair!(2, drop(arm_lcv(o, h)));
+                pair!(3, drop(arm_map(o, h)));
             }
-            ln.push(b_l);
-            lc.push(b_lc);
-            lcv.push(b_lcv);
-            map.push(b_map);
-            null.push(b_null);
+            for i in 0..4 {
+                t[i].push(best[i]);
+                nullr[i].push(a_of[i] / b_of[i]);
+            }
         }
 
-        let (l, c, v, m, n) = (
-            min_of(&ln),
-            min_of(&lc),
-            min_of(&lcv),
-            min_of(&map),
-            min_of(&null),
-        );
-        let per = |ms: f64| 1e6 * ms / ROWS as f64;
+        let names = [
+            "L    label String",
+            "LC   +Column ctor",
+            "LCV  +Vec push",
+            "MAP  full finalize",
+        ];
         println!("AB transpose construction decomposition (ONE binary, ONE invocation)");
         println!("  binary_sha256 = {}", binary_sha256());
         println!("  worker        = {}", worker_hostname());
@@ -33012,28 +33035,28 @@ mod ab_transpose_row_typed_ccfp {
             std::mem::size_of::<(String, Column)>(),
             (ROWS * std::mem::size_of::<(String, Column)>()) as f64 / 1e6
         );
-        println!(
-            "  MAP  full finalize   min={m:9.3} ms  cv={:5.2}%",
-            cv_of(&map)
+        println!("  --- per-arm A/A NULL FLOOR (median and observed spread of a/b) ---");
+        for i in 0..4 {
+            let (lo, hi) = spread_of(&nullr[i]);
+            println!(
+                "  {:20} null median={:.4}x  spread=[{:.4}x, {:.4}x]  |dev|max={:.2}%   arm median={:8.3} ms  cv={:5.2}%",
+                names[i],
+                median_of(&nullr[i]),
+                lo,
+                hi,
+                100.0 * (hi - 1.0).abs().max((lo - 1.0).abs()),
+                median_of(&t[i]),
+                cv_of(&t[i])
+            );
+        }
+        let (l, c, v, m) = (
+            median_of(&t[0]),
+            median_of(&t[1]),
+            median_of(&t[2]),
+            median_of(&t[3]),
         );
-        println!(
-            "  NULL identical MAP   min={n:9.3} ms  cv={:5.2}%",
-            cv_of(&null)
-        );
-        println!("  NULL-CONTROL ratio (map/null) = {:.4}x", m / n);
-        println!(
-            "  L    label String    min={l:9.3} ms  cv={:5.2}%",
-            cv_of(&ln)
-        );
-        println!(
-            "  LC   +Column ctor    min={c:9.3} ms  cv={:5.2}%",
-            cv_of(&lc)
-        );
-        println!(
-            "  LCV  +Vec push       min={v:9.3} ms  cv={:5.2}%",
-            cv_of(&lcv)
-        );
-        println!("  --- attributed components (per source row) ---");
+        let per = |ms: f64| 1e6 * ms / ROWS as f64;
+        println!("  --- attributed components (medians, per source row) ---");
         println!(
             "  label String      = {:8.3} ms ({:6.2} ns/row, {:5.1}% of MAP)",
             l,
@@ -33059,12 +33082,7 @@ mod ab_transpose_row_typed_ccfp {
             100.0 * (m - v) / m
         );
         println!(
-            "  cv<5% all arms: map={} null={} l={} lc={} lcv={}",
-            cv_of(&map) < 5.0,
-            cv_of(&null) < 5.0,
-            cv_of(&ln) < 5.0,
-            cv_of(&lc) < 5.0,
-            cv_of(&lcv) < 5.0
+            "  DECIDABILITY: each component's share must exceed its arm's max null deviation above."
         );
     }
 

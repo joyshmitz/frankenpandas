@@ -13679,3 +13679,43 @@ conformance-verified Int64-column `nunique` AND `nunique_with_dropna(false)`. GR
 **TEMPORAL-TYPED-FAST-PATH VEIN (cc_fp): argsort 8.36x, min/max 35.4x, sum/mean 27.0x, value_counts 15.2x, unique 2.12x,
 duplicated/drop_duplicates 3.44x, nunique 2.675x.** STILL OPEN: `mode`, `isin` for temporal. NEXT could be temporal `mode` or a
 pivot to groupby/io.
+
+### 2026-07-10 cc_fp — WIN: Datetime64/Timedelta64 `mode` routes through the i64 wide mode helper — 1.454x fp-side, bit-identical (completes the temporal cardinality/dedup family)
+
+`mode` had typed fast paths for Int64 (dense histogram / `mode_i64_wide`), Float64, and (my earlier) contiguous-Utf8, but
+Datetime64/Timedelta64 fell to the generic `FxHashMap<Key, (count, &Scalar)>` tally (materializes `Vec<Scalar::Datetime64>`).
+Added a temporal branch: for an all-valid, no-NaT column, run the raw ns through `mode_i64_wide` and re-wrap the winners as the
+temporal dtype (`from_datetime64_values` / `from_timedelta64_values_with_validity`).
+
+BIT-IDENTITY: `mode_i64_wide` returns the max-count ns sorted ascending; the generic path sorts winners by
+`compare_scalars_na_last(.., true)`, which orders Datetime64/Timedelta64 by exact `i64::cmp` on the ns — same set, same order,
+re-tagged to the same dtype. The no-NaT gate is REQUIRED: `mode_i64_wide` treats `i64::MIN` as a countable value (its EMPTY
+sentinel is tracked via `sentinel_cnt`), but the generic `key_of` SKIPS NaT as missing — so a NaT-bearing column must fall
+through.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG generic vs CAND fast interleaved, per-arm adjacent A/A null
+control; 2M Datetime64 rows, 50k distinct; ORIG forces the REAL generic path via one planted NaT the CAND gate skips):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `025e7a4a08071b9ac14df546f28498cb1959b628a15d51afbec50c0c0a180915` |
+| worker | `fixmydocuments` |
+| ORIG generic `Key::Datetime64` tally | 273.537 ms (cv 0.50%) |
+| CAND raw-i64 ns mode + re-tag | 188.139 ms (cv 0.28%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0077x -> 0.77% floor** |
+| **fp-side ratio (min-of-blocks)** | **1.454x (+45.4%) — DECIDABLE (45.4% is ~59x the 0.77% floor)** |
+
+⚠️ HONEST: this is the SMALLEST temporal win (1.454x) because `mode` is hash-bound with a tiny output — the win is essentially
+just the `Vec<Scalar::Datetime64>` materialization removal (no O(N·k) or FxHashSet→open-addr compounding like duplicated's 3.44x;
+`mode_i64_wide` is itself an open-addressing hashmap, similar cost to the generic FxHashMap minus the Scalar wrap). Clean cv
+(0.28–0.50%). BIT-IDENTICAL: the A/B parity block asserts the Datetime64 winners (ns) equal an independent ground-truth mode AND
+the conformance-verified Int64-column mode, AND exercises the Timedelta64 re-tag branch. GREEN remote fail-closed: fp-columnar lib
+**475/0**, fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. No local build. `crates/fp-frame` untouched.
+
+**TEMPORAL-TYPED-FAST-PATH VEIN (cc_fp): argsort 8.36x, min/max 35.4x, sum/mean 27.0x, value_counts 15.2x, unique 2.12x,
+duplicated/drop_duplicates 3.44x, nunique 2.675x, mode 1.454x.** The cardinality/dedup family (unique/value_counts/nunique/mode/
+duplicated) is now COMPLETE for temporal, mirroring the Utf8 family. ONLY `isin` remains — and it needs a genuinely NEW primitive
+(the i64 isin fast path is dense-bitset-only, so wide timestamp needles need a fresh `FxHashSet<i64>` over needle ns; not a pure
+reuse). The routing-reuse micro-opt vein (Utf8 byte-span + temporal i64-route) is now essentially EXHAUSTED across the common
+cardinality/dedup/membership/map surface. NEXT genuine lever = a new primitive (temporal isin FxHashSet, or SIMD/radix in
+groupby/join — the latter in cod's crates, needs coordination) or FRONTIER + HOLD.

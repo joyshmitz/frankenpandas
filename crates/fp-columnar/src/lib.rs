@@ -16021,6 +16021,31 @@ impl Column {
             return Ok(Self::from_f64_values(mode_f64_wide(data)));
         }
 
+        // Datetime64 / Timedelta64 (i64-ns-backed): an all-valid, no-NaT column
+        // reuses the Int64 wide mode helper over the raw ns, then re-wraps the
+        // winners as the temporal dtype. Bit-identical to the generic `Key` path:
+        // a non-NaT temporal value's key is its ns, `mode_i64_wide` returns the
+        // max-count ns sorted ascending, and `compare_scalars_na_last(.., true)`
+        // orders Datetime64/Timedelta64 by exact `i64::cmp` on the ns -- so the
+        // winner set and order match. The no-NaT gate is REQUIRED: `mode_i64_wide`
+        // treats `i64::MIN` as a countable value (its EMPTY sentinel is handled via
+        // `sentinel_cnt`), but the generic `key_of` SKIPS NaT as missing, so a
+        // NaT-bearing column must fall through. Mirrors `unique`/`value_counts`.
+        if !self.has_nulls()
+            && let Some(data) = self
+                .as_datetime64_slice()
+                .or_else(|| self.as_timedelta64_slice())
+            && !data.contains(&i64::MIN)
+        {
+            let winners = mode_i64_wide(data);
+            let len = winners.len();
+            return Ok(if self.dtype == DType::Timedelta64 {
+                Self::from_timedelta64_values_with_validity(winners, ValidityMask::all_valid(len))
+            } else {
+                Self::from_datetime64_values(winners)
+            });
+        }
+
         // Contiguous-Utf8 fast path (sibling of `unique`/`value_counts`/`nunique`'s
         // byte-span dedup): the generic tally below iterates `&self.values`,
         // forcing `as_slice()` to materialize a `Vec<Scalar::Utf8>` -- one heap
@@ -36528,6 +36553,174 @@ mod ab_temporal_nunique_ccfp {
         );
         println!(
             "  CAND raw-i64 ns distinct count min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_temporal_mode_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, ValidityMask};
+
+    /// Seeded (splitmix64) Datetime64 ns: `n` rows drawn from `distinct` distinct
+    /// 1-second-spaced timestamps around a 2024 base (wide range => `mode_i64_wide`
+    /// open-addressing path). No `i64::MIN`.
+    fn ns(n: usize, distinct: i64) -> Vec<i64> {
+        const BASE: i64 = 1_700_000_000_000_000_000;
+        let mut s: u64 = 0x7F4A_2C19_A3D0_51EB;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                BASE + (z % distinct as u64) as i64 * 1_000_000_000
+            })
+            .collect()
+    }
+    fn dt(v: Vec<i64>) -> Column {
+        Column::from_datetime64_values(v)
+    }
+    /// Independent ground-truth mode over raw ns: max-count values, ascending.
+    fn ground_truth_mode(data: &[i64]) -> Vec<i64> {
+        use super::FxHashMap;
+        let mut counts: FxHashMap<i64, u64> = FxHashMap::default();
+        for &v in data {
+            *counts.entry(v).or_insert(0) += 1;
+        }
+        let max_c = counts.values().copied().max().unwrap_or(0);
+        let mut w: Vec<i64> = counts
+            .iter()
+            .filter_map(|(&k, &c)| (c == max_c).then_some(k))
+            .collect();
+        w.sort_unstable();
+        w
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_temporal_mode() {
+        const N: usize = 2_000_000;
+        const DISTINCT: i64 = 50_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let src = ns(N, DISTINCT);
+
+        // Parity: Datetime64 mode winners (ns) == ground truth AND == the
+        // conformance-verified Int64-column mode. Timedelta64 re-tag branch too.
+        {
+            let expect = ground_truth_mode(&src);
+            let dt_mode = dt(src.clone()).mode().expect("dt mode");
+            assert_eq!(
+                dt_mode.as_datetime64_slice().expect("dt64 winners"),
+                expect.as_slice(),
+                "datetime mode diverged from ground truth"
+            );
+            assert_eq!(
+                dt_mode.as_datetime64_slice().expect("dt64 winners"),
+                Column::from_i64_values_owned(src.clone())
+                    .mode()
+                    .expect("i64 mode")
+                    .as_i64_slice()
+                    .expect("i64 winners"),
+                "datetime vs i64 mode diverged"
+            );
+            let td = Column::from_timedelta64_values_with_validity(
+                src.clone(),
+                ValidityMask::all_valid(src.len()),
+            );
+            assert_eq!(
+                td.mode()
+                    .expect("td mode")
+                    .as_timedelta64_slice()
+                    .expect("td winners"),
+                expect.as_slice(),
+                "timedelta mode diverged from ground truth"
+            );
+        }
+
+        // ORIG timing: plant one NaT (i64::MIN) so the CAND no-NaT gate skips ->
+        // the generic Key path (materialize) runs.
+        let mut src_orig = src.clone();
+        src_orig[0] = i64::MIN;
+
+        for _ in 0..2 {
+            std::hint::black_box(dt(src_orig.clone()).mode().unwrap());
+            std::hint::black_box(dt(src.clone()).mode().unwrap());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = dt(src_orig.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&co).mode().unwrap());
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = dt(src.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).mode().unwrap());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = dt(src.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).mode().unwrap());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB temporal mode (ONE binary, ONE invocation) N={N} distinct={DISTINCT}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic Key::Datetime64 tally min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND raw-i64 ns mode + re-tag      min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

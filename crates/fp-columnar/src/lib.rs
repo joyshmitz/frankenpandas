@@ -32795,3 +32795,173 @@ mod tests {
         );
     }
 }
+
+/// Provenanced A/B for the `LazyAllValidFloat64TransposeRow` arm of
+/// [`Column::as_f64_slice`] (cc_fp).
+///
+/// Isolated at the `Column` level so the transpose frame's `String` + `BTreeMap`
+/// construction cannot dominate the signal: each rep rebuilds the transposed row
+/// columns from scratch (their `OnceLock`s start cold), then walks them once.
+///
+/// ORIG = `values()` -> `plan.materialize_row` + `Vec<Scalar>` boxing (32 B/elem).
+/// CAND = `as_f64_slice()` -> `plan.materialize_row` only, returning the cached
+/// typed `Vec<f64>` (8 B/elem) that `values()` was about to box.
+///
+/// Both arms alternate INSIDE one measured routine, in ONE `rch exec` invocation,
+/// with `black_box` on inputs and results. Emits binary sha256, worker hostname and
+/// per-arm cv_pct so the ledger row is provenanced.
+///
+/// Run: `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+///        cargo test -p fp-columnar --release --lib -- --ignored --nocapture ab_transpose_row_typed`
+#[cfg(test)]
+mod ab_transpose_row_typed_ccfp {
+    use std::{process::Command, sync::Arc, time::Instant};
+
+    use fp_types::Scalar;
+
+    use super::{Column, Float64TransposeInput, Float64TransposeRows, Float64TransposeRowsPlan};
+
+    fn binary_sha256() -> String {
+        let exe = std::env::current_exe().expect("current test binary");
+        let out = Command::new("sha256sum")
+            .arg(&exe)
+            .output()
+            .expect("sha256sum on worker");
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .split_whitespace()
+            .next()
+            .expect("digest")
+            .to_owned()
+    }
+
+    fn worker_hostname() -> String {
+        Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map_or_else(|| "unknown".to_owned(), |s| s.trim().to_owned())
+    }
+
+    /// `rows` source rows x `cols` source columns; each transposed row column has
+    /// length `cols`, and there are `rows` of them -- the shape `df.transpose()` emits.
+    fn plan_for(rows: usize, cols: usize) -> Float64TransposeRows {
+        let inputs: Vec<Float64TransposeInput> = (0..cols)
+            .map(|c| {
+                let data: Arc<[f64]> = (0..rows)
+                    .map(|r| (r * cols + c) as f64)
+                    .collect::<Vec<_>>()
+                    .into();
+                Float64TransposeInput::new(data, 0, rows)
+            })
+            .collect();
+        Float64TransposeRows {
+            plan: Arc::new(Float64TransposeRowsPlan::new(inputs.into(), rows)),
+        }
+    }
+
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+
+    fn cv_of(xs: &[f64]) -> f64 {
+        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+        let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / xs.len() as f64;
+        100.0 * var.sqrt() / mean
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_transpose_row_typed() {
+        // Longer per-rep work + more reps: the first run on a loaded worker gave
+        // cv 6.81%/11.54%, above the 5% gate, so its 1.715x was not claimable.
+        const ROWS: usize = 200_000;
+        const COLS: usize = 10;
+        const BLOCKS: usize = 11;
+        const REPS: usize = 5;
+
+        let handle = plan_for(ROWS, COLS);
+
+        // Parity, same binary, before timing: typed slice == boxed values, every row.
+        for r in [0usize, 1, ROWS / 2, ROWS - 1] {
+            let col = Column::from_f64_transpose_row(&handle, r);
+            let typed: Vec<f64> = col.as_f64_slice().expect("typed arm").to_vec();
+            let boxed: Vec<f64> = col
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Float64(v) => *v,
+                    other => panic!("unexpected {other:?}"),
+                })
+                .collect();
+            assert_eq!(typed, boxed, "row {r}: typed arm diverged from values()");
+        }
+
+        let warm = |h: &Float64TransposeRows| {
+            let mut acc = 0usize;
+            for r in 0..1024 {
+                let col = Column::from_f64_transpose_row(h, r);
+                acc += col.values().len();
+                let col = Column::from_f64_transpose_row(h, r);
+                acc += col.as_f64_slice().expect("typed").len();
+            }
+            acc
+        };
+        std::hint::black_box(warm(std::hint::black_box(&handle)));
+
+        let mut orig = Vec::with_capacity(BLOCKS);
+        let mut cand = Vec::with_capacity(BLOCKS);
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc) = (f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let h = std::hint::black_box(&handle);
+
+                let t0 = Instant::now();
+                let mut acc = 0usize;
+                for r in 0..ROWS {
+                    let col = Column::from_f64_transpose_row(h, std::hint::black_box(r));
+                    acc += col.values().len();
+                }
+                std::hint::black_box(acc);
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let t0 = Instant::now();
+                let mut acc = 0usize;
+                for r in 0..ROWS {
+                    let col = Column::from_f64_transpose_row(h, std::hint::black_box(r));
+                    acc += col.as_f64_slice().expect("typed").len();
+                }
+                std::hint::black_box(acc);
+                bc = bc.min(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            orig.push(bo);
+            cand.push(bc);
+        }
+
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let cells = (ROWS * COLS) as f64;
+        println!("AB transpose-row typed access (ONE binary, ONE invocation, interleaved)");
+        println!("  binary_sha256 = {}", binary_sha256());
+        println!("  worker        = {}", worker_hostname());
+        println!("  rows={ROWS} cols={COLS} cells={}", ROWS * COLS);
+        println!(
+            "  ORIG values()      min={o:9.3} ms  cv={:5.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND as_f64_slice  min={c:9.3} ms  cv={:5.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  boxing tax (ORIG-CAND) = {:8.3} ms ({:5.2} ns/cell)",
+            o - c,
+            1e6 * (o - c) / cells
+        );
+        println!("  fp-side ratio = {:.3}x", o / c);
+        println!(
+            "  cv<5% both arms: orig={} cand={}",
+            cv_of(&orig) < 5.0,
+            cv_of(&cand) < 5.0
+        );
+    }
+}

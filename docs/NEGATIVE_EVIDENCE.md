@@ -12079,3 +12079,71 @@ REJECT and does not restore the historical do-not-retry instruction. Retry condi
 arms, batch repeated calls inside each alternating sample to amortize scheduler noise, run the candidate profile before the
 CV assertion, and require both CVs below 5% plus strictly non-zero self-time for
 `sorted_insert_finalize_candidate_cod_fp`.
+
+### 2026-07-10 cc_fp — PROVENANCED re-measurement of the transposed-column typed arm: 1.630x at the Column level, cv<5%, sha256 + worker recorded
+
+"Trust nothing unprovenanced" applies to my own rows. The WIN in `351279ce3` recorded worker id and per-arm cv and
+attributed self-time by ablation, but **not a binary sha256** — I named that gap myself. This entry closes it, and
+independently re-derives the effect at a different level of the stack, on a different worker, with a tighter estimator.
+
+**PROVENANCE (the new ledger rule, in full).**
+
+| field | value |
+| --- | --- |
+| binary sha256 | `b4550a6f8424d8ae09143acc2dc00f40804251abc079cedf6d478a0107f5da85` |
+| worker id | `vmi1152480` (rch trailer; `RCH_REQUIRE_REMOTE=1`, fail-closed, no local build) |
+| profile | `--release`, `cargo test -p fp-columnar --lib -- --ignored --nocapture ab_transpose_row_typed` |
+| substrate | ONE binary, ONE `rch exec` invocation, arms alternating INSIDE one measured routine, `black_box` on inputs and results |
+| size | 200_000 transposed row columns x 10 cells = 2M cells (bounded, finishable: 1.66 s) |
+
+**RESULT (Column level: `Column::from_f64_transpose_row` then walk).**
+
+| arm | min (11 blocks x 5 reps, min-of-block) | cv_pct |
+| --- | ---: | ---: |
+| ORIG `values()` — `materialize_row` + `Vec<Scalar>` boxing | 15.866 ms | **4.76%** ✅ |
+| CAND `as_f64_slice()` — `materialize_row`, return cached typed `Vec<f64>` | 9.732 ms | **4.72%** ✅ |
+
+- **fp-side ratio = 1.630x**, both arms under the 5% gate.
+- **SELF-TIME BY ABLATION (attribution): boxing tax = 6.135 ms / 2M cells = 3.07 ns/cell.** The code under test therefore
+  executes with non-zero attributable cost — this is not a dead-code measurement.
+- PARITY asserted in the same binary before timing: for rows `{0, 1, n/2, n-1}`, `as_f64_slice() == values()` element-wise.
+
+A first run (100k cells x 10, 9 blocks x 3 reps, same worker) gave **1.715x at cv 6.81% / 11.54%** — **above the gate, so it
+is NOT claimed and is recorded here only as the reason the estimator was lengthened.** No number was harvested from it.
+
+**CROSS-CHECK, three independent measurements of the same physical quantity:** boxing tax = **3.2 ns/cell** (frame level,
+`ovh-a`, `351279ce3`), **3.43 ns/cell** (Column level, `vmi1152480`, cv-rejected run), **3.07 ns/cell** (Column level,
+`vmi1152480`, gated run). Agreement to ~10% across two workers and two levels of the stack. This is what a real, physical
+effect looks like — as opposed to my retracted "40 ns/cell", which was one worker, one pair, and conflated gather with boxing.
+
+**SCOPE, precisely.** 1.630x is the ratio of two *access paths over transposed row columns*. It is NOT a speedup of
+`df.transpose()`, whose construction both arms skip here by construction. The frame-level figure, where transpose
+construction is included in both arms, is the smaller **1.216x** (`351279ce3`, `ovh-a`, all arms cv<1%). Both are true; they
+answer different questions. Quote 1.216x for "how much faster is a full-frame typed scan of a transposed frame", and 1.630x
+for "how much of the per-column access cost was pure `Scalar` boxing".
+
+---
+
+**STANDING CORRECTIONS (restated once, with pointers, because they keep being reversed).**
+
+1. **"Construction is 26.5% of transpose" is a `hz2`-only figure and I retracted it in `351279ce3`.** Measured
+   in-invocation on two workers: `hz2` 26.5% construction / 73.5% materialization; `ovh-a` **58.5% / 41.5%**. Construction is
+   a minority on one machine and a MAJORITY on the other. Consequence for "attack construction directly": deleting *all* of
+   construction buys **2.41x on `ovh-a`, 1.36x on `hz2`** — that is the ceiling, and it is why the construction levers
+   (0.42x, 0.61x, 0.997x) were low-EV even where valid. Decomposition ratios (part vs whole) are NOT worker-invariant;
+   only ORIG-vs-CAND ratios of the same operation are.
+
+2. **arg-extrema is DONE and has been since `46b3374a8` (~7.5x).** Verified again this window: four call sites route through
+   `arg_axis1_names_parallel`, which builds per-thread `(Vec<u8>, Vec<usize>)` under `std::thread::scope`, concatenates with a
+   running byte base, and finalizes at fp-frame:67127 `Column::from_utf8_contiguous(bytes, offsets)`. The only remaining
+   `Vec<Scalar::Utf8>` is the documented **null-row correctness fallback** (a contiguous buffer cannot represent a null).
+   `Series::idxmax`/`idxmin` return a single label, not a column, so they are not Utf8 producers. **There is nothing left to
+   apply.** Re-applying the pattern can only produce a no-op diff or a fabricated number.
+
+3. **The four transpose rejects: `cod_fp` is re-auditing them RIGHT NOW**, in an uncommitted
+   `mod transpose_reject_reaudit_cod_fp` in `crates/fp-frame/src/lib.rs`, complete with `binary_sha256()` and
+   `worker_hostname()` helpers. I have not touched it. Separately, and independently of who runs it: re-running those four
+   against `df_transpose_materialize` **cannot flip them**, because all four changed CONSTRUCTION-path code that the old
+   bench already executed; a materializing bench appends work *after* their code and only dilutes each lever. The two rows
+   invalidated on 2026-07-10 stay invalid for the recorded reasons — a cross-worker ratio (68.78 ms on `hz2` / 111.94 ms on
+   `vmi1149989`) and a missing timing vector — not for want of materialization. Both stay REOPENED, now with the ceiling above.

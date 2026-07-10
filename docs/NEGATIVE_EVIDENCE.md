@@ -11632,3 +11632,67 @@ NOTE ON MY OWN ROWS: this agent has written no REJECT this session. The three WI
 astype(str) grisu ~11.8% self / core::fmt ~5.6% self; dt.date `core::fmt` ~42% self; `to_flat_index` by ABLATION
 (66.0% of serial loop time). The one row I flagged as suspect under this rule remains
 `2026-06-27 TealOsprey — str op parallelism ~0-gain` (1.01x/1.07x, no self-time recorded).
+
+### 2026-07-10 cod_fp — STRICT candidate-self-time correction to the four transpose/to_dict rejects — 4/4 INVALID as reject evidence
+
+This append-only correction supersedes only the four verdicts in the immediately preceding audit. It applies the user's
+literal integrity rule: hotness of the ORIG family, logical reachability, a focused parity test, or a large wall-time delta
+does **not** prove that the timed candidate executed. A REJECT requires a profile of the candidate benchmark itself with a
+named candidate frame at strictly non-zero self-time, plus the existing one-binary/one-invocation and cv < 5% gates.
+
+No benchmark was run for this correction: the disk constraint forbids local Cargo, the reverted candidate sources are not
+on current `main`, and no historical candidate profile exists. The audit inspected the committed diffs, the original rows,
+the surviving session chronology, both tracked transpose perf recordings, and the current public call paths. Candidate
+self-time is therefore recorded honestly as **UNMEASURED**, not rounded to `0.00%`.
+
+| historical reject | committed candidate profile? | candidate self-time | independent validity failure | strict verdict |
+| --- | --- | ---: | --- | --- |
+| sorted sequential BTree insert | **no** — the tracked recording predates the patch and profiles ORIG bulk-build | **UNMEASURED** | candidate cv **18.46%** | **INVALID / REOPEN** |
+| flattened pair-buffer morsels | **no** | **UNMEASURED** | ORIG `hz2`, candidate `vmi1149989`; no candidate CV | **INVALID / REOPEN** |
+| all-valid owned row columns | **no** | **UNMEASURED** | separate RCH invocations; full vectors/CV absent | **INVALID / REOPEN-DORMANT** |
+| `to_dict(index)` BTreeMap row shards | **no** | **UNMEASURED** | no candidate timing vector; interrupted on a different worker | **INVALID / REOPEN** |
+
+**1. Sorted sequential insert.** Reject commit `49f4cd4bc` contains the ORIG perf data/SVG, ledger, and tracker only;
+the candidate source was reverted. Session chronology shows `perf record` completed **before** the transient patch replaced
+`column_entries.into_iter().collect()` with repeated `new_columns.insert(...)`; after the patch there were timing commands,
+not a candidate profile. Replaying the tracked recording (`102` samples over `395.059 ms`) confirms it is ORIG: self-time
+is `__memmove` **33.79%**, `__memcmp`/stable sort **30.10%**, BTree `IntoIter`/drop **8.59%**, bulk-build **4.47%**, and
+BTreeMap drop **4.45%**. A sequential-insert candidate frame is absent because that binary was never profiled. Those numbers
+prove the ORIG construction family is hot; they do not prove candidate execution. The candidate timing also had cv
+**18.46%**, so the row fails two mandatory gates. Withdraw its do-not-retry status.
+
+**2. Flattened pair-buffer morsels.** Reject commit `f1b56019b2` (pre-rebase `4c7832e5a`) is docs/tracker-only after
+the production hunk and test were removed. ORIG best `68.781982 ms` ran on `hz2`; candidate best `111.942506 ms` ran in
+another RCH invocation on pressured worker `vmi1149989`; the parity test ran on a third worker. No candidate perf artifact,
+profile report, CV, or surviving candidate symbol exists. The passing parity test proves only that the focused **test**
+called its helper, not that the timed `fp-bench` binary sampled it. The 0.61x routing ratio remains invalid and the row stays
+reopened.
+
+**3. All-valid owned row columns.** Reject commit `6e40793cc` (rebased as `ca7735d12`) is docs-only; the transient
+`from_f64_values_all_valid_owned_unchecked` source does not survive. The `0.997x` timing came from separate RCH invocations,
+the requested worker pin was ignored, full vectors/CVs were not retained, and no candidate profile exists. Later cod_fp
+profiles were captured after transpose had moved to `Column::from_f64_transpose_row`; absence of the old constructor there
+cannot be attributed backward to this candidate. Mark the row INVALID and reopened in principle. It is **dormant**, not a
+do-not-retry fact: its retry condition is a future live transpose/materialization path again calling an equivalent owned
+constructor, followed by a one-binary candidate profile with non-zero self-time and cv < 5%.
+
+**4. `to_dict(index)` BTreeMap row shards.** Reject commit `8d4a4ee683` (original `0e676509a6`) contains only tracker,
+the three-line permanent fp-bench dispatch, and docs; the candidate materializer/test were reverted. ORIG completed on
+`ovh-a` at best `275.992507 ms`; the separate candidate invocation on `vmi1149989` emitted no timing vector and was
+interrupted. Its command was an ordinary `cargo run`, not a CPU profile. Candidate self-time and timed-path execution are
+both unproven. More importantly, current `to_dict("index")` returns `IndexMappingLazy`, whose row map is first built by
+`as_mapping()`, while the current `df_to_dict_index` fp-bench row drops the lazy result without calling that accessor. A
+materialization/shard retry would therefore be dead code in the current workload. Keep the row reopened, but require the
+replacement benchmark to force `as_mapping()` and black-box the materialized map.
+
+**What remains supported.** These four invalid rows do **not** establish the representation-cardinality conclusion. The
+independent ORIG profile still supports that mechanism directionally (copy/compare/BTree build/drop dominate), and the
+already-shipped public lazy-store lever `bd4ff512a` removes or defers those objects and measured **778.93x-4473.52x** versus
+eager ORIG on the same local runtime host, with every CV below 5%. Thus the architectural route remains profile- and
+outcome-supported; the withdrawn claim is only that these four specific transient candidates were validly rejected.
+
+**Only admissible retry shape.** Reconstruct exact bench-only `#[inline(never)]` ORIG/candidate helpers; assert exact output
+parity before timing; alternate AB/BA inside one paired Criterion measurement in one binary and one bounded
+`RCH_REQUIRE_REMOTE=1 rch exec -- cargo ...` invocation; retain both raw vectors with cv < 5%; and profile that same binary
+so each named candidate sentinel reports strictly non-zero self-time. For `to_dict(index)`, time first-access
+materialization, not lazy wrapper construction. No new ratio may enter this ledger until all of those conditions hold.

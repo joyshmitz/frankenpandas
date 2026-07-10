@@ -11830,3 +11830,65 @@ and ask what per-row DISPATCH survives — then ask what SHARE that dispatch own
 2.53x. `to_flat_index` was `core::fmt` in a loop with no other work, paid 2.945x serial, but only 1.437x once the
 existing parallelism had already hidden most of it. `stack` is the same tax at 0.23% and pays nothing. Same mechanism,
 three different magnitudes — which is why every one of them needed a measurement and not an analogy.
+
+### 2026-07-10 cc_fp — BENCHMARK-INTEGRITY: `df_transpose` never crosses the materialization boundary; added `df_transpose_materialize` before a lever gets rejected on dead code
+
+Applying the ledger-integrity rule PROACTIVELY, to the benchmark rather than to a row. Analysis + a compile-only remote
+check; no perf claim is made here, so no ratio and no self-time are asserted.
+
+**THE TRAP.** `crates/fp-bench/src/main.rs:474`, the `lazy-transpose-view` arm of `df_transpose`, says so itself:
+
+> `// shape inspection is metadata-only for the feature-gated homogeneous storage and does not cross the materialization boundary.`
+
+It calls `df.transpose()`, reads `shape()`, and drops. Under the feature flag the transposed frame is a
+`LazyTransposeFramePlan` + `Int64UnitRange`; **no value is ever observed, so no output column is ever materialized.**
+There is no other transpose benchmark that observes values (`rg df_transpose crates/fp-bench` → only the metadata row and
+the 2D-block *proto* row).
+
+Why this is a loaded gun: the ledger's OWN named next frontier for this lane is the materialization path — cod_fp's row
+(`feature-gated public homogeneous lazy transpose storage`) closes with *"The first map/column/value observer currently
+materializes the entire output map (not one column) ... The next different alien primitive is an indexable per-output-column
+lazy slot store."* A lever aimed at that primitive, benched on `df_transpose`, would show **~0% self-time** and produce a
+**dead-code REJECT** — exactly the failure mode that invalidated four frankenmermaid crossing-min rows, where the bench
+registered `layered` inputs but the selector routed to TREE and barycenter self-time was 0.000%. The trap is pre-loaded and
+nobody has stepped in it yet.
+
+**FIX (this commit).** New `dataframe_ops/df_transpose_materialize` workload: `df.transpose()`, then read real VALUES out of
+a transposed column (`column_names()[0]` → `column(name)` → `values()`), which per the lazy-storage contract materializes the
+whole output map. The eager and the lazy builds both perform that work, so the two are comparable — which the metadata row is
+not. Added the matching `bench_df_transpose_materialize_pandas` (`df.T` then `t[t.columns[0]].to_numpy()`), so the row is a
+real head-to-head and not an fp-only number. Verified REMOTE and fail-closed, no local build:
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo check -p fp-bench --all-targets` → `Checking fp-bench`,
+`Finished`, 0 errors on `ovh-b`; and again `--features lazy-transpose-view` → `Checking fp-bench`, `Finished`, 0 errors on
+`hz2`. Harness parses (`ast.parse`). **No timing is claimed: the freeze bans the local `fp-bench` binary, so this row ships
+the instrument, not a measurement.**
+
+**AUDIT OF THE TRANSPOSE-LANE *WIN* ROWS (the rule cuts both ways).** frankenfs retracted a 1.41x as an artifact, so I
+checked whether this lane's wins are the same shape. **They are not.** cod_fp's
+`feature-gated public homogeneous lazy transpose storage` row is properly scoped and self-limiting: it states plainly
+*"this proves public transpose construction/metadata latency"*, that *"the first map/column/value observer currently
+materializes the entire output map"*, and that *"this entry makes no `to_dict` materialization claim."* Its A/B ran two
+binaries **sequentially on ONE local machine under `taskset -c 2`** with SHA-256 agreement between worker and local copies —
+not a cross-worker ratio — and all ten engine CVs are < 5%. The 779x-4474x "vs eager ORIG" is therefore a
+**construction-vs-construction** number, correctly labelled as such, NOT a like-for-like end-to-end speedup. ✅ VALID as
+written. The residual risk is not in the row; it is that a *future* reader quotes 4474x as an end-to-end transpose speedup.
+`df_transpose_materialize` is the instrument that will keep them honest.
+
+**SO: THE "REPRESENTATION CARDINALITY IS THE WALL" CONCLUSION DOES NOT REST ON THE FOUR REJECTS.** Stated once more with
+the numbers, because it keeps being asserted otherwise. It rests on the ranked self-time table that cod_fp replayed from
+`artifacts/perf/cod_fp_df_transpose_100k_release_perf.data` (`perf report --no-children --percent-limit 0.1`), which is
+independent of every reject row: `__memmove` **33.79% self**, `__memcmp` (sort/BTree comparator) **30.10% self**,
+`BTreeMap::IntoIter::dying_next` / `ScalarValues` drop **8.59%**, `bulk_build_from_sorted_iter` **4.47%**,
+`drop_in_place<BTreeMap<String,Column>>` **4.45%**, `usize::_fmt_inner` **4.38%**, `drop_in_place<Option<ColumnData>>`
+**4.12%**, mimalloc **4.11%**, `mi_free`/`Column` drop **4.11%**. That is copy + compare + tree-build + drop + format +
+allocate for one `String`, one `Column`, one `BTreeMap` entry per source row — the cardinality itself, measured directly.
+What my 2026-07-10 audit invalidated is the strictly narrower claim that **those two specific levers** cannot beat that wall
+(pair-buffer morsels: a cross-worker 68.78 ms on `hz2` ÷ 111.94 ms on `vmi1149989`; BTreeMap row shards: no candidate timing
+vector at all, a non-completion on a worker documented as under critical pressure). Both remain REOPENED. Invalidating a
+reject does not resurrect the lever — it only removes the sign that said "don't look."
+
+**SCOREBOARD of this agent's integrity audits** (4 rejects + 1 win + 1 benchmark): 1 reject VALID with attribution added,
+2 rejects INVALID and reopened, 1 reject invalid-as-measured but moot, 1 win VALID and correctly scoped, 1 benchmark found
+DEAD for the lane's named next frontier and fixed. The high invalid rate other repos report (frankenmermaid 4/4,
+franken_whisper, frankenredis, frankenfs) is **partially** reproduced here: 2 of 4, both traceable to the same root cause —
+a ratio taken across two `rch exec` invocations on different workers, which the substrate rule now forbids.

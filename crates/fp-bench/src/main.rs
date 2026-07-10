@@ -480,6 +480,28 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let shape = transposed.shape();
             black_box((&transposed, shape));
         }),
+        // BENCHMARK-INTEGRITY SIBLING (cc_fp). `df_transpose` above deliberately
+        // stops at metadata (`shape()`), so under `lazy-transpose-view` it never
+        // crosses the materialization boundary. That makes it a DEAD BENCHMARK for
+        // any lever aimed at the materialization path (the ledger's own named next
+        // frontier: an indexable per-output-column lazy slot store) -- such a lever
+        // would show ~0% self-time here and a REJECT measured on it would be a
+        // dead-code reject. This row forces the observer: it reads real VALUES out
+        // of a transposed column, which per the lazy-storage contract materializes
+        // the whole output map. Both the eager and the lazy build execute the same
+        // work here, so the two are comparable.
+        ("dataframe_ops", "df_transpose_materialize") => time_us(|| {
+            let transposed = df.transpose().expect("transpose");
+            // Touch a real column's values: the first value observer crosses the
+            // public-column boundary and materializes.
+            let names = transposed.column_names();
+            let first = names.first().expect("transposed frame has columns");
+            let col = transposed
+                .column(first.as_str())
+                .expect("named column exists");
+            let vals = col.values();
+            black_box((&transposed, vals.len()));
+        }),
         #[cfg(not(feature = "lazy-transpose-view"))]
         ("dataframe_ops", "df_transpose") => time_us(|| {
             // pandas: df.T

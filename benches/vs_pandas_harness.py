@@ -243,6 +243,19 @@ def bench_cumsum_pandas(df: pd.DataFrame) -> list[float]:
 def bench_df_transpose_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation_repeated(lambda: df.T, TRANSPOSE_BATCH)
 
+def bench_df_transpose_materialize_pandas(df: pd.DataFrame) -> list[float]:
+    # Counterpart to fp-bench dataframe_ops/df_transpose_materialize. `df.T` alone
+    # can be a lazy/blockwise construction on both sides, so this row crosses the
+    # materialization boundary explicitly by reading real values out of the
+    # transposed frame, matching what the Rust row does.
+    def op():
+        t = df.T
+        col = t.columns[0]
+        return len(t[col].to_numpy())
+
+    return time_operation(op)
+
+
 def bench_astype_str_f64_pandas(df: pd.DataFrame) -> list[float]:
     # Mirrors fp-bench dataframe_ops/astype_str_f64 exactly: a Float64 column
     # holding i * 1.5 for i in 0..rows, cast to str. Built here (not taken from
@@ -483,6 +496,7 @@ PANDAS_WORKLOADS = {
         "value_counts": bench_value_counts_pandas,
         "cumsum": bench_cumsum_pandas,
         "df_transpose": bench_df_transpose_pandas,
+        "df_transpose_materialize": bench_df_transpose_materialize_pandas,
         "astype_str_f64": bench_astype_str_f64_pandas,
     },
     "groupby": {

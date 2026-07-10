@@ -11429,3 +11429,42 @@ DECLINED THIS TURN: cod_fp's lazy-transpose lane, offered while cod is usage-wal
 view whose whole value is a perf claim (`--features lazy-transpose-view`), so under a bench freeze it is exactly
 the work that cannot be finished, and cod has uncommitted hunks in `fp-frame` around 49369/57000. Taking it would
 risk a merge collision for zero shippable output. Staying in lane.
+
+### 2026-07-10 cc_fp — METHODOLOGY AMENDMENT to the to_flat_index PARK above (rch A/B substrate) + audit of every ratio measured this session
+
+Incorporating the franken_networkx addendum (br-r37-c1-839yx): **`rch exec` exposes no `--worker` flag, picks workers
+non-deterministically, and the ORIG/CAND ratio is NOT worker-invariant — so an A/B split across TWO `rch exec`
+invocations is INVALID.** Also: the `stash ORIG, bench, pop, bench CAND` recipe is doubly forbidden here (it assumes
+one machine, and `git stash` is banned in this shared checkout; `dcg` additionally blocks `git restore --worktree`).
+
+AUDIT of every ratio this agent measured this session — **none is invalid, none needs re-measuring**, because none was
+produced through `rch`. `rch exec` was used ONLY for `cargo test` (pass/fail, which IS worker-invariant):
+
+| ratio | substrate | verdict |
+| --- | --- | --- |
+| `astype_str_f64` **5.00x** fp-side | ONE local binary, `FP_ASTYPE_NO_PAR` env gate, ORIG/CAND alternating, 9 blocks, one machine | VALID |
+| `astype_str_f64` **25.77x** vs pandas | ONE `vs_pandas_harness.py` invocation, its own cv<=5% gate | VALID |
+| `dt_date` **2.53x** / `dt_time` **4.53x** fp-side | ONE local binary, `FP_DT_NO_FASTFMT` env gate, alternating, 9 blocks, control `dt_strftime` pinned 1.00x | VALID |
+| `dt_date` **4.69x** / `dt_time` **19.01x** vs pandas | fp half = local shipping binary; pandas half in-process via the harness's own cv-gated `time_operation`; same box, no rch | VALID with the caveat already recorded (not one harness invocation) |
+| `to_flat_index` | **no ratio measured** — PREDICTED frame only, explicitly parked | N/A |
+
+CORRECTION TO THE PARK's RESUME STEPS. Step 3 as written ("interleaved same-binary A/B ... temporary env gate") is
+correct on ONE machine but becomes INVALID under an rch-only regime, because each `rch exec` lands on a
+non-deterministically chosen worker and an env-gated ORIG run and a CAND run are then two invocations on two workers.
+Replace step 3 with whichever holds when the lever is resumed:
+
+- **If local benching is allowed again:** the env-gated interleave is fine exactly as written (one binary, one box).
+- **If still rch-only:** do NOT env-gate across invocations. Instead keep the ORIG loop as a **bench-only reference fn**
+  compiled into the same binary alongside CAND, register BOTH arms in ONE alternating group, and run the whole A/B in a
+  SINGLE `rch exec` invocation so worker identity and drift cancel. In this repo the idiomatic vehicle is the project's
+  own `#[ignore]`d perf-test pattern (`cargo test ... -- --ignored --nocapture`, as used by
+  `fp-conformance --test perf_baselines`), not criterion: the ledger already records that
+  `rch exec -- cargo bench` here runs the libtest wrapper with 0 measured tests, and that `cargo bench --release` is
+  rejected by Cargo. Emit min-of-blocks per arm plus an untouched control op from the same binary.
+
+Either way the keep-gate is unchanged: cv < 5% on both arms, a control that does not move, and a REJECT + ledger entry
+if the profile's top frame is not `IndexLabel::fmt` / `pad` / `core::fmt::write`.
+
+GENERAL LESSON (applies to every agent under the rch-only constraint): a cross-invocation A/B silently swaps the
+machine underneath you. "Same binary" is not sufficient — it must be **same binary AND same invocation**, with both
+arms alternating inside it. An env-var gate is a same-BINARY technique that is NOT a same-INVOCATION technique.

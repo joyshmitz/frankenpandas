@@ -21014,6 +21014,78 @@ impl Column {
             }
         }
 
+        // Contiguous-Utf8 fast path (sibling of `Column::unique`'s byte-span
+        // dedup): the generic tally below iterates `&self.values`, forcing
+        // `as_slice()` to materialize a `Vec<Scalar::Utf8>` -- one heap `String`
+        // per row -- then keys each row with `set_member_key`. Tally the byte
+        // spans directly via `FxHashMap<&[u8], usize>` (byte-equality is exactly
+        // `&str`-equality for valid UTF-8) with ZERO per-row `String` alloc, keep
+        // the first-seen counts order, and build a CONTIGUOUS distinct-values
+        // column. `as_utf8_contiguous` only matches an all-valid backing, so
+        // `missing_count` stays 0 and `dropna` is a no-op. Bit-identical to the
+        // generic arm: same first-seen distinct set, same counts, the same stable
+        // count-sort tie-break, and the same normalize/Int64 counts column.
+        if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+            // `index` and `tally` grow on demand (distinct count unknown): sizing
+            // them to the row count would build a huge mostly-empty table that
+            // thrashes cache when cardinality is low.
+            let mut index: rustc_hash::FxHashMap<&[u8], usize> = rustc_hash::FxHashMap::default();
+            let mut tally: Vec<(&[u8], usize)> = Vec::new();
+            for w in offsets.windows(2) {
+                let span = &bytes[w[0]..w[1]];
+                if let Some(&i) = index.get(span) {
+                    tally[i].1 += 1;
+                } else {
+                    index.insert(span, tally.len());
+                    tally.push((span, 1));
+                }
+            }
+
+            if sort {
+                if ascending {
+                    tally.sort_by_key(|(_, count)| *count);
+                } else {
+                    tally.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+                }
+            }
+
+            let total = if normalize {
+                tally.iter().map(|(_, count)| *count).sum::<usize>() as f64
+            } else {
+                1.0
+            };
+
+            let mut values_bytes: Vec<u8> = Vec::new();
+            let mut values_offsets: Vec<usize> = Vec::with_capacity(tally.len() + 1);
+            values_offsets.push(0);
+            let mut counts_out: Vec<Scalar> = Vec::with_capacity(tally.len());
+            for (span, count) in &tally {
+                values_bytes.extend_from_slice(span);
+                values_offsets.push(values_bytes.len());
+                if normalize {
+                    let normalized = if total == 0.0 {
+                        0.0
+                    } else {
+                        *count as f64 / total
+                    };
+                    counts_out.push(Scalar::Float64(normalized));
+                } else {
+                    counts_out.push(Scalar::Int64(i64::try_from(*count).unwrap_or(i64::MAX)));
+                }
+            }
+
+            let values = Self::from_utf8_contiguous(values_bytes, values_offsets);
+            let counts = Self::new(
+                if normalize {
+                    DType::Float64
+                } else {
+                    DType::Int64
+                },
+                counts_out,
+            )?;
+            return Ok((values, counts));
+        }
+
         // O(N) tally: a `set_member_key`-keyed hash map gives O(1) lookup
         // instead of the old O(distinct) linear `counts.iter().find(semantic_eq)`
         // per value (O(N·distinct), quadratic for high-cardinality data). The
@@ -34752,6 +34824,240 @@ mod ab_utf8_unique_ccfp {
         );
         println!(
             "  CAND contiguous &[u8] dedup     min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_statements)]
+mod ab_utf8_value_counts_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, DType, FxHashMap, Scalar};
+
+    /// Seeded (splitmix64) contiguous-Utf8 buffer: `n` rows drawn from `distinct`
+    /// fixed-width `"val_{:07}"` labels. Every label is a distinct heap `String`
+    /// once materialized, so the generic tally pays one alloc per row.
+    fn mk(n: usize, distinct: usize) -> (Vec<u8>, Vec<usize>) {
+        let mut s: u64 = 0x1234_5678_9ABC_DEF1;
+        let mut bytes: Vec<u8> = Vec::with_capacity(n * 11);
+        let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        for _ in 0..n {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let key = (z as usize) % distinct;
+            bytes.extend_from_slice(b"val_");
+            let mut buf = [0u8; 7];
+            let mut k = key;
+            for slot in buf.iter_mut().rev() {
+                *slot = b'0' + (k % 10) as u8;
+                k /= 10;
+            }
+            bytes.extend_from_slice(&buf);
+            offsets.push(bytes.len());
+        }
+        (bytes, offsets)
+    }
+
+    /// Reference for the pre-lever generic tally: force the `Vec<Scalar::Utf8>`
+    /// materialization (one `String` per row) via `as_slice`, then FxHashMap
+    /// `&str` first-seen tally with `Scalar` clone per distinct -- byte-for-byte
+    /// the shipped `set_member_key` arm's cost, minus the fast-path interception
+    /// (and minus the per-elem `is_missing()` / `SetMemberKey` enum wrap it also
+    /// pays, so this is a CONSERVATIVE floor).
+    fn orig_value_counts_utf8(
+        col: &Column,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+    ) -> (Column, Column) {
+        let scalars = col.values.as_slice();
+        let mut index: FxHashMap<&str, usize> = FxHashMap::default();
+        let mut counts: Vec<(Scalar, usize)> = Vec::new();
+        for v in scalars {
+            if let Scalar::Utf8(s) = v {
+                if let Some(&i) = index.get(s.as_str()) {
+                    counts[i].1 += 1;
+                } else {
+                    index.insert(s.as_str(), counts.len());
+                    counts.push((v.clone(), 1));
+                }
+            }
+        }
+        if sort {
+            if ascending {
+                counts.sort_by_key(|(_, count)| *count);
+            } else {
+                counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+            }
+        }
+        let total = if normalize {
+            counts.iter().map(|(_, count)| *count).sum::<usize>() as f64
+        } else {
+            1.0
+        };
+        let mut values_out: Vec<Scalar> = Vec::with_capacity(counts.len());
+        let mut counts_out: Vec<Scalar> = Vec::with_capacity(counts.len());
+        for (value, count) in counts {
+            values_out.push(value);
+            if normalize {
+                let n = if total == 0.0 {
+                    0.0
+                } else {
+                    count as f64 / total
+                };
+                counts_out.push(Scalar::Float64(n));
+            } else {
+                counts_out.push(Scalar::Int64(i64::try_from(count).unwrap_or(i64::MAX)));
+            }
+        }
+        (
+            Column::new(DType::Utf8, values_out).expect("utf8 values"),
+            Column::new(
+                if normalize {
+                    DType::Float64
+                } else {
+                    DType::Int64
+                },
+                counts_out,
+            )
+            .expect("counts"),
+        )
+    }
+
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_utf8_value_counts() {
+        const N: usize = 2_000_000;
+        const DISTINCT: usize = 50_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let (bytes, offsets) = mk(N, DISTINCT);
+        let mk_col = || Column::from_utf8_contiguous(bytes.clone(), offsets.clone());
+
+        // Parity across every branch (sort asc/desc/none, normalize): the fast
+        // path's (values, counts) pair == the generic reference's, element-for-
+        // element -- same first-seen order, same stable count-sort tie-break.
+        for &(normalize, sort, ascending) in &[
+            (false, true, false),
+            (false, true, true),
+            (false, false, false),
+            (true, true, false),
+        ] {
+            let (ov, oc) = orig_value_counts_utf8(&mk_col(), normalize, sort, ascending);
+            let (cv, cc) = mk_col()
+                .value_counts_with_options(normalize, sort, ascending, true)
+                .expect("value_counts");
+            assert_eq!(ov.dtype(), cv.dtype(), "values dtype diverged");
+            assert_eq!(
+                ov.values.as_slice(),
+                cv.values.as_slice(),
+                "distinct values diverged (normalize={normalize} sort={sort} asc={ascending})"
+            );
+            assert_eq!(
+                oc.values.as_slice(),
+                cc.values.as_slice(),
+                "counts diverged (normalize={normalize} sort={sort} asc={ascending})"
+            );
+        }
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_value_counts_utf8(&mk_col(), false, true, false));
+            std::hint::black_box(
+                mk_col()
+                    .value_counts_with_options(false, true, false, true)
+                    .unwrap(),
+            );
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_value_counts_utf8(
+                    std::hint::black_box(&co),
+                    false,
+                    true,
+                    false,
+                ));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(
+                    std::hint::black_box(&c1)
+                        .value_counts_with_options(false, true, false, true)
+                        .unwrap(),
+                );
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(
+                    std::hint::black_box(&c2)
+                        .value_counts_with_options(false, true, false, true)
+                        .unwrap(),
+                );
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB utf8 value_counts (ONE binary, ONE invocation) N={N} distinct={DISTINCT}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic set_member_key tally min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND contiguous &[u8] tally       min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

@@ -13456,3 +13456,42 @@ fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. No local build. 
 **UTF8-MATERIALIZATION-BYPASS VEIN (cc_fp, all bit-identical): `unique` 1.457x, `value_counts` 1.430x, `nunique` 1.486x.** All
 remove the per-ROW `Vec<Scalar::Utf8>` `String` materialization by dedup/tally/count over `as_utf8_contiguous` byte spans. Only
 `mode` remains un-done in this family (still a candidate); `factorize` was already covered.
+
+### 2026-07-10 cc_fp — WIN: contiguous-Utf8 `mode` tallies over byte spans — 1.570x fp-side, bit-identical (fourth vein win; completes the family)
+
+Fourth and highest-ratio Utf8-materialization-bypass win — completes the family (`unique`/`value_counts`/`nunique`/`mode`).
+`mode` had typed paths for Int64 (dense histogram + wide open-addr) and Float64 (`mode_f64_wide`) but a contiguous-Utf8 column
+fell to the generic `FxHashMap<Key, (count, &Scalar)>` tally, which iterates `&self.values` → `as_slice()` materializes a
+**`Vec<Scalar::Utf8>` (one heap `String` per row)** then keys each by `Key::Utf8(&str)` via a `key_of` call + entry API. Added a
+fast path: for an all-valid contiguous-Utf8 backing, tally byte spans via `FxHashMap<&[u8], usize>`, collect the max-count
+winners, sort them `<[u8]>::cmp` ascending, rebuild a contiguous output — **zero per-row `String` alloc**.
+
+BIT-IDENTITY of the winner order: the generic path collects winners in arbitrary HashMap order then
+`winners.sort_by(compare_scalars_na_last(.., true))`; for two `Scalar::Utf8` that is `str::cmp` (byte-lexicographic), and
+winners are distinct so there are no ties — so sorting the winner byte spans by `<[u8]>::cmp` ascending yields the exact same
+sequence. Empty column returns the same empty same-dtype column.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG reference fn vs CAND `mode()` interleaved, per-arm adjacent
+A/A null control; 2M rows, 50k distinct; ORIG replays the generic path exactly — `as_slice()` materialize + `FxHashMap<&str,
+(count,&Scalar)>` tally + winners sorted by the SHIPPED `compare_scalars_na_last` — CONSERVATIVE: omits the per-elem
+`is_missing()`/`key_of` enum wrap the shipped arm pays, which is why ORIG here (633 ms) is heavier than the sibling levers'
+~410 ms ORIG and the ratio is correspondingly higher):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `a5558490190cddc3673de8283a8ff4d83aac84fa2d535c7b916d9772481f7c25` |
+| worker | `hetzner1` |
+| ORIG generic `Key::Utf8` tally | 633.451 ms (cv 4.61%) |
+| CAND contiguous `&[u8]` tally | 403.463 ms (cv 3.50%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0120x -> 1.20% floor** |
+| **fp-side ratio (min-of-blocks)** | **1.570x (+57.0%) — DECIDABLE (57.0% is ~47x the 1.20% floor)** |
+
+BIT-IDENTICAL: the A/B parity block asserts equality vs the generic reference on the big column AND a multi-winner tie case
+(`["b","a","b","a","c"]` → `["a","b"]`, exercising the winner sort) AND the empty column. GREEN remote fail-closed: fp-columnar
+lib **475/0**, fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. No local build. `crates/fp-frame` untouched.
+
+**UTF8-MATERIALIZATION-BYPASS VEIN COMPLETE (cc_fp, all bit-identical): `unique` 1.457x, `value_counts` 1.430x, `nunique`
+1.486x, `mode` 1.570x.** `factorize` was already covered (`utf8_default_factorize_columns`). Set ops route through `unique`. The
+per-ROW `Vec<Scalar::Utf8>` materialization is now bypassed for every core cardinality/frequency op on contiguous-Utf8. NEXT:
+re-profile for a fresh vein — candidates outside this family: `duplicated`/`drop_duplicates` (do they materialize Utf8?), `isin`
+Utf8 membership, or pivot from string-ops to a groupby/temporal hot path.

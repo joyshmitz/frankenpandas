@@ -16003,6 +16003,46 @@ impl Column {
             return Ok(Self::from_f64_values(mode_f64_wide(data)));
         }
 
+        // Contiguous-Utf8 fast path (sibling of `unique`/`value_counts`/`nunique`'s
+        // byte-span dedup): the generic tally below iterates `&self.values`,
+        // forcing `as_slice()` to materialize a `Vec<Scalar::Utf8>` -- one heap
+        // `String` per row -- then keys each by `Key::Utf8(&str)`. Tally the byte
+        // spans directly via `FxHashMap<&[u8], usize>` (byte-equality is exactly
+        // `&str`-equality for valid UTF-8) with ZERO per-row `String` alloc,
+        // collect the max-count winners, and rebuild a contiguous output.
+        // `as_utf8_contiguous` matches only an all-valid backing, so nothing is
+        // skipped as missing. Bit-identical: the winners are the same set of
+        // max-count strings, and sorting the distinct winner spans by
+        // `<[u8]>::cmp` ascending equals the generic
+        // `winners.sort_by(compare_scalars_na_last(.., true))` for Utf8
+        // (`str::cmp` is byte-lexicographic); the empty column returns the same
+        // empty same-dtype column.
+        if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+            let mut counts: FxHashMap<&[u8], usize> = FxHashMap::default();
+            for w in offsets.windows(2) {
+                *counts.entry(&bytes[w[0]..w[1]]).or_insert(0) += 1;
+            }
+            if counts.is_empty() {
+                return Self::new(self.dtype, Vec::new());
+            }
+            let max_count = counts.values().copied().max().unwrap_or(0);
+            let mut winners: Vec<&[u8]> = counts
+                .iter()
+                .filter_map(|(span, c)| if *c == max_count { Some(*span) } else { None })
+                .collect();
+            // Distinct HashMap keys => no ties; unstable sort matches the generic
+            // ascending byte-lexicographic winner order exactly.
+            winners.sort_unstable();
+            let mut out_bytes: Vec<u8> = Vec::new();
+            let mut out_offsets: Vec<usize> = Vec::with_capacity(winners.len() + 1);
+            out_offsets.push(0);
+            for span in &winners {
+                out_bytes.extend_from_slice(span);
+                out_offsets.push(out_bytes.len());
+            }
+            return Ok(Self::from_utf8_contiguous(out_bytes, out_offsets));
+        }
+
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Bool(bool),
@@ -35235,6 +35275,212 @@ mod ab_utf8_nunique_ccfp {
         );
         println!(
             "  CAND contiguous &[u8] count        min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_statements)]
+mod ab_utf8_mode_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, DType, FxHashMap, Scalar, compare_scalars_na_last};
+
+    /// Seeded (splitmix64) contiguous-Utf8 buffer: `n` rows drawn from `distinct`
+    /// fixed-width `"val_{:07}"` labels. Every label is a distinct heap `String`
+    /// once materialized, so the generic tally pays one alloc per row.
+    fn mk(n: usize, distinct: usize) -> (Vec<u8>, Vec<usize>) {
+        let mut s: u64 = 0x1234_5678_9ABC_DEF1;
+        let mut bytes: Vec<u8> = Vec::with_capacity(n * 11);
+        let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        for _ in 0..n {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let key = (z as usize) % distinct;
+            bytes.extend_from_slice(b"val_");
+            let mut buf = [0u8; 7];
+            let mut k = key;
+            for slot in buf.iter_mut().rev() {
+                *slot = b'0' + (k % 10) as u8;
+                k /= 10;
+            }
+            bytes.extend_from_slice(&buf);
+            offsets.push(bytes.len());
+        }
+        (bytes, offsets)
+    }
+
+    fn col_of(strs: &[&str]) -> Column {
+        let mut b: Vec<u8> = Vec::new();
+        let mut o: Vec<usize> = vec![0];
+        for s in strs {
+            b.extend_from_slice(s.as_bytes());
+            o.push(b.len());
+        }
+        Column::from_utf8_contiguous(b, o)
+    }
+
+    /// Reference for the pre-lever generic mode path over an all-valid Utf8
+    /// column: force `Vec<Scalar::Utf8>` materialization via `as_slice`, tally
+    /// into an FxHashMap keyed by `&str` (first-seen `Scalar` kept for output),
+    /// then the winners = max-count values sorted by the SHIPPED
+    /// `compare_scalars_na_last(.., true)`. CONSERVATIVE: omits the per-elem
+    /// `is_missing()` / `key_of` enum wrap the shipped arm also pays.
+    fn orig_mode_utf8(col: &Column) -> Column {
+        let scalars = col.values.as_slice();
+        let mut counts: FxHashMap<&str, (usize, &Scalar)> = FxHashMap::default();
+        for v in scalars {
+            if let Scalar::Utf8(s) = v {
+                counts
+                    .entry(s.as_str())
+                    .and_modify(|entry| entry.0 += 1)
+                    .or_insert((1, v));
+            }
+        }
+        if counts.is_empty() {
+            return Column::new(DType::Utf8, Vec::new()).expect("empty utf8");
+        }
+        let max_count = counts.values().map(|(c, _)| *c).max().unwrap_or(0);
+        let mut winners: Vec<Scalar> = counts
+            .values()
+            .filter_map(|(c, v)| {
+                if *c == max_count {
+                    Some((*v).clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        winners.sort_by(|a, b| compare_scalars_na_last(a, b, true));
+        Column::new(DType::Utf8, winners).expect("utf8 winners")
+    }
+
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_utf8_mode() {
+        const N: usize = 2_000_000;
+        const DISTINCT: usize = 50_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let (bytes, offsets) = mk(N, DISTINCT);
+        let mk_col = || Column::from_utf8_contiguous(bytes.clone(), offsets.clone());
+
+        // Parity: fast-path winners == generic reference on the big column.
+        {
+            let om = orig_mode_utf8(&mk_col());
+            let cm = mk_col().mode().expect("mode");
+            assert_eq!(om.dtype(), cm.dtype(), "dtype diverged");
+            assert_eq!(
+                om.values.as_slice(),
+                cm.values.as_slice(),
+                "mode winners diverged (big column)"
+            );
+        }
+        // Multi-winner tie exercises the winner sort: a,b both count 2 -> ["a","b"].
+        {
+            let tie = col_of(&["b", "a", "b", "a", "c"]);
+            let cm = tie.mode().expect("tie mode");
+            assert_eq!(
+                cm.values.as_slice(),
+                orig_mode_utf8(&tie).values.as_slice(),
+                "tie winners diverged vs reference"
+            );
+            assert_eq!(
+                cm.values.as_slice(),
+                col_of(&["a", "b"]).values.as_slice(),
+                "tie winners not the expected sorted [a,b]"
+            );
+        }
+        // Empty column -> empty same-dtype column.
+        {
+            let empty = col_of(&[]);
+            assert_eq!(
+                empty.mode().expect("empty mode").values.as_slice(),
+                orig_mode_utf8(&empty).values.as_slice(),
+                "empty mode diverged"
+            );
+        }
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_mode_utf8(&mk_col()));
+            std::hint::black_box(mk_col().mode().unwrap());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_mode_utf8(std::hint::black_box(&co)));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).mode().unwrap());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).mode().unwrap());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB utf8 mode (ONE binary, ONE invocation) N={N} distinct={DISTINCT}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic Key::Utf8 tally  min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND contiguous &[u8] tally   min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

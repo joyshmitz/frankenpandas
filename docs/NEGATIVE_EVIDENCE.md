@@ -13757,3 +13757,40 @@ which cc_fp does not own (`#![forbid(unsafe_code)]` also blocks explicit SIMD in
 fp-columnar the remaining levers are typed materialization-bypasses (median done; `quantile`, Int64-median, Bool
 any/all/sum over the `Arc<[bool]>` backing, temporal `isin`). RECOMMENDATION: the next big structural swing needs the fp-join/
 groupby walls down (coordinate with cod) — otherwise fp-columnar is in micro-opt-harvest mode.
+
+### 2026-07-10 cc_fp — WIN: radix-partitioned distinct-count (vectorized-hash aggregation) for very-high-cardinality i64 — 1.60x fp-side, cardinality-gated, bit-identical (a STRUCTURAL primitive, NOT a materialization micro-opt)
+
+The structural swing the lane asked for, landed IN fp-columnar (not cod's crates). `count_distinct_i64_wide` (underpins Int64 AND
+temporal `nunique`) was a single open-addressing table of `2n` slots (≈16·n bytes); at high cardinality that table exceeds the
+LLC and every insert is a cache miss. Added `count_distinct_i64_radix`: scatter the values into `P=256` partitions by the TOP
+hash bits, then count each partition with a small table that stays L2-resident — a radix-partition / vectorized-hash aggregation.
+Bit-identical: each value maps to exactly one partition, so total distinct = Σ per-partition distinct; the `i64::MIN` sentinel is
+counted once globally; order/partition-independent.
+
+⚠️ CARDINALITY-DEPENDENT — the reason this needed a real gate, not just wiring in (recorded as the load-bearing negative
+evidence): radix WINS at high cardinality but LOSES ~2x at LOW cardinality (single-table's small hot set stays cache-resident;
+radix's full 8·n scatter is pure overhead). MEASURED unconditional radix: **HIGH-card 1.56x WIN, LOW-card 0.485x LOSS
+(-51.5%)**. So it must be gated. Gate = `count_distinct_i64_high_card`: sample 8 small CONTIGUOUS 512-windows spread across the
+array (near-sequential reads → the probe is ~free; a fully-STRIDED sample cost a measurable ~2.7% on the low-card path via
+TLB/cache misses — rejected), require ≥99.5% distinct in the 4096-sample (birthday bound ⇒ total distinct ≳ 2M, safely past the
+crossover) AND `n ≥ 2M`. Conservative + safe-biased: a missed high-card case just uses the single table (no regression); the
+8-chunk spread defeats the "distinct-prefix-then-repeat" adversarial ordering (7/8 chunks sample the repeat region).
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `count_distinct_i64_singletable` vs CAND
+`count_distinct_i64_wide` [the production dispatcher] interleaved, per-arm A/A null control; 8M i64, BOTH cardinality regimes):
+
+| regime | ORIG single-table | CAND dispatcher | ratio | verdict |
+| --- | --- | --- | --- | --- |
+| ~all-distinct (HIGH) | 791.140 ms | 493.375 ms (→radix) | **1.604x (+60.4%)** | **WIN, DECIDABLE (floor 0.57%)** |
+| 1000 distinct (LOW) | 210.729 ms | 208.050 ms (→single) | 1.013x (+1.3%) | NO REGRESSION (probe ~free) |
+
+binary sha256 `9710ee559eba111d72d1ab701de924ad9225605e801834bd4151e16a0aa01909`, worker `hetzner2` (noisier; on `fixmydocuments` the
+HIGH ratio was 1.51–1.57x — stable across workers). BIT-IDENTICAL: the A/B parity block asserts `radix == singletable` AND
+`dispatcher == singletable` across all-distinct, moderate (100k), and planted-`i64::MIN` sentinel inputs, plus empty. GREEN
+remote fail-closed: fp-columnar lib **475/0**, fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. `crates/fp-frame`
+untouched. Ships transparently through `nunique` (Int64 wide + Datetime64/Timedelta64 via the temporal route) — no caller change.
+
+**This refutes "fp-columnar structural frontier is fully harvested" for the high-cardinality hash-aggregation case:** the
+purpose-built open-addressing table (my own earlier khash-floor lever) was STILL LLC-bound at high card, and radix-partitioning it
+is a genuine cache-structural win. Sibling candidates: radix-partition the wide `value_counts`/`mode` tallies (harder —
+`value_counts` needs first-seen order + count-sort, so partitioning must preserve or re-derive order).

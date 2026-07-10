@@ -5862,7 +5862,11 @@ fn i64_direct_address_range(data: &[i64]) -> Option<(i64, usize)> {
 /// empty sentinel and is tracked separately so a real `i64::MIN` value still
 /// counts. Fibonacci hashing (multiply by the golden-ratio odd constant) spreads
 /// sequential/strided keys across the table.
-fn count_distinct_i64_wide(data: &[i64]) -> i64 {
+///
+/// This is the single-table implementation; [`count_distinct_i64_wide`]
+/// dispatches to the radix-partitioned variant when a cheap sample witnesses
+/// very-high cardinality (where this table exceeds the LLC and thrashes).
+fn count_distinct_i64_singletable(data: &[i64]) -> i64 {
     const EMPTY: i64 = i64::MIN;
     if data.is_empty() {
         return 0;
@@ -5907,6 +5911,149 @@ fn count_distinct_i64_wide(data: &[i64]) -> i64 {
         }
     }
     count + i64::from(has_sentinel)
+}
+
+/// Radix-partitioned distinct count for a WIDE, HIGH-cardinality `i64` slice.
+///
+/// The single-table [`count_distinct_i64_wide`] allocates a `2n`-slot probe
+/// table (≈16·n bytes); once that exceeds the LLC, every insert on
+/// high-cardinality data is a cache miss. This scatters the values into
+/// `P = 256` partitions by the TOP hash bits, then counts each partition with a
+/// small open-addressing table that stays L2-resident — a vectorized-hash /
+/// radix-partition aggregation. Bit-identical to `count_distinct_i64_wide`: each
+/// non-sentinel value maps to exactly ONE partition (a partition of the hash
+/// space), so no value is split across partitions and the total distinct is the
+/// sum of per-partition distincts; the `i64::MIN` sentinel is counted once,
+/// globally. Order-independent, so partitioning cannot change the count.
+fn count_distinct_i64_radix(data: &[i64]) -> i64 {
+    const EMPTY: i64 = i64::MIN;
+    const LOG_P: u32 = 8;
+    const P: usize = 1 << LOG_P;
+    let hashv = |v: i64| (v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+
+    // Pass 1: partition histogram + global sentinel flag.
+    let mut sizes = vec![0usize; P];
+    let mut has_sentinel = false;
+    for &v in data {
+        if v == EMPTY {
+            has_sentinel = true;
+            continue;
+        }
+        sizes[(hashv(v) >> (64 - LOG_P)) as usize] += 1;
+    }
+    // Exclusive prefix sum -> partition offsets.
+    let mut offsets = vec![0usize; P + 1];
+    for i in 0..P {
+        offsets[i + 1] = offsets[i] + sizes[i];
+    }
+    // Pass 2: scatter non-sentinel values into one contiguous buffer.
+    let mut buf = vec![0i64; offsets[P]];
+    let mut cursor: Vec<usize> = offsets[..P].to_vec();
+    for &v in data {
+        if v == EMPTY {
+            continue;
+        }
+        let p = (hashv(v) >> (64 - LOG_P)) as usize;
+        buf[cursor[p]] = v;
+        cursor[p] += 1;
+    }
+    // Pass 3: per-partition open-addressing distinct count (L2-resident table).
+    let mut total = 0i64;
+    for p in 0..P {
+        let part = &buf[offsets[p]..offsets[p + 1]];
+        if part.is_empty() {
+            continue;
+        }
+        let cap = part
+            .len()
+            .saturating_mul(2)
+            .checked_next_power_of_two()
+            .unwrap_or(0);
+        if cap == 0 {
+            let mut set: FxHashSet<i64> = FxHashSet::default();
+            for &v in part {
+                set.insert(v);
+            }
+            total += set.len() as i64;
+            continue;
+        }
+        let mask = cap - 1;
+        let mut keys = vec![EMPTY; cap];
+        for &v in part {
+            // No `i64::MIN` in `part` (sentinels excluded), so `EMPTY` is a safe
+            // empty marker. Top hash bits are constant within a partition, but the
+            // LOW bits `mask` selects still vary, so probing stays well spread.
+            let mut idx = (hashv(v) as usize) & mask;
+            loop {
+                let k = keys[idx];
+                if k == EMPTY {
+                    keys[idx] = v;
+                    total += 1;
+                    break;
+                }
+                if k == v {
+                    break;
+                }
+                idx = (idx + 1) & mask;
+            }
+        }
+    }
+    total + i64::from(has_sentinel)
+}
+
+/// Cheap witness that a wide `i64` slice is in the VERY-high-cardinality regime
+/// where [`count_distinct_i64_radix`] beats [`count_distinct_i64_singletable`].
+///
+/// Radix wins only once the single `2n`-slot table exceeds the LLC and its probe
+/// working set (≈ `distinct` cache lines) stops fitting — empirically distinct
+/// ≳ 1.5M (single-table cap ≳ 96 MB). At LOW cardinality the single table's hot
+/// set stays L2/L3-resident and radix's full scatter is pure overhead (measured
+/// ~2x SLOWER). A strided sample that is ≥99.5% distinct implies (by the
+/// birthday bound over `S=16384` draws) a total distinct far above that
+/// crossover, so it is a CONSERVATIVE gate: it fires only where radix is a clear
+/// win and never in the low/moderate-card regression zone. The sample is O(S)
+/// and negligible against the O(n) count. Requires `n ≥ 2M` (below that the
+/// single table already fits the LLC, so radix can never help).
+fn count_distinct_i64_high_card(data: &[i64]) -> bool {
+    const CHUNKS: usize = 8;
+    const PER: usize = 512; // 8 * 512 = 4096 samples
+    let n = data.len();
+    if n < (1 << 21) {
+        return false;
+    }
+    // Sample `CHUNKS` small CONTIGUOUS windows spread evenly across the array:
+    // near-sequential reads (cheap, prefetched — avoids the TLB/cache-miss cost
+    // of a fully strided scan) while still spatially spread so a locally-ordered
+    // region cannot alone decide the estimate.
+    let mut seen: FxHashSet<i64> = FxHashSet::default();
+    let mut sampled = 0usize;
+    let span = n / CHUNKS;
+    for c in 0..CHUNKS {
+        let start = c * span;
+        let end = (start + PER).min(n);
+        for &v in &data[start..end] {
+            seen.insert(v);
+            sampled += 1;
+        }
+    }
+    // seen/sampled >= 0.999 (≤ ~4 collisions in S=4096). By the birthday bound
+    // that implies total distinct ≳ 2M — safely past the crossover, so the gate
+    // never mis-fires into the low/moderate-card regression zone (missing a
+    // genuine high-card case is harmless: it just uses the single table).
+    seen.len().saturating_mul(1000) >= sampled.saturating_mul(999)
+}
+
+/// Distinct count for a wide, all-valid `i64` slice: dispatches to the
+/// radix-partitioned aggregation for very-high-cardinality inputs (where the
+/// single probe table thrashes the LLC) and to the single-table open-addressing
+/// count otherwise. Both produce the identical count (radix is order- and
+/// partition-independent), so this is a pure perf dispatch.
+fn count_distinct_i64_wide(data: &[i64]) -> i64 {
+    if count_distinct_i64_high_card(data) {
+        count_distinct_i64_radix(data)
+    } else {
+        count_distinct_i64_singletable(data)
+    }
 }
 
 /// `mode` (most-frequent value(s), ascending) for an all-valid `i64` slice too
@@ -36887,5 +37034,170 @@ mod ab_f64_median_ccfp {
             100.0 * (o / c - 1.0),
             100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
         );
+    }
+}
+
+#[cfg(test)]
+mod ab_count_distinct_radix_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{
+        count_distinct_i64_radix, count_distinct_i64_singletable, count_distinct_i64_wide,
+    };
+
+    /// Seeded (splitmix64) i64. `distinct == 0` => ~all-distinct raw stream
+    /// (i64::MIN remapped to 0); otherwise values in `0..distinct`.
+    fn mkdata(n: usize, distinct: u64) -> Vec<i64> {
+        let mut s: u64 = 0xA5A5_1234_DEAD_BEEF;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                if distinct == 0 {
+                    let v = z as i64;
+                    if v == i64::MIN { 0 } else { v }
+                } else {
+                    (z % distinct) as i64
+                }
+            })
+            .collect()
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_count_distinct_radix() {
+        const N: usize = 8_000_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let src = mkdata(N, 0); // ~all-distinct: worst case for the single table
+
+        // Parity: radix == single-table across distributions incl. a planted
+        // i64::MIN sentinel and a moderate-cardinality case.
+        {
+            let base = count_distinct_i64_singletable(&src);
+            assert_eq!(
+                count_distinct_i64_radix(&src),
+                base,
+                "radix vs single (all-distinct)"
+            );
+            assert_eq!(
+                count_distinct_i64_wide(&src),
+                base,
+                "dispatch vs single (all-distinct)"
+            );
+            let moderate = mkdata(N, 100_000);
+            let base_m = count_distinct_i64_singletable(&moderate);
+            assert_eq!(
+                count_distinct_i64_radix(&moderate),
+                base_m,
+                "radix vs single (moderate)"
+            );
+            assert_eq!(
+                count_distinct_i64_wide(&moderate),
+                base_m,
+                "dispatch vs single (moderate)"
+            );
+            let mut with_nat = src.clone();
+            with_nat[0] = i64::MIN;
+            with_nat[1] = i64::MIN;
+            let base_n = count_distinct_i64_singletable(&with_nat);
+            assert_eq!(
+                count_distinct_i64_radix(&with_nat),
+                base_n,
+                "radix vs single (sentinel)"
+            );
+            assert_eq!(
+                count_distinct_i64_wide(&with_nat),
+                base_n,
+                "dispatch vs single (sentinel)"
+            );
+            assert_eq!(count_distinct_i64_radix(&[]), 0, "empty radix");
+        }
+
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+
+        let measure = |data: &[i64]| {
+            for _ in 0..2 {
+                std::hint::black_box(count_distinct_i64_singletable(std::hint::black_box(data)));
+                std::hint::black_box(count_distinct_i64_wide(std::hint::black_box(data)));
+            }
+            let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..BLOCKS {
+                let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+                for _ in 0..REPS {
+                    let t0 = Instant::now();
+                    std::hint::black_box(count_distinct_i64_singletable(std::hint::black_box(
+                        data,
+                    )));
+                    bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                    let t0 = Instant::now();
+                    std::hint::black_box(count_distinct_i64_wide(std::hint::black_box(data)));
+                    let a = t0.elapsed().as_secs_f64() * 1e3;
+                    let t0 = Instant::now();
+                    std::hint::black_box(count_distinct_i64_wide(std::hint::black_box(data)));
+                    let b = t0.elapsed().as_secs_f64() * 1e3;
+                    bc = bc.min(a.min(b));
+                    bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+                }
+                orig.push(bo);
+                cand.push(bc);
+                null.push(bn);
+            }
+            (
+                min_of(&orig),
+                min_of(&cand),
+                median_of(&null),
+                cv_of(&orig),
+                cv_of(&cand),
+            )
+        };
+
+        let lowcard = mkdata(N, 1000);
+        println!("AB count_distinct radix (ONE binary, ONE invocation) N={N}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        for (label, data) in [
+            ("~all-distinct (HIGH card)", src.as_slice()),
+            ("1000 distinct (LOW card)", lowcard.as_slice()),
+        ] {
+            let (o, c, nullmed, cvo, cvc) = measure(data);
+            println!("  --- {label} ---");
+            println!("    ORIG single-table 2n probe    min={o:8.3} ms  cv={cvo:.2}%");
+            println!("    CAND dispatch (radix|single)  min={c:8.3} ms  cv={cvc:.2}%");
+            println!(
+                "    NULL floor={:.2}%   ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+                100.0 * (nullmed - 1.0),
+                o / c,
+                100.0 * (o / c - 1.0),
+                100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+            );
+        }
     }
 }

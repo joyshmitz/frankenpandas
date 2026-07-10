@@ -12147,3 +12147,32 @@ for "how much of the per-column access cost was pure `Scalar` boxing".
    bench already executed; a materializing bench appends work *after* their code and only dilutes each lever. The two rows
    invalidated on 2026-07-10 stay invalid for the recorded reasons — a cross-worker ratio (68.78 ms on `hz2` / 111.94 ms on
    `vmi1149989`) and a missing timing vector — not for want of materialization. Both stay REOPENED, now with the ceiling above.
+
+### 2026-07-10 cod_fp — sorted-insert materializing rerun attempt 2 INVALID (candidate CV + missing perf); no verdict
+
+Ledger-grep of attempt 1 came first. This retry kept the same literal historical sorted sequential `BTreeMap::insert`
+candidate and the same fully materializing 100,000 x 10 observer, but changed only the estimator: 15 AB/BA-alternating
+blocks with four complete calls batched inside every arm sample. The nested candidate profile now runs before the CV
+assertion. Both arms still consume all 1,000,000 values, black-box input and result, and include output destruction.
+
+Bounded fail-closed command (no local Cargo fallback):
+
+`timeout 600s sh -c 'RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR RUSTFLAGS="-C force-frame-pointers=yes" rch exec -- cargo test -p fp-frame --profile release-perf --lib transpose_reject_reaudit_cod_fp::audit_sorted_insert_materialized_cod_fp -- --ignored --exact --nocapture --test-threads=1'`
+
+RCH selected **`hz2`**; test hostname **`hetzner2`**; release-perf test-binary SHA-256
+**`5e14fcee12708464eacf530eb17f7944ebf041ee592b61e4f67fac91dd009e5b`**. Observable parity passed before timing.
+
+| arm | median | p95 | cv_pct | candidate profile self-time |
+| --- | ---: | ---: | ---: | ---: |
+| ORIG lexical bulk `collect()` | 30.002311 ms | 34.835276 ms | **4.5392%** | n/a |
+| candidate sequential `insert()` | 52.512867 ms | 61.403818 ms | **6.5658%** | **UNMEASURED: `perf` absent on `hz2`** |
+
+Raw ORIG ms: `[30.37865025, 29.325775, 29.800875, 29.717022, 29.7982525, 30.88235475, 30.37224525, 29.630269000000002, 31.116228749999998, 29.491736, 34.83527575, 31.868571999999997, 31.892692, 30.00231075, 29.584229]`.
+
+Raw candidate ms: `[58.245616, 61.40381825, 50.604038499999994, 50.988795, 53.263318, 52.8375915, 51.79791625, 52.374103999999996, 51.605520250000005, 53.325296, 61.21866475, 53.357421, 52.51286725, 50.56890325, 50.4664025]`.
+
+The directional ORIG/candidate ratio is **0.571333x**, but this remains **INVALID**, neither WIN nor REJECT: candidate CV
+exceeds the mandatory 5% gate and the worker failed the profile-integrity gate before producing any candidate self-time:
+`perf must be installed on the RCH worker: Os { code: 2, kind: NotFound }`. The process exit was 101 after a finishable
+333.845 s remote build/run. Retry condition: a fail-closed RCH worker with `perf` installed plus a longer robust paired
+estimator that brings both arms below 5%; only then may the historical reject be restored.

@@ -17508,6 +17508,26 @@ impl Column {
             };
             return Some(radix_argsort_u64(&keys));
         }
+        // Datetime64 / Timedelta64 store i64 nanoseconds that sort identically to
+        // Int64, so route them through the same radix. Gated on all-valid + no NAT:
+        // the NAT sentinel is `i64::MIN`, which the radix would sort FIRST but the
+        // `Scalar` na-last comparator sorts LAST, so any NAT-bearing column stays on
+        // the Scalar route. For all-valid, no-NAT input the stable ascending-i64
+        // permutation is bit-identical to the `Scalar` comparison sort (the same
+        // guarantee the Int64 branch above already relies on).
+        if self.validity.all()
+            && let Some(data) = self
+                .as_datetime64_slice()
+                .or_else(|| self.as_timedelta64_slice())
+            && !data.contains(&i64::MIN)
+        {
+            let keys: Vec<u64> = if ascending {
+                data.iter().map(|&v| i64_radix_key(v)).collect()
+            } else {
+                data.iter().map(|&v| !i64_radix_key(v)).collect()
+            };
+            return Some(radix_argsort_u64(&keys));
+        }
         None
     }
 
@@ -33732,6 +33752,144 @@ mod ab_transpose_row_typed_ccfp {
             cv_of(&orig) < 5.0,
             cv_of(&null) < 5.0,
             cv_of(&cand) < 5.0
+        );
+    }
+}
+
+/// A/B for routing all-valid, NaT-free Datetime64/Timedelta64 argsort through the
+/// i64 radix instead of the generic `Scalar` na-last comparison sort (cc_fp).
+/// ORIG = the exact generic path (materialize `Scalar`s, stable `sort_by`), kept
+/// here as a bench-only reference so both arms live in ONE binary; CAND = the new
+/// `argsort_with` radix path. Interleaved in a single measured routine with a
+/// per-arm adjacent A/A null control; gate on median vs the null floor.
+///
+/// Run: `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+///        cargo test -p fp-columnar --release --lib -- --ignored --nocapture ab_temporal_argsort`
+#[cfg(test)]
+mod ab_temporal_argsort_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use fp_types::Scalar;
+
+    use super::{Column, compare_scalars_na_last};
+
+    // Byte-for-byte the generic argsort tail (lib.rs ~17627): the path a Datetime64
+    // column took before the radix branch. Reference arm only.
+    fn argsort_scalar_ref(col: &Column, ascending: bool) -> Vec<usize> {
+        let vals = col.values();
+        let mut indexed: Vec<(usize, &Scalar)> = vals.iter().enumerate().collect();
+        indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, ascending));
+        indexed.into_iter().map(|(i, _)| i).collect()
+    }
+
+    // Deterministic splitmix, no rand dep; nanos kept well away from i64::MIN (NaT).
+    fn nanos(n: usize) -> Vec<i64> {
+        let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                // base 2000-01-01 + up to ~50 years of jitter; always > i64::MIN
+                946_684_800_000_000_000_i64.wrapping_add((z % 1_600_000_000_000_000_000) as i64)
+            })
+            .collect()
+    }
+
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_temporal_argsort() {
+        const N: usize = 1_000_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let col = Column::from_datetime64_values(nanos(N));
+
+        // Parity in this same binary: radix perm must equal the Scalar-sort perm.
+        for asc in [true, false] {
+            assert_eq!(
+                argsort_scalar_ref(&col, asc),
+                col.argsort_with(asc),
+                "radix argsort diverged from the Scalar path (ascending={asc})"
+            );
+        }
+
+        for _ in 0..2 {
+            std::hint::black_box(argsort_scalar_ref(std::hint::black_box(&col), true));
+            std::hint::black_box(col.argsort_with(true));
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let c = std::hint::black_box(&col);
+                let t0 = Instant::now();
+                std::hint::black_box(argsort_scalar_ref(c, true));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                // CAND adjacent A/A -> its own null floor
+                let t0 = Instant::now();
+                std::hint::black_box(c.argsort_with(true));
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let t0 = Instant::now();
+                std::hint::black_box(c.argsort_with(true));
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        println!("AB temporal argsort (ONE binary, ONE invocation) N={N}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG Scalar-sort  min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND i64-radix    min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        let nullmed = median_of(&null);
+        println!(
+            "  NULL-CONTROL (CAND A/A) median ratio={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
         );
     }
 }

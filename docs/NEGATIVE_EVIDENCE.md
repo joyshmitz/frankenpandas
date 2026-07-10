@@ -13129,3 +13129,44 @@ exhaustive probe and the affine box were experimental and reverted; tree at HEAD
 columnar footprint work is the structural epic above; further columnar CPU work needs a fresh profile (blocked: no local
 `fp-bench` binary). The higher-leverage open item remains the AVX2 build decision (repo-owner scope). Surfacing rather than
 forcing a no-op or corrupted ship.
+
+### 2026-07-10 cc_fp — WIN: Datetime64/Timedelta64 argsort/sort_values routed through the i64 radix — 8.363x fp-side, bit-identical (cv<5%, null floor 0.80%)
+
+Fresh columnar operation after the enum-shrink dead-end. Profile-by-code (no fresh samply under the freeze): `Column::argsort_with`
+routes all-valid Int64 and Float64 through a comparison-free radix (`typed_radix_perm`), and all-valid Utf8 through an MSD byte
+radix, but **Datetime64/Timedelta64 fell through to the generic `Scalar` na-last comparison sort** — because `as_i64_slice()`
+gates on `dtype == Int64`, so the i64-backed temporal dtypes never reached the radix. This is the recurring "typed fast path
+for Int64/Float64 but not the i64-backed temporal sibling" gap, and Datetime64/Timedelta64 nanoseconds sort *identically* to
+i64.
+
+LEVER (one branch in `typed_radix_perm`): for `validity.all()` Datetime64/Timedelta64 columns with **no NAT sentinel**
+(`i64::MIN`), build the same `i64_radix_key` keys and call the existing `radix_argsort_u64`. Gated on no-NAT because NAT is
+`i64::MIN`, which the radix sorts FIRST but the `Scalar` na-last comparator sorts LAST; any NAT-bearing or nullable column stays
+on the Scalar route. For all-valid, no-NAT input the stable ascending-i64 permutation is bit-identical to the Scalar sort —
+the exact guarantee the Int64 branch already relies on (both stable, `i64_radix_key` is a monotone transform of i64).
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG generic-Scalar-sort reference fn vs CAND radix path
+interleaved in one routine, per-arm adjacent A/A null control, `black_box` in+out; 1M random Datetime64 nanos):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `104c6b0ee8c68765f40fa009dba7ea3b642a082746844de88e266f2233dd3588` |
+| worker | `hetzner2` (rch `hz2`) |
+| ORIG `Scalar` na-last sort | 253.124 ms (cv 2.69%) |
+| CAND i64 radix | 30.266 ms (cv 3.60%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0080x -> 0.80% floor** |
+| **fp-side ratio (ORIG/CAND)** | **8.363x (+736.3%) — DECIDABLE (736% >> 0.80% floor)** |
+
+BIT-IDENTICAL: the A/B asserts `argsort_scalar_ref(col) == col.argsort_with(col)` for BOTH ascending and descending on the 1M
+column before timing; and the change is bit-identical by construction (monotone key, stable radix, NAT/null excluded). GREEN
+remote fail-closed: fp-columnar **475/0**, fp-frame lib **3133/0** (Series/DataFrame datetime sort), fp-conformance **2048/0**
+(sort_values packets). `rustfmt --check` clean; clippy clean in the changed hunks. No local build. `crates/fp-frame` untouched.
+
+SCOPE: benefits `Column::argsort_with` / `sort_values` and every consumer — `Series.sort_values`, `DataFrame.sort_values` on a
+Datetime64/Timedelta64 column, `sort_index` on a DatetimeIndex-backed frame, groupby-by-time ordering, etc. Period columns are
+untouched (they don't go through `as_datetime64/timedelta64_slice`). NAT-bearing / nullable temporal columns keep the exact
+Scalar path (na-last semantics preserved). Permanent A/B `ab_temporal_argsort_ccfp` left in-tree as the regression instrument.
+
+The recurring lesson holds: the biggest clean columnar wins in this codebase are still "an i64/f64 typed fast path exists but
+its i64-backed temporal sibling was left on the Scalar route." Datetime64/Timedelta64 argsort was one such; worth re-scanning
+other typed fast paths (`typed_radix_keys`, reductions, take/gather) for the same temporal gap.

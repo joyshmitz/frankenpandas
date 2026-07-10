@@ -20938,6 +20938,34 @@ impl Column {
         if let Some(data) = self.as_i64_slice() {
             return Ok(value_counts_i64_typed(data, normalize, sort, ascending));
         }
+        // Datetime64 / Timedelta64 (i64-ns): an all-valid, no-NAT column reuses the
+        // typed i64 tally, then re-tags the distinct-VALUES column as the temporal
+        // dtype (counts are dtype-independent). Bit-identical to the generic path:
+        // the i64 tally has the same first-seen order + count-sort tie-break, and
+        // `set_member_key` keys a temporal Scalar by its ns, so the distinct set +
+        // counts match; only the values column's dtype tag differs, which the
+        // re-wrap restores. NaT (`i64::MIN`) / nullable falls through (the generic
+        // path drops missing per `dropna`).
+        if !self.has_nulls() {
+            if let Some(data) = self.as_datetime64_slice()
+                && !data.contains(&i64::MIN)
+            {
+                let (values, counts) = value_counts_i64_typed(data, normalize, sort, ascending);
+                let ns = values.as_i64_slice().expect("typed i64 values").to_vec();
+                return Ok((Column::from_datetime64_values(ns), counts));
+            }
+            if let Some(data) = self.as_timedelta64_slice()
+                && !data.contains(&i64::MIN)
+            {
+                let (values, counts) = value_counts_i64_typed(data, normalize, sort, ascending);
+                let ns = values.as_i64_slice().expect("typed i64 values").to_vec();
+                let len = ns.len();
+                return Ok((
+                    Column::from_timedelta64_values_with_validity(ns, ValidityMask::all_valid(len)),
+                    counts,
+                ));
+            }
+        }
 
         // O(N) tally: a `set_member_key`-keyed hash map gives O(1) lookup
         // instead of the old O(distinct) linear `counts.iter().find(semantic_eq)`
@@ -34231,6 +34259,150 @@ mod ab_timedelta_sum_ccfp {
         );
         println!(
             "  CAND i128-fold            min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+/// A/B for routing all-valid, NaT-free Datetime64/Timedelta64 value_counts through
+/// the typed i64 tally (`value_counts_i64_typed`) + a re-tag, instead of the generic
+/// `set_member_key` Scalar tally (cc_fp). Parity is proven against the Int64-column
+/// value_counts (which shares `value_counts_i64_typed`, documented bit-identical to
+/// the generic path) — same counts, same distinct nanos. ORIG timing forces the
+/// generic path by planting one NAT sentinel (my branch's `!contains(i64::MIN)` gate
+/// skips it); the one dropped value is negligible for timing. Median gate, per-arm
+/// adjacent A/A null control.
+#[cfg(test)]
+mod ab_temporal_value_counts_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::Column;
+
+    fn nanos(n: usize, distinct: i64) -> Vec<i64> {
+        let mut s: u64 = 0x7C15_9E37_79B9_4F6C;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                946_684_800_000_000_000_i64 + (z % distinct as u64) as i64
+            })
+            .collect()
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_temporal_value_counts() {
+        const N: usize = 2_000_000;
+        const DISTINCT: i64 = 50_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let src = nanos(N, DISTINCT);
+
+        // Parity: the fast path's (values, counts) equals the Int64-column tally
+        // (both go through value_counts_i64_typed), re-tagged to Datetime64.
+        {
+            let dt = Column::from_datetime64_values(src.clone());
+            let (dv, dc) = dt.value_counts().expect("dt value_counts");
+            let iv = Column::from_i64_values_owned(src.clone());
+            let (ev, ec) = iv.value_counts().expect("i64 value_counts");
+            assert_eq!(dc.values(), ec.values(), "counts diverged");
+            assert_eq!(
+                dv.as_datetime64_slice().expect("dt values"),
+                ev.as_i64_slice().expect("i64 values"),
+                "distinct nanos diverged"
+            );
+        }
+
+        // ORIG timing column: plant one NAT so the fast path's no-NAT gate skips it
+        // -> generic set_member_key path. CAND: all-valid -> fast path.
+        let mut src_orig = src.clone();
+        src_orig[0] = i64::MIN;
+
+        for _ in 0..2 {
+            std::hint::black_box(
+                Column::from_datetime64_values(src_orig.clone())
+                    .value_counts()
+                    .unwrap(),
+            );
+            std::hint::black_box(
+                Column::from_datetime64_values(src.clone())
+                    .value_counts()
+                    .unwrap(),
+            );
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = Column::from_datetime64_values(src_orig.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&co).value_counts().unwrap());
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = Column::from_datetime64_values(src.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).value_counts().unwrap());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = Column::from_datetime64_values(src.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).value_counts().unwrap());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB temporal value_counts (ONE binary, ONE invocation) N={N} distinct={DISTINCT}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic set_member_key  min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND i64 tally + re-tag      min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

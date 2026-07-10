@@ -13260,3 +13260,43 @@ sibling materialized `Scalar`s through `nan*`. Remaining un-scanned reductions w
 (temporal sort — could reuse the new argsort radix), `std`/`var`/`sem` (Timedelta64), `value_counts`/`unique` (Timedelta64;
 Datetime64 unique already fast). Datetime64 `mean` also reaches `nanmean`'s lossy `to_f64` catch-all (no Datetime64 arm) — a
 likely precision bug like min/max, worth a scan.
+
+### 2026-07-10 cc_fp — WIN: Datetime64/Timedelta64 value_counts via typed i64 tally + re-tag — 15.2x fp-side, bit-identical
+
+Fourth temporal lever (after argsort 8.36x, min/max 35.4x, sum/mean 27.0x). `Column::value_counts_with_options` has a typed
+Int64 fast path (`value_counts_i64_typed`) but NEITHER Datetime64 nor Timedelta64 — both fell to the generic `set_member_key`
+Scalar tally (materialize `Scalar` Vec + hash-map count + sort). value_counts of dates/timestamps is common.
+
+LEVER (one branch): for `!has_nulls()`, no-NAT (`i64::MIN`) Datetime64/Timedelta64, run the SAME `value_counts_i64_typed` over
+the raw nanos, then re-tag the distinct-VALUES column as the temporal dtype (counts are dtype-independent). Bit-identical: the
+i64 tally has the same first-seen order + count-sort tie-break as the generic path (the Int64 fast path already relies on this
+equivalence), and `set_member_key` keys a temporal Scalar by its ns, so the distinct set + counts match — only the values
+column's dtype tag differs, which the re-wrap restores. NAT / nullable falls through (generic drops missing per `dropna`).
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG generic path vs CAND fast path interleaved, per-arm
+adjacent A/A null control; 2M nanos, 50k distinct; ORIG timing forces the generic path by planting one NAT sentinel that the
+CAND gate skips — one dropped value, negligible for timing):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `c51089c5670986ea05b87c75e9c4e2cd4569563e74d19c3d9271c923ced968ca` |
+| worker | `vmi1167313` |
+| ORIG generic `set_member_key` | 178.976 ms (cv **15.18%**) |
+| CAND typed i64 tally + re-tag | 11.808 ms (cv 4.51%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0339x -> 3.39% floor** |
+| **fp-side ratio (min-of-blocks)** | **15.157x (+1415.7%) — DECIDABLE (1415% >> 3.39% floor)** |
+
+⚠️ ORIG cv is 15.18% (the generic path allocates a 50k-entry hash map + `Vec<(Scalar,usize)>` + sort per call — inherently
+noisy); the min-of-blocks is the reported statistic and the 15x effect dwarfs that variance, so the verdict is robust despite
+the noisy ORIG arm. BIT-IDENTICAL: the A/B asserts the fast path's `(values, counts)` equals the Int64-column value_counts
+(same `value_counts_i64_typed`) — counts columns equal AND distinct nanos equal — before timing. GREEN remote fail-closed:
+fp-conformance **2048/0** (temporal value_counts matches the pandas oracle), fp-columnar **475/0**, fp-frame lib **3133/0**.
+`rustfmt --check` clean; clippy clean in the changed hunks. No local build. `crates/fp-frame` untouched.
+
+SCOPE: `Column::value_counts` and consumers — `Series.value_counts()`, `DataFrame` value-count paths on temporal columns.
+Permanent A/B `ab_temporal_value_counts_ccfp`.
+
+**TEMPORAL VEIN THIS SESSION (all cc_fp): argsort 8.36x, min/max 35.4x (+precision fix), sum/mean 27.0x, value_counts 15.2x.**
+Remaining same-shape: `unique` Timedelta64 (Datetime64 done); `median`/`quantile` (nanmedian converts temporal via f64 — a
+likely precision issue AND a perf gap); `std`/`var`/`sem` Timedelta64 (dtype-output rules need care); Datetime64 `mean`
+(nanmean lossy `to_f64` catch-all — precision bug like min/max).

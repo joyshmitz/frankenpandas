@@ -12730,3 +12730,55 @@ no production code. GREEN remote fail-closed: fp-columnar **475/0** (`vmi1149989
 gap, and no amount of source-level kernel work can close them while the build is SSE2 on AVX2 hardware. This is orthogonal to
 and higher-leverage than per-op levers — but on THIS repo it is gated behind a `forbid(unsafe_code)` + portability +
 multi-agent-safety decision that only the repo owner can make. Confirmed, sized, surfaced; not unilaterally actioned.
+
+### 2026-07-10 cc_fp — WHICH kernels the AVX2 build fix would actually move: NOT the contiguous-Utf8 wins, NOT the transpose pair-copy (both already glibc-AVX / scalar). The win is NARROW: compute-bound transcendentals. Refines the "broad win" premise with evidence.
+
+The measurement of the fix is BLOCKED (previous entry: rch drops build flags — 3/3 attempts produced avx2=false binaries; rch
+has no worker pin; the checkout is SHARED so a `.cargo/config.toml` change would corrupt `cod_fp`'s concurrent A/Bs;
+`forbid(unsafe_code)` blocks runtime dispatch). So this is analysis from CAPTURED PROFILES + first principles, which is what
+the freeze allows and is enough to answer "would it move the Utf8 and numeric kernels?" — the answer is mostly NO, and
+precisely where YES.
+
+**KEY FACT the "widens 128->256 for free" premise misses: glibc's `memcpy`/`memmove`/`memcmp` are ALREADY AVX at runtime,
+independent of the Rust compile target.** glibc selects `__memmove_avx_unaligned_erms` / `__memcmp_avx2_movbe` via IFUNC at
+load time from the CPU's features. A binary compiled for SSE2 baseline STILL calls the AVX memcpy on an AVX2 box. So every
+byte-copy path is already 256-bit; recompiling with `+avx2` cannot speed a libc call.
+
+**APPLIED TO THE TWO KERNELS THE ASK CITED — neither benefits:**
+
+1. **The 312-byte `(String, Column)` transpose pair-copy: ALREADY AVX, no benefit.** The captured profile
+   `artifacts/perf/cod_fp_l4vzc_df_transpose_100k_proto_profile_report.txt` shows the 96% of construction that is copy+compare
+   is `__memmove_avx_unaligned_erms` (66.47% self) + `__memcmp_avx2_movbe` (30.10%) — glibc IFUNC AVX. The `Vec` push and
+   `BTreeMap` re-home move pairs via those libc routines, already 256-bit. `+avx2` does not touch them. (The pair-shrink lever
+   from two entries ago — 2.54x — works precisely because it moves FEWER bytes through the already-AVX memmove, not wider
+   ones.)
+
+2. **The contiguous-Utf8 wins (astype 25.77x, dt.date/dt.time, itoa): no benefit.** Two sub-costs, neither vectorizable by a
+   build flag: (a) the byte `extend_from_slice` copies go to glibc `__memcpy_avx` — already AVX; (b) the FORMATTING is
+   grisu float->decimal / hand-rolled itoa / `core::fmt` — recorded self-time for `astype_str_f64` this session was grisu
+   `format_shortest_opt` 5.34% + `format_shortest` 3.38% + `to_shortest_str` 0.88% + `core::fmt::write` 2.40% +
+   `CharSearcher::next_match` 2.90%: all SCALAR, BRANCHY Rust that does not autovectorize at any width. `+avx2` moves none of it.
+
+**WHERE `+avx2` DOES help — a NARROW, compute-bound set, exactly the ledger's existing losses:**
+
+- **Math-unary transcendentals: the real target.** `floor` 0.089x, `ceil` 0.11x, `trunc` 0.13x, `round(decimals)` 0.090x,
+  `sqrt` ~0.085x, `log` 0.20x (row ~5235). These lower to libm libcalls / scalar `sqrtsd` for want of `vroundpd` (SSE4.1) /
+  `vsqrtpd` (AVX) / SVML. They are EXPENSIVE per element (sqrt ~15-20 cyc, log ~40), so COMPUTE-bound, so 4-wide AVX gives a
+  real 2-4x. This is precisely where numpy's runtime AVX/SVML dispatch beats us 5-11x. **THIS family is the whole prize.**
+- **Cheap numeric reductions (sum/mean/comparison, i64-max): mostly BANDWIDTH-bound, marginal benefit.** Measured this
+  session: `sum(20M f64)` = 160 MB ran at **5.9 / 8.4 / 9.6 GB/s** across three workers — DRAM-streaming bandwidth, not
+  compute. AVX widens the `addpd`, but memory already gates the loop, so the gain is small. The i64-max "~1.7x" hope
+  (row ~788) is likely optimistic for the same reason; only in-cache working sets would show the full width.
+
+**VERDICT, refining the premise.** The AVX2 build fix is NOT a "broad win that reframes every pandas-vs-2.2.3 number." The
+byte-copy and format-bound Utf8/reshape/transpose paths — where most of this repo's WINS live — are already glibc-AVX or
+non-vectorizable, so they do not move. The fix reframes ONE family: the compute-bound math-unary transcendentals
+(floor/ceil/trunc/round/sqrt/log and friends), which are also this repo's clearest documented LOSSES vs numpy. That is a real
+and worthwhile target — but a bounded one, and it must be weighed against its costs: the 3 acosh/arccosh 1-ULP goldens flip
+under FMA contraction (row 92), the binary becomes non-portable (SIGILL off-AVX2), and portable runtime dispatch needs
+`unsafe`. Net: **do the AVX2 build ONLY if closing the math-unary transcendental gap vs numpy is worth those costs; do NOT
+expect it to move the Utf8 or transpose numbers.** That is the sharper input to the repo-owner decision.
+
+Analysis-only; no code change, no build (freeze). The permanent probes from the previous entry
+(`isa_baseline_probe_ccfp`, `isa_sum_kernel_ccfp`) remain the instruments to re-check on any worker. `crates/fp-frame`
+untouched — `cod_fp` is editing it live.

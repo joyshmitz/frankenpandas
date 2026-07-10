@@ -11892,3 +11892,69 @@ reject does not resurrect the lever — it only removes the sign that said "don'
 DEAD for the lane's named next frontier and fixed. The high invalid rate other repos report (frankenmermaid 4/4,
 franken_whisper, frankenredis, frankenfs) is **partially** reproduced here: 2 of 4, both traceable to the same root cause —
 a ratio taken across two `rch exec` invocations on different workers, which the substrate rule now forbids.
+
+### 2026-07-10 cc_fp — MEASURED: `df_transpose` hides 73.5% of transpose's true cost. The four rejects are NOT invalidated by it; the "wall" conclusion is RESCOPED to construction.
+
+Answering directly: *"with a bench that actually materializes, re-run the four transpose rejects; if they were benched on a
+path that never materialized they are INVALID and the wall conclusion is unsupported."* I measured it. **The hypothesis is
+half right and half wrong, and the half that is wrong matters.**
+
+**MEASUREMENT (substrate v2: ONE binary, ONE `rch exec` invocation, arms interleaved inside a single measured routine,
+`black_box` on inputs and results; fail-closed remote, worker `hz2`, no local build; default features = flag OFF = the
+shipped path; bounded, finishable 100k x 10 f64).** New permanent instrument
+`fp_frame::ab_transpose_materialize_ccfp` (`#[cfg(test)]`, `#[ignore]`d):
+
+| arm | min (7 blocks) | cv |
+| --- | ---: | ---: |
+| A — `transpose()` + `shape()` (**exactly what `df_transpose` benches**) | 14.440 ms | 5.44% |
+| B — `transpose()` + observe every value (**what a real consumer pays**) | 54.582 ms | 3.83% |
+| **DEFERRED (materialization) = B − A** | **40.141 ms** | — |
+
+> **`df_transpose` measures 26.5% of the true cost of `df.transpose()`. It HIDES 73.5%.**
+
+⚠️ Arm A's cv is **5.44%**, just over the 5% gate — disclosed, not hidden. The conclusion is insensitive: A would have to
+nearly quadruple to stop being a minority of B.
+
+**ROOT CAUSE (source, not inference).** Even on the DEFAULT eager path (`lazy-transpose-view` OFF),
+`push_lexical_transpose_row_entry` builds each output column via `Column::from_f64_transpose_row`, whose values are
+`ScalarValues::LazyAllValidFloat64TransposeRow` (fp-columnar:2744). So `transpose()` builds one `String` + one `Column` +
+one `BTreeMap` entry per source row and materializes **no value**. `df_transpose` then reads `shape()` and drops. The lazy
+value backing is not a `lazy-transpose-view` artifact — it is the default.
+
+**DO THE FOUR REJECTS FLIP? NO — and re-running them on the materializing bench cannot flip them.** Each targeted code that
+runs during CONSTRUCTION, which the old bench *does* execute:
+
+| lever | code it changed | executes in the old bench? | effect of a materializing bench |
+| --- | --- | --- | --- |
+| sorted sequential BTree insert | `BTreeMap::from_iter` → `insert()` | YES (memcmp/sort 30.10%, bulk_build 4.47% self) | adds 40 ms of unrelated work to BOTH arms ⇒ DILUTES the lever |
+| flattened pair-buffer morsels | parallel `Vec<(String,Column)>` build | YES (parity test passed; it is the construction loop) | same — dilutes |
+| all-valid owned row columns | per-row `Column` constructor | YES (but ~0% self-time; ceiling ~0%) | same — dilutes |
+| to_dict(index) BTreeMap row shards | a DIFFERENT op (`to_dict`), which materializes by definition | N/A — never used `df_transpose` | irrelevant |
+
+So **none of the four is a dead-code reject in the frankenmermaid sense** (where the auto-selector routed the input away from
+the changed code and barycenter self-time was 0.000%). Here the changed code is on the executed path; the materializing
+bench would only enlarge the denominator. **The two rows I invalidated on 2026-07-10 remain invalid for the reasons already
+recorded — a cross-worker ratio (68.78 ms on `hz2` ÷ 111.94 ms on `vmi1149989`) and a missing timing vector — not because
+of materialization.** They stay REOPENED.
+
+**BUT THE WALL CONCLUSION IS NOW RESCOPED, AND THAT IS THE REAL FINDING.** The ranked self-time table that supports
+"representation cardinality is the wall" (`__memmove` 33.79%, `__memcmp` 30.10%, BTree drop 8.59%, `bulk_build` 4.47%,
+`drop_in_place<BTreeMap>` 4.45%, `_fmt_inner` 4.38%, mimalloc 4.11%, `mi_free` 4.11%) was captured on a bench that exercises
+**only the 26.5% construction slice**. Therefore:
+
+- ✅ *"Representation cardinality is the wall **of transpose construction**"* — SUPPORTED, directly measured, unaffected by
+  the reject audit.
+- ❌ *"Representation cardinality is the wall **of transpose**"* — **UNSUPPORTED**. 73.5% of what a consumer pays is
+  materialization, and **no profile in this ledger has ever sampled it.**
+- ❌ cod_fp's *"There is no inner transpose-compute vein to optimize"* — true of construction only. The deferred 40.141 ms is
+  precisely inner transpose compute (lazy `ScalarValues` → `Scalar` per cell, 1M cells here), never profiled.
+
+**WHAT THIS OPENS (do not take on faith — profile `df_transpose_materialize` first).** The largest untouched cost in this
+lane is the lazy→`Scalar` materialization of the transposed cells, ~40 ms per 1M cells ≈ **40 ns/cell**, which for an
+all-valid dense f64 source ought to be a typed contiguous copy. That is a bigger prize than any construction lever yet tried
+and it is invisible to every benchmark that existed before `ffcd93014`. Next agent: run `fp-bench --workload
+df_transpose_materialize`, get the ranked frame table, and only then pick a lever.
+
+**METHOD NOTE.** This is the third time this session that the instrument, not the idea, was the thing that was wrong:
+`str op parallelism` (~1.00x, no self-time recorded — still suspect), the four transpose rejects (2 measured across workers),
+and now `df_transpose` itself (measures a quarter of its op). Before trusting ANY row, ask what the benchmark executes.

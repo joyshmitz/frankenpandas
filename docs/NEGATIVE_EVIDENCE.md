@@ -12783,6 +12783,46 @@ Analysis-only; no code change, no build (freeze). The permanent probes from the 
 (`isa_baseline_probe_ccfp`, `isa_sum_kernel_ccfp`) remain the instruments to re-check on any worker. `crates/fp-frame`
 untouched — `cod_fp` is editing it live.
 
+### 2026-07-10 cod_fp — direct indexed transpose slot attempt 1 INVALID; allocator carry-over poisons the candidate null control
+
+Ledger-grep and the ranked construction profile came first. The highest live frames still mapped to the already-mined
+eager `BTreeMap<String, Column>` cardinality family, so this attempt took the ledger's named next open primitive: a sparse
+paged `OnceLock<Box<Column>>` slot store behind `lazy-transpose-view`. Public `DataFrame::column(name)` can then build one
+typed output Column without owning one String, Column, and BTree node per source row. Exact eager parity for Float64,
+Int64, Bool, Datetime64, and Timedelta64 passed remotely before this timing run.
+
+Bounded fail-closed command (ONE binary, ONE RCH invocation, interleaved AB/BA, adjacent per-arm A/A first,
+`black_box` input and output):
+
+`timeout 900s sh -c 'RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fp-frame --profile release-perf --features lazy-transpose-view --lib transpose_reject_reaudit_cod_fp::audit_direct_indexed_lazy_slot_cod_fp -- --ignored --exact --nocapture --test-threads=1'`
+
+Provenance: worker and test hostname **`vmi1264463`**; binary SHA-256
+**`dc858d73b46ac2a053f48deaea8420e108e0490b34193e8e40e85d81431b5dbd`**; 100,000 x 10 Float64; 15 pairs.
+
+| arm | median | p95 | cv_pct | A/A null median | A/A floor |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ORIG `transpose().columns().get("50000")` | 119.177734 ms | 153.175997 ms | 9.5335% | 0.884466x | 31.0935% |
+| candidate `transpose().column("50000")` | 16.966320 ms | 39.145343 ms | 102.2307% | 2122.779171x | **536325.7504%** |
+
+Directional median ratio was **7.024371x** (+602.4371%), but it is deep inside the candidate function's own null floor and
+therefore is **INVALID — neither WIN nor REJECT**. Candidate profile integrity passed: the named
+`direct_indexed_lazy_slot_candidate_cod_fp` frame recorded **0.590000% flat self-time**. The ranked >=0.1% candidate profile
+was headed by unknown in-binary frames (9.43%, 6.26%, 4.59%), `DataFrame::transpose` (7.21%), paged-slot drop (7.11%),
+`DataFrame::transpose_view` (5.48%), per-page slot drop (5.20%), `cfree` (4.09%), `ScalarValues::clone` (3.11%), and
+`Once::call` (3.10%); the candidate sentinel itself was 0.59%.
+
+The defect is visible directly in the raw candidate vector:
+`[27.450302, 0.003546, 19.814550, 0.004559, 21.878223, 0.005039, 29.770411, 0.004769, 17.527755, 0.005038, 39.145343, 0.004869, 16.966320, 0.005190, 18.662632]` ms.
+Every candidate A/A pair likewise put a 17–39 ms first call beside a ~0.004–0.005 ms second call. The preceding full-map
+ORIG destroys 100,000 owned Columns/BTree nodes; deferred allocator reclamation is charged to the next allocating
+candidate, while its adjacent second call is clean. AB/BA alternation then reproduces the same expensive/cheap phase split.
+That is cross-arm allocator carry-over, not candidate work, and the null control correctly refuses a verdict.
+
+Retry condition: before timing either function, execute one untimed invocation of **that same function** to drain prior-arm
+allocator state, then time a short same-function batch and report the per-operation median samples. Keep adjacent A/A,
+interleaved AB/BA, the candidate-only profile, binary SHA, worker, CV, and per-function null median/floor unchanged. No code
+or performance verdict is landed from this attempt.
+
 ### 2026-07-10 cc_fp — DEAD-END MAP for the "attack the 312-byte pair" levers, with a reason per idea. The one real lever (shrink ScalarValues) is a sized epic, surfaced not rushed.
 
 Two orthogonal levers were requested: (A) take the transcendental AVX2 win, (B) attack the 312-byte pair via intern-String or

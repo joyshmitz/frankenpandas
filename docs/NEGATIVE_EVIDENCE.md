@@ -11761,3 +11761,72 @@ inputs, per v2b.
 **arg-extrema: NOTHING TO DO, closed.** `arg_axis1_names_parallel` (fp-frame ~66395) already builds per-thread
 `(bytes, offsets)` into `from_utf8_contiguous`, and its per-row work is `extend_from_slice` of a column NAME — there is
 no `Scalar` materialization and no `core::fmt` to remove. Verified by reading the body, not by trusting a summary.
+
+### 2026-07-10 cc_fp — REJECT (with attribution): DataFrame::stack per-row `to_string` -> hand-rolled itoa — 0.23% of df.stack(); ceiling ~1.002x
+
+Closes the PARK from the previous entry. Measured, not predicted. This is a REJECT written the way the ledger-integrity
+rule demands: with the self-time/ablation share of the code under test recorded in the row.
+
+**SUBSTRATE (v2-compliant).** ONE binary, ONE `rch exec` invocation, arms **interleaved inside a single measured
+routine** (alternate arm per rep — not two criterion group members, which run sequentially and do not cancel drift).
+`black_box` on **both inputs and results** (v2b), so neither arm can be DCE'd nor hoisted out of the rep loop.
+Fail-closed remote per the mandatory recipe:
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fp-frame --release --lib -- --ignored --nocapture ab_stack_label_itoa`
+→ rch log `Selected worker: vmi1152480 ... (4 slots remaining after reservation)`, trailer `[RCH] remote vmi1152480 (273.6s)`.
+No local build. Harness: `tests/artifacts/perf/cc_fp_stack_label_itoa_ablation.patch` (185 lines, `git apply --check`
+clean); it is `#[cfg(test)]`-only and does NOT modify `stack()`, so nothing shipped. Working tree left pristine.
+
+**EXERCISE / SELF-TIME CHECK — the code under test DOES execute with non-zero attributable time.** By ablation over the
+label-build range [0, 125_000) with Int64 labels (the `IndexLabel::Int64` arm is the only one taken):
+
+| arm | min (9 blocks) | cv |
+| --- | ---: | ---: |
+| ORIG `row_part.push_str(&v.to_string())` | 10.6705 ms | 29.91% |
+| CAND hand-rolled ASCII itoa | 9.6874 ms | 54.44% |
+| full `df.stack()` 1M x 10 (denominator) | 338.491 ms | 10.94% |
+
+Ablation delta = **0.983 ms per 125_000 rows** ≈ **7.9 ns/row** ≈ **9.2% of the label-build range's own time**. So the
+`to_string` is real, live, non-zero — this is NOT a dead-code reject. It is a *small-share* reject.
+
+**ATTRIBUTION (the number this row exists to record).** The label build is parallel; one worker handles
+`1M / 10 workers = 100_000` rows, so the wall-clock saving is the per-worker saving:
+`0.983 ms x (100_000/125_000) = 0.787 ms`. Against `df.stack()` = 338.491 ms:
+
+> **`to_string` share of `df.stack()` = 0.23%  ⇒  predicted end-to-end 1.002x.**
+
+**VERDICT: REJECT.** Do not implement hand-rolled itoa in `DataFrame::stack`'s label build. Ceiling ~0.2%, three orders
+below the keep gate.
+
+**HONESTY ON PRECISION, and why the verdict survives it.** The primitive arms' cv (29.91% / 54.44%) is far above the 5%
+gate, so **the 1.101x primitive ratio is NOT claimed** and must not be quoted. The REJECT does not depend on it: it
+depends on the SHARE, and the share is robust by sensitivity. Even if the true per-worker saving were **10x** the
+measured 0.787 ms, the share would be **2.3%** and the end-to-end **1.024x** — still a reject. Only a >40x error in the
+saving could reach a 10% gain, which the 7.9 ns/row figure (one `String` alloc + `core::fmt` + copy + drop) makes
+physically impossible.
+
+**WHY THE PRIOR WAS RIGHT AND WHY THAT DIDN'T MATTER.** The predicted small win was correct, but a prior is not
+evidence, and the previous entry deliberately wrote NO row without a number. This is what that discipline buys: the row
+now carries 0.23%, so nobody re-opens this in three weeks on the strength of "it's the same `core::fmt` tax we killed
+in dt.date". It is the same tax; it is 0.23% of this op instead of 42% of that one.
+
+**CROSS-WORKER NOTE (substrate rule).** `df.stack()` measured **338.491 ms** here (worker `vmi1152480`, `--release`)
+versus ~104 ms historically (local box, `release-perf`). Absolute times are NOT comparable across workers or profiles —
+only the in-invocation share is, which is exactly the quantity this row reports. Do not read 338 ms as a regression.
+
+---
+
+**THE Utf8-PRODUCER SWEEP IS NOW CLOSED.** Every producer the ledger names has a measured disposition:
+
+| producer | disposition | number |
+| --- | --- | --- |
+| `astype(str)` Float64 | ✅ WIN, landed `c8958e1fc` | 5.00x fp-side; 5.98x → **25.77x vs pandas** |
+| `dt.date` / `dt.time` | ✅ WIN, landed `b2e51f493` | 2.53x / 4.53x fp-side |
+| `MultiIndex::to_flat_index` | ✅ WIN, landed `0a02b89e6` | 1.437x shipped path (2.945x serial) |
+| arg-extrema (`arg_axis1_names_parallel`) | ✅ ALREADY DONE (BlackThrush 7.5x) | per-thread `(bytes, offsets)` → `from_utf8_contiguous`; no `Scalar`, no `core::fmt` to remove — verified by reading fp-frame:67045 |
+| `DataFrame::stack` label build | ❌ **REJECT (this row)** | `to_string` = **0.23%** of the op |
+
+The generalizable finding across all five: a contiguous buffer is necessary, not sufficient. After it lands, re-profile
+and ask what per-row DISPATCH survives — then ask what SHARE that dispatch owns. `dt.date` was 42% `core::fmt` and paid
+2.53x. `to_flat_index` was `core::fmt` in a loop with no other work, paid 2.945x serial, but only 1.437x once the
+existing parallelism had already hidden most of it. `stack` is the same tax at 0.23% and pays nothing. Same mechanism,
+three different magnitudes — which is why every one of them needed a measurement and not an analogy.

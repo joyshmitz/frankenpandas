@@ -1,8 +1,8 @@
 diff --git a/crates/fp-frame/src/lib.rs b/crates/fp-frame/src/lib.rs
-index 25e826d5f..f2cacd7ef 100644
+index 25e826d5f..1931523e6 100644
 --- a/crates/fp-frame/src/lib.rs
 +++ b/crates/fp-frame/src/lib.rs
-@@ -173739,3 +173739,174 @@ mod test_select_columns_perf_76e1fd {
+@@ -173739,3 +173739,180 @@ mod test_select_columns_perf_76e1fd {
          }
      }
  }
@@ -121,18 +121,23 @@ index 25e826d5f..f2cacd7ef 100644
 +
 +        // Single-worker row range, matching one thread's share of the parallel build.
 +        let (lo, hi) = (0usize, 125_000usize);
++        // substrate v2b: feed INPUTS through black_box as well as consuming the
++        // result through it, so LLVM can neither DCE the call nor hoist it out of
++        // the rep loop as loop-invariant.
 +        for _ in 0..2 {
-+            std::hint::black_box(orig_range(&labels, &col_names, lo, hi));
-+            std::hint::black_box(cand_range(&labels, &col_names, lo, hi));
++            let (l, n) = (std::hint::black_box(&labels), std::hint::black_box(&col_names));
++            std::hint::black_box(orig_range(l, n, std::hint::black_box(lo), std::hint::black_box(hi)));
++            std::hint::black_box(cand_range(l, n, std::hint::black_box(lo), std::hint::black_box(hi)));
 +        }
 +        let mut o = Vec::with_capacity(BLOCKS);
 +        let mut c = Vec::with_capacity(BLOCKS);
 +        for _ in 0..BLOCKS {
++            let (l, n) = (std::hint::black_box(&labels), std::hint::black_box(&col_names));
 +            let t = Instant::now();
-+            std::hint::black_box(orig_range(&labels, &col_names, lo, hi));
++            std::hint::black_box(orig_range(l, n, std::hint::black_box(lo), std::hint::black_box(hi)));
 +            o.push(t.elapsed().as_secs_f64() * 1e3);
 +            let t = Instant::now();
-+            std::hint::black_box(cand_range(&labels, &col_names, lo, hi));
++            std::hint::black_box(cand_range(l, n, std::hint::black_box(lo), std::hint::black_box(hi)));
 +            c.push(t.elapsed().as_secs_f64() * 1e3);
 +        }
 +        let (o_min, c_min) = (min_of(&o), min_of(&c));
@@ -150,8 +155,9 @@ index 25e826d5f..f2cacd7ef 100644
 +            .expect("frame");
 +        let mut s = Vec::with_capacity(5);
 +        for _ in 0..5 {
++            let d = std::hint::black_box(&df);
 +            let t = Instant::now();
-+            std::hint::black_box(df.stack().expect("stack"));
++            std::hint::black_box(d.stack().expect("stack"));
 +            s.push(t.elapsed().as_secs_f64() * 1e3);
 +        }
 +        let stack_min = min_of(&s);

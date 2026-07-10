@@ -12046,3 +12046,36 @@ their uncommitted work; my A/B harness (`ab_transpose_typed_materialize`) sits i
 should land with, or after, theirs. This commit touches ONLY `crates/fp-columnar/src/lib.rs` + this ledger. Agent-mail could
 not be used to announce it: reads work, but writes are refused by the corruption circuit breaker, and I will not run
 `am doctor repair` on a database shared with live agents.
+
+### 2026-07-10 cod_fp — sorted-insert materializing rerun attempt 1 INVALID (CV gate); no verdict
+
+Ledger-grep came first. This is the first literal reconstruction of the historical sorted sequential `BTreeMap::insert`
+lever on the new materializing transpose observer. The transient historical diff is exactly recoverable from session
+history: on parent `98cf96e2594915089152de1a4a6d7507ce59c762`, replace the final lexicographically sorted
+`column_entries.into_iter().collect()` with repeated `new_columns.insert(col_name, column)`; the docs-only reject is
+`49f4cd4bc662d19874f01f3fc08d719696838848`. The audit keeps current lexical entry generation identical between arms and
+changes only that finalizer. Both arms observe all **1,000,000** Float64 cells and drop the output inside the timer.
+
+Substrate v2 was followed: one `release-perf` test binary, one fail-closed RCH invocation, four paired warmups, 21 measured
+pairs alternating AB/BA, and `black_box` on both the `&DataFrame` input and the fully observed output. Exact bounded command:
+
+`timeout 600s sh -c 'RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR RUSTFLAGS="-C force-frame-pointers=yes" rch exec -- cargo test -p fp-frame --profile release-perf --lib transpose_reject_reaudit_cod_fp::audit_sorted_insert_materialized_cod_fp -- --ignored --exact --nocapture --test-threads=1'`
+
+Provenance: RCH selected **`hz2`**; the test reported hostname **`hetzner2`** and binary SHA-256
+**`b820c6616297d7b34d304b745790a9a11ad21ef16fd4101de9090eb1f4234833`**. Observable parity passed before timing.
+
+| arm | median | p95 | cv_pct | profile self-time |
+| --- | ---: | ---: | ---: | ---: |
+| ORIG lexical bulk `collect()` | 30.329008 ms | 34.311768 ms | **6.8199%** | not sampled |
+| candidate sequential `insert()` | 51.649868 ms | 73.568063 ms | **12.4682%** | **UNMEASURED** |
+
+Raw ORIG ms: `[30.004046, 29.714474, 29.688084, 29.568844, 29.275022, 29.695454, 31.231383, 30.806159, 30.862621, 30.329008, 29.932816, 29.961796, 30.533010, 32.438849, 34.311768, 29.884086, 30.836310, 29.881936, 30.774350, 31.337773, 38.988933]`.
+
+Raw candidate ms: `[50.743534, 51.273116, 49.831980, 49.767448, 50.154681, 50.370432, 50.817304, 74.486548, 51.244017, 53.134986, 52.751884, 51.574088, 51.649868, 51.840350, 54.262903, 53.801669, 51.967160, 52.575133, 73.568063, 58.812715, 51.490937]`.
+
+The directional ratio is ORIG/candidate **0.587204x**, but it is **not admissible**: both CVs exceed 5%, and the harness
+correctly failed before starting its nested profile, so candidate self-time is unmeasured. This row is neither WIN nor
+REJECT and does not restore the historical do-not-retry instruction. Retry condition: keep the one-binary materializing
+arms, batch repeated calls inside each alternating sample to amortize scheduler noise, run the candidate profile before the
+CV assertion, and require both CVs below 5% plus strictly non-zero self-time for
+`sorted_insert_finalize_candidate_cod_fp`.

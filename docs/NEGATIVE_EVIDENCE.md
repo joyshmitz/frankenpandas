@@ -13568,3 +13568,41 @@ fail-closed: fp-columnar lib **475/0**, fp-conformance **2048/0**; rustfmt clean
 bypassed across the whole cardinality/dedup/membership surface on contiguous-Utf8. `factorize` already covered; set ops route
 through `unique`. The core `&self.values`-iterating consumers are now exhausted — NEXT lever should re-profile a FRESH area
 (groupby / temporal / io) rather than mine further here.
+
+### 2026-07-10 cc_fp — WIN: contiguous-Utf8 `replace_values` maps over byte spans — 2.667x fp-side, bit-identical (BIGGEST vein win; a DOUBLE gap)
+
+The biggest Utf8 win of the session — because `replace_values` had a DOUBLE gap for Utf8: it both materialized `Vec<Scalar::Utf8>`
+AND did an **O(N·k) per-row linear `semantic_eq` scan** over the k targets. It already had an Int64 fast path but no Utf8 sibling.
+Added a typed Utf8 fast path (mirror of the Int64 arm): an all-valid contiguous-Utf8 column with all-Utf8 targets AND all-Utf8
+replacements keeps the output Utf8 (`infer_dtype` of all-Utf8 = Utf8), so build a first-match-wins `FxHashMap<&[u8], &[u8]>`
+(target bytes → replacement bytes) and emit each row's mapped-or-original span into ONE contiguous buffer. **Zero per-row
+`String` alloc AND O(N·k) → O(N)** (one map lookup per row instead of a k-target linear scan).
+
+BIT-IDENTITY: `map.entry(..).or_insert` keeps the FIRST replacement for a repeated target — exactly the generic linear scan's
+first-match-wins order; a row equals at most the one target equal to it; `as_utf8_contiguous` is all-valid so the generic's
+missing arms never fire; the all-Utf8 output infers Utf8 just as `unwrap_or(self.dtype)` yields. NOT a lazy/temporal case: this is
+a data-cleaning map, distinct from the cardinality family.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG reference vs CAND `replace_values` interleaved, per-arm
+adjacent A/A null control; 2M rows, 50k distinct, k=10 target/replacement pairs; ORIG replays the generic body EXACTLY —
+`as_slice()` materialize + per-row O(k) `semantic_eq` scan + `infer_dtype`):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `523090bfbd9f4a7552fa6959ae593f3c06020a11ee5ee5eecd6fc2c259fedfb6` |
+| worker | `hetzner2` |
+| ORIG generic O(k) `semantic_eq` scan | 1110.442 ms (cv 1.25%) |
+| CAND contiguous `&[u8]` map lookup | 416.325 ms (cv 0.80%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0027x -> 0.27% floor** |
+| **fp-side ratio (min-of-blocks)** | **2.667x (+166.7%) — DECIDABLE (166.7% is ~617x the 0.27% floor)** |
+
+⚠️ HONEST: the 2.667x combines TWO effects — the per-row `String`-materialization bypass (the vein theme) AND the O(N·k)→O(N)
+algorithmic win (k=10 here). At k=1 the win would be closer to the sibling levers' ~1.4–1.8x; it grows with k. Both effects are
+real and ship together. BIT-IDENTICAL: the A/B parity block asserts equality vs the generic reference on the main map, the
+empty-map identity case, and a duplicate-target first-match-wins case. GREEN remote fail-closed: fp-columnar lib **475/0**,
+fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. No local build. `crates/fp-frame` untouched.
+
+**UTF8-BYPASS VEIN (cc_fp, all bit-identical): unique 1.457x, value_counts 1.430x, nunique 1.486x, mode 1.570x,
+duplicated/drop_duplicates 2.076x, isin 1.844x, replace 2.667x.** SEVEN wins. `replace` extended the pattern beyond pure
+cardinality into value-mapping and found a second (algorithmic) gap. NEXT: re-profile a FRESH area — the common
+`&self.values`-materializing Utf8 consumers are now covered.

@@ -16526,6 +16526,42 @@ impl Column {
                 .collect();
             return Ok(Self::from_i64_values_owned(out));
         }
+
+        // Typed Utf8 fast path (sibling of the Int64 arm above; cardinality-vein
+        // relative): an all-valid contiguous-Utf8 column with all-Utf8 targets AND
+        // replacements keeps the output Utf8 (`infer_dtype` of all-Utf8 is Utf8), so
+        // build a first-match-wins `&[u8] -> &[u8]` map (byte-equality == `&str`
+        // -equality for valid UTF-8) and emit each row's mapped or original span
+        // into ONE contiguous buffer. This bypasses BOTH the per-row
+        // `Vec<Scalar::Utf8>` materialization AND the generic path's O(k)
+        // per-row linear `semantic_eq` scan over targets (O(N·k) -> O(N)).
+        // Bit-identical: `map.entry(..).or_insert` keeps the first replacement for
+        // a repeated target (first-match-wins, exactly the linear scan's order); a
+        // row matches at most the one target equal to it; all-valid ⇒ the missing
+        // arms never fire; empty output infers Utf8 just like `unwrap_or(self.dtype)`.
+        if self.dtype == DType::Utf8
+            && to_replace.iter().all(|s| matches!(s, Scalar::Utf8(_)))
+            && replacement.iter().all(|s| matches!(s, Scalar::Utf8(_)))
+            && let Some((bytes, offsets)) = self.as_utf8_contiguous()
+        {
+            let mut map: FxHashMap<&[u8], &[u8]> = FxHashMap::default();
+            for (t, r) in to_replace.iter().zip(replacement.iter()) {
+                if let (Scalar::Utf8(ts), Scalar::Utf8(rs)) = (t, r) {
+                    map.entry(ts.as_bytes()).or_insert(rs.as_bytes());
+                }
+            }
+            let mut out_bytes: Vec<u8> = Vec::with_capacity(bytes.len());
+            let mut out_offsets: Vec<usize> = Vec::with_capacity(offsets.len());
+            out_offsets.push(0);
+            for w in offsets.windows(2) {
+                let span = &bytes[w[0]..w[1]];
+                let emit = map.get(span).copied().unwrap_or(span);
+                out_bytes.extend_from_slice(emit);
+                out_offsets.push(out_bytes.len());
+            }
+            return Ok(Self::from_utf8_contiguous(out_bytes, out_offsets));
+        }
+
         let out: Vec<Scalar> = self
             .values
             .iter()
@@ -35931,6 +35967,225 @@ mod ab_utf8_isin_ccfp {
         );
         println!(
             "  CAND contiguous &[u8] probe  min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_statements)]
+mod ab_utf8_replace_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, DType, Scalar};
+
+    /// Seeded (splitmix64) contiguous-Utf8 buffer: `n` rows drawn from `distinct`
+    /// fixed-width `"val_{:07}"` labels.
+    fn mk(n: usize, distinct: usize) -> (Vec<u8>, Vec<usize>) {
+        let mut s: u64 = 0x1234_5678_9ABC_DEF1;
+        let mut bytes: Vec<u8> = Vec::with_capacity(n * 11);
+        let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        for _ in 0..n {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let key = (z as usize) % distinct;
+            bytes.extend_from_slice(b"val_");
+            let mut buf = [0u8; 7];
+            let mut k = key;
+            for slot in buf.iter_mut().rev() {
+                *slot = b'0' + (k % 10) as u8;
+                k /= 10;
+            }
+            bytes.extend_from_slice(&buf);
+            offsets.push(bytes.len());
+        }
+        (bytes, offsets)
+    }
+
+    /// `count` (target, replacement) label pairs: `"val_{:07}"` -> `"REPL_{:05}"`
+    /// for keys `0..count` (targets are real labels present in `mk`).
+    fn pairs(count: usize) -> (Vec<Scalar>, Vec<Scalar>) {
+        let t = (0..count)
+            .map(|k| Scalar::Utf8(format!("val_{k:07}")))
+            .collect();
+        let r = (0..count)
+            .map(|k| Scalar::Utf8(format!("REPL_{k:05}")))
+            .collect();
+        (t, r)
+    }
+
+    /// Reference for the pre-lever generic path: force `Vec<Scalar::Utf8>`
+    /// materialization via `as_slice`, then the SHIPPED per-row O(k) linear
+    /// `semantic_eq` scan over targets (byte-for-byte the generic body, minus the
+    /// fast-path interception).
+    fn orig_replace_utf8(col: &Column, to_replace: &[Scalar], replacement: &[Scalar]) -> Column {
+        let scalars = col.values.as_slice();
+        let out: Vec<Scalar> = scalars
+            .iter()
+            .map(|v| {
+                for (target, rep) in to_replace.iter().zip(replacement.iter()) {
+                    let matches = if target.is_missing() && v.is_missing() {
+                        true
+                    } else if target.is_missing() || v.is_missing() {
+                        false
+                    } else {
+                        v.semantic_eq(target)
+                    };
+                    if matches {
+                        return rep.clone();
+                    }
+                }
+                v.clone()
+            })
+            .collect();
+        let inferred = super::infer_dtype(&out).unwrap_or(DType::Utf8);
+        Column::new(inferred, out).expect("replace out")
+    }
+
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_utf8_replace() {
+        const N: usize = 2_000_000;
+        const DISTINCT: usize = 50_000;
+        const K: usize = 10;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let (bytes, offsets) = mk(N, DISTINCT);
+        let mk_col = || Column::from_utf8_contiguous(bytes.clone(), offsets.clone());
+        let (to_replace, replacement) = pairs(K);
+
+        // Parity: fast path == generic reference. Also: empty map = identity;
+        // a target NOT present leaves the column unchanged; duplicate targets are
+        // first-match-wins.
+        {
+            let orig = orig_replace_utf8(&mk_col(), &to_replace, &replacement);
+            let cand = mk_col()
+                .replace_values(&to_replace, &replacement)
+                .expect("replace");
+            assert_eq!(orig.dtype(), cand.dtype(), "dtype diverged");
+            assert_eq!(
+                orig.values.as_slice(),
+                cand.values.as_slice(),
+                "replace output diverged"
+            );
+
+            let empty: Vec<Scalar> = Vec::new();
+            assert_eq!(
+                mk_col()
+                    .replace_values(&empty, &empty)
+                    .expect("empty replace")
+                    .values
+                    .as_slice(),
+                mk_col().values.as_slice(),
+                "empty-map replace was not identity"
+            );
+
+            // Duplicate target, different replacements: first wins.
+            let dt = vec![
+                Scalar::Utf8("val_0000000".into()),
+                Scalar::Utf8("val_0000000".into()),
+            ];
+            let dr = vec![Scalar::Utf8("FIRST".into()), Scalar::Utf8("SECOND".into())];
+            let cd = mk_col().replace_values(&dt, &dr).expect("dup replace");
+            let od = orig_replace_utf8(&mk_col(), &dt, &dr);
+            assert_eq!(
+                cd.values.as_slice(),
+                od.values.as_slice(),
+                "duplicate-target first-match-wins diverged"
+            );
+        }
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_replace_utf8(&mk_col(), &to_replace, &replacement));
+            std::hint::black_box(mk_col().replace_values(&to_replace, &replacement).unwrap());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_replace_utf8(
+                    std::hint::black_box(&co),
+                    &to_replace,
+                    &replacement,
+                ));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(
+                    std::hint::black_box(&c1)
+                        .replace_values(&to_replace, &replacement)
+                        .unwrap(),
+                );
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(
+                    std::hint::black_box(&c2)
+                        .replace_values(&to_replace, &replacement)
+                        .unwrap(),
+                );
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB utf8 replace (ONE binary, ONE invocation) N={N} distinct={DISTINCT} k={K}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic O(k) semantic_eq scan min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND contiguous &[u8] map lookup   min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

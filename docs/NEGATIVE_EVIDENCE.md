@@ -10929,3 +10929,49 @@ claim; it is a measured, feature-gated construction prototype proving the cardin
 metadata over a homogeneous block instead of materializing 10k row columns. Next production lever for `br-frankenpandas-l4vzc`
 should move this shape into `fp-frame` as a trait-isolated block-backed/lazy-transposed storage variant with fallback
 materialization and conformance, not another `BTreeMap` construction tweak.
+
+### 2026-07-09 cc_fp - to_json parallel body for columns/index/split/values - WIN (2.78x-3.01x, byte-identical)
+
+Ledger-grep before the attempt: no prior rejection of a parallel `to_json` element body. The proven sibling is the
+`to_json("records")` row-range parallel serializer (bad808087, 4.92x on a quiet machine); its own recorded residual was
+"to_json columns/index/split orients still serial". A cross-category fp-bench sweep at 1M x 10 confirmed those four orients
+were the top remaining io hotspots (index 381ms, columns 370ms, split 271ms, values 254ms) while pandas 2.2.3 needs
+1.11-1.44s for the same calls.
+
+Lever: one shared `par_json_body(n, write_elem)` helper. Every orient is a wrapper plus `n` independent elements joined by
+exactly one comma, which is precisely what serde's `SerializeSeq`/`SerializeMap` emit. Each worker serializes its contiguous
+element range into a private `Vec<u8>` (comma-prefixed except GLOBAL element 0) and the chunks concat in element order.
+`records`/`values` wrap in `[..]`, `index` wraps in `{..}` (key via `to_writer(&String)`, which emits the same quoted+escaped
+bytes as serde's map-key serializer), `split` parallelizes only its O(n*m) `data` array, and `columns` is column-major so it
+parallelizes WITHIN each column's inner `{key:value}` map. Same 50k-row / 16k-per-worker gate as records.
+
+Honest A/B, same binary, env-gated serial-vs-parallel body (`FP_JSON_NO_PAR`, removed before commit), interleaved so both
+arms see identical contention, min of 5 blocks (each block = fp-bench best-of-10), release-perf, 1M x 10 f64:
+
+| workload | ORIG (serial body) | CAND (parallel body) | speedup (min) | speedup (median) | cv ORIG / CAND |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `io/json_write_index` | 462.4 ms | 166.3 ms | **2.78x** | 2.51x | 3.8% / 10.6% |
+| `io/json_write_columns` | 483.2 ms | 170.4 ms | **2.84x** | 2.59x | 19.5% / 13.1% |
+| `io/json_write_split` | 304.8 ms | 105.0 ms | **2.90x** | 2.86x | 15.1% / 5.1% |
+| `io/json_write_values` | 306.8 ms | 102.1 ms | **3.01x** | 2.98x | 4.9% / 2.6% |
+| `io/json_write_records` (control) | 398.5 ms | 136.0 ms | 2.93x | 2.85x | 2.0% / 2.5% |
+
+MEASUREMENT CAVEAT (stated rather than hidden): the host was under concurrent peer builds (load average 23 rising to 45 on 64
+cores), so cv exceeded the 5% target on three of five rows and BOTH arms are inflated in absolute terms. The ratio is still
+trustworthy because the arms are interleaved from one binary and `min` is contention-robust; `json_write_values` and the
+`json_write_records` control both meet cv<5% on both arms. `records` is a pure control here - its parallel path is unchanged
+in behavior (only refactored onto the shared helper) - and it reproduces the same ~2.9x, which confirms the ratio is the
+lever and not an artifact. On a quiet machine the same records lever previously measured 4.79x, so 2.8-3.0x is a conservative
+LOWER BOUND, not the ceiling.
+
+Parity: BYTE-IDENTICAL, not merely equivalent. New test `dataframe_to_json_all_orients_parallel_match_serial_ccfp` asserts
+each parallel orient equals `serde_json::to_string` of its serial streaming serializer (`ColumnsJson`, `IndexJson`,
+`SplitJson`, `DataArrayJson`) on a 60k x 3 mixed frame with nulls, non-finite floats (CellJson emits null), and Utf8 values
+containing `"` and `\` to exercise key/value escaping. Those five serial serializers are retained under `#[cfg(test)]` as the
+oracle. `dataframe_to_json_orients_serial_gate_and_empty_frame_ccfp` covers `par_json_body`'s n=0 and workers<2 paths (valid
+JSON, no stray `[,` / `{,` / `,]` / `,}`). Green: fp-frame 3133/0, fp-conformance 2048/0, fp-io 607/0. clippy + rustfmt clean
+in the touched ranges (pre-existing diffs elsewhere left untouched). `timeout 180s ubs crates/fp-frame/src/lib.rs` stalls
+(exit 124) - the known whole-file inventory documented in artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md and
+br-frankenpandas-yavyk, not a new finding.
+
+RESIDUAL: `io/json_read_records` (~399ms) is now the single hottest io op and is still serial on the read side.

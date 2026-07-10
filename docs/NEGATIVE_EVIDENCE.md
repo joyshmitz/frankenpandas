@@ -13170,3 +13170,52 @@ Scalar path (na-last semantics preserved). Permanent A/B `ab_temporal_argsort_cc
 The recurring lesson holds: the biggest clean columnar wins in this codebase are still "an i64/f64 typed fast path exists but
 its i64-backed temporal sibling was left on the Scalar route." Datetime64/Timedelta64 argsort was one such; worth re-scanning
 other typed fast paths (`typed_radix_keys`, reductions, take/gather) for the same temporal gap.
+
+### 2026-07-10 cc_fp — WIN + CORRECTNESS FIX: Datetime64/Timedelta64 min/max via raw-i64 scan — 35.4x fp-side, and Datetime64 min/max was LOSSY (f64) — now exact
+
+Continuing the "typed fast path exists but its i64-backed temporal sibling was left on the Scalar route" hunt (after the
+argsort 8.36x). `Column::min`/`max` have f64 and i64 typed folds, then fall to `nanmin`/`nanmax(&self.values)` for everything
+else — so Datetime64/Timedelta64 materialize the `Scalar` Vec and reduce through the na-last helper.
+
+**A LATENT BUG FOUND WHILE PROFILING.** `nanmin`/`nanmax` (fp-types) have explicit exact arms for Int64/Float64/Utf8/Bool/
+**Timedelta64**, but **NO Datetime64 arm** — Datetime64 falls to the catch-all `a.to_f64()` comparison. Datetime64 nanos are
+i64 up to ~9.2e18; **f64 has a 52-bit mantissa, so every real timestamp (> 2^53 ~ 9e15 ns) loses precision** — two timestamps
+within ~128 ns can compare equal or invert, so `Series.min()/max()` on a datetime column could return the WRONG timestamp
+(off by up to ~128 ns). Confirmed by the A/B's parity assert: `col.min()` != `nanmin(col.values())` on 2M large nanos, and
+`col.min()` DOES equal the exact `src.iter().min()`.
+
+LEVER (one branch each in `min`/`max`): for `validity.all()` Datetime64/Timedelta64 with no NAT (`i64::MIN`), fold the raw
+`&[i64]` with strict `<`/`>` (keeps first on tie, exactly like `nanmin`/`nanmax`) and return `Scalar::Datetime64`/
+`Scalar::Timedelta64`. **Timedelta64 is bit-identical** (nanmin's Timedelta64 arm is already exact i64). **Datetime64 is a
+CORRECTNESS FIX** (exact i64 replaces lossy f64) that is ALSO 35x faster.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `nanmin(col.values())` vs CAND `col.min()` interleaved,
+FRESH column per rep so ORIG pays the `Scalar` materialization it pays in production, per-arm adjacent A/A null control; 2M
+random Datetime64 nanos):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `ce33709b84f034b1dbc15752168d6494fa9d2cd5c63e919d94db015d598e257f` |
+| worker | `hetzner2` |
+| ORIG `nanmin` (materialize 2M `Scalar` + f64) | 26.329 ms (cv 0.65%) |
+| CAND raw-i64 scan | 0.744 ms (cv 3.36%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0345x -> 3.45% floor** |
+| **fp-side ratio** | **35.395x (+3439.5%) — DECIDABLE (3439% >> 3.45% floor)** |
+
+CORRECTNESS proven in-binary: `col.min()`/`max()` equal the EXACT i64-nanos extremum (`src.iter().min()/max()` re-wrapped),
+which the old lossy-f64 path did NOT for large nanos.
+
+GREEN remote fail-closed: fp-columnar **475/0**, **fp-conformance 2048/0** (so the exact-i64 Datetime64 min/max matches the
+pandas oracle and breaks no golden — the lossy f64 behavior was never a pinned expectation), fp-frame lib **3130 passed / 3
+failed** where the **3 failures are the documented target-cpu/FMA 1-ULP acosh/arccosh golden flake** (`dataframe_arccosh_golden_basic`,
+`series_acosh_golden_basic`, `series_arccosh_golden_basic`, all at fp-frame:83642 — inverse-hyperbolic-cosine math, ZERO
+overlap with `Column::min/max`; ledger rows 86/92/96 document these exact 3 as nondeterministic across rch build workers from
+FMA contraction, independent of source). `rustfmt --check` clean; clippy clean in the changed hunks. No local build.
+`crates/fp-frame` untouched.
+
+SCOPE: `Column::min`/`max` and every consumer — `Series.min()/max()`, `DataFrame.min()/max()`, `describe()` on temporal
+columns, groupby min/max, time-range queries. NAT-bearing / nullable temporal columns keep the exact `nanmin`/`nanmax` path
+(na-last semantics preserved). Permanent A/B `ab_temporal_minmax_ccfp`. **FOLLOW-UP (bug, worth a bead):** `nanmin`/`nanmax`
+in fp-types still compare Datetime64 via lossy `to_f64()` for any caller that reaches them directly (e.g. a NAT-bearing
+datetime column, which my fast path skips) — the proper fix is an exact `Scalar::Datetime64` arm in `nanmin`/`nanmax`
+mirroring the Timedelta64 arm. My Column-level guard fixes the common all-valid path; the fp-types helpers should get the arm too.

@@ -14057,6 +14057,37 @@ impl Column {
             }
             return Scalar::Int64(m);
         }
+        // Datetime64 / Timedelta64 (i64-ns) reduce like Int64. Gate on all-valid +
+        // no NAT (`i64::MIN`): `nanmin` SKIPS missing, so a NAT-bearing column must
+        // stay on the `nanmin` path. For all-valid, no-NAT input the strict-`<` fold
+        // (keeps the first on a tie, exactly like `nanmin`) returns the same min,
+        // dtype-preserved — bit-identical, without materializing the `Scalar` Vec.
+        if self.validity.all() {
+            if let Some(data) = self.as_datetime64_slice()
+                && let Some((&first, rest)) = data.split_first()
+                && !data.contains(&i64::MIN)
+            {
+                let mut m = first;
+                for &x in rest {
+                    if x < m {
+                        m = x;
+                    }
+                }
+                return Scalar::Datetime64(m);
+            }
+            if let Some(data) = self.as_timedelta64_slice()
+                && let Some((&first, rest)) = data.split_first()
+                && !data.contains(&i64::MIN)
+            {
+                let mut m = first;
+                for &x in rest {
+                    if x < m {
+                        m = x;
+                    }
+                }
+                return Scalar::Timedelta64(m);
+            }
+        }
         nanmin(&self.values)
     }
 
@@ -14088,6 +14119,36 @@ impl Column {
                 }
             }
             return Scalar::Int64(m);
+        }
+        // Datetime64 / Timedelta64 (i64-ns) reduce like Int64; see `min`. Gate on
+        // all-valid + no NAT so `nanmax`'s skip-missing behavior is preserved;
+        // strict-`>` keeps the first on a tie exactly like `nanmax`. Bit-identical,
+        // dtype-preserved, no `Scalar` materialization.
+        if self.validity.all() {
+            if let Some(data) = self.as_datetime64_slice()
+                && let Some((&first, rest)) = data.split_first()
+                && !data.contains(&i64::MIN)
+            {
+                let mut m = first;
+                for &x in rest {
+                    if x > m {
+                        m = x;
+                    }
+                }
+                return Scalar::Datetime64(m);
+            }
+            if let Some(data) = self.as_timedelta64_slice()
+                && let Some((&first, rest)) = data.split_first()
+                && !data.contains(&i64::MIN)
+            {
+                let mut m = first;
+                for &x in rest {
+                    if x > m {
+                        m = x;
+                    }
+                }
+                return Scalar::Timedelta64(m);
+            }
         }
         nanmax(&self.values)
     }
@@ -33883,6 +33944,143 @@ mod ab_temporal_argsort_ccfp {
         let nullmed = median_of(&null);
         println!(
             "  NULL-CONTROL (CAND A/A) median ratio={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+/// A/B for routing all-valid, NaT-free Datetime64/Timedelta64 min/max through the
+/// raw-i64 scan instead of materializing the `Scalar` Vec for `nanmin`/`nanmax`
+/// (cc_fp). Fresh column per rep so the ORIG arm pays the materialization it pays
+/// in production (min/max is typically called once per built column). ORIG =
+/// `nanmin(col.values())`; CAND = `col.min()` (now the i64 scan). Interleaved in
+/// one binary, per-arm adjacent A/A null control, median gate.
+#[cfg(test)]
+mod ab_temporal_minmax_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::Column;
+
+    fn nanos(n: usize) -> Vec<i64> {
+        let mut s: u64 = 0x2545_F491_4F6C_DD1D;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                946_684_800_000_000_000_i64.wrapping_add((z % 1_600_000_000_000_000_000) as i64)
+            })
+            .collect()
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_temporal_minmax() {
+        const N: usize = 2_000_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 5;
+        let src = nanos(N);
+
+        // Correctness: col.min()/max() equal the EXACT i64-nanos extremum. Note the
+        // OLD path (nanmin) compares Datetime64 via a LOSSY `to_f64()` (nanos > 2^53
+        // lose precision), so this exact-i64 fold is a correctness FIX for Datetime64
+        // (and bit-identical for Timedelta64, whose nanmin arm is already exact i64).
+        {
+            let exact_min = *src.iter().min().unwrap();
+            let exact_max = *src.iter().max().unwrap();
+            let col = Column::from_datetime64_values(src.clone());
+            assert_eq!(
+                col.min(),
+                fp_types::Scalar::Datetime64(exact_min),
+                "min not exact"
+            );
+            assert_eq!(
+                col.max(),
+                fp_types::Scalar::Datetime64(exact_max),
+                "max not exact"
+            );
+        }
+
+        for _ in 0..2 {
+            let col = Column::from_datetime64_values(src.clone());
+            std::hint::black_box(fp_types::nanmin(col.values()));
+            let col = Column::from_datetime64_values(src.clone());
+            std::hint::black_box(col.min());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                // ORIG: fresh column, materialize Scalars, nanmin.
+                let col = Column::from_datetime64_values(src.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(fp_types::nanmin(std::hint::black_box(&col).values()));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                // CAND adjacent A/A: fresh column, i64 scan.
+                let col2 = Column::from_datetime64_values(src.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&col2).min());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let col3 = Column::from_datetime64_values(src.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&col3).min());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB temporal min (ONE binary, ONE invocation) N={N}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG nanmin(materialize)  min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND i64-scan             min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
             100.0 * (nullmed - 1.0)
         );
         println!(

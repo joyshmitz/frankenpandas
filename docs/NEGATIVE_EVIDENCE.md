@@ -14789,3 +14789,43 @@ is byte-identical to `origin/main`.
 materially changes: reapply the no-Utf8 plan gate, run the focused ordered-outer equality test plus full `fp-join`, conformance,
 check, clippy, and fmt gates through strict RCH plus targeted UBS, then rerun the one-binary median gate if source ancestry
 changed. Do not retry remote `perf`, the rejected groupby/rolling levers, or the peer-owned IO chunk-concatenation hunk.
+
+### 2026-07-11 cod_fp — SURFACE: no-Utf8 outer-join plan gate reconfirmed, full remote crate gate denied admission
+
+This fresh-auth resume started from the current negative ledger and `bv --robot-triage`
+(`data_hash=a8f5f9e8f2ae82e1`). It did not retry the rejected dense groupby Var/Std mean hoist or wide-rolling indexed heaps. The
+single resumed lever remained `br-frankenpandas-nzqj6`: skip the two `O(output_rows)` optional-Utf8 gather-plan scans in
+`build_single_key_ordered_unique_outer_merge_output` when the corresponding input frame has no Utf8 column. The resumed patch
+used a dtype-presence gate, so every eager, contiguous, nullable, or future Utf8 backing retained the old plan/fallback path;
+only numeric-only frames skipped plans that no column could consume.
+
+The pre-change `crates/fp-join/src/lib.rs` blob was exactly `91eacacab259fc22c3e68af1a45db9214772797c` at the earlier A/B
+base (`0e45b9182`), this worktree, and current `origin/main`, so the prior same-binary median gate remained ancestry-valid:
+
+| arm | median |
+| --- | ---: |
+| reference, both unused Utf8 plans forced | 5.272840 ms |
+| candidate, no-Utf8 plans skipped | 3.847150 ms |
+| candidate A/A controls | 3.826531 / 4.428218 ms |
+
+The reference/candidate ratio is **1.370583x** and clears the **1.157241x** adjacent-control floor by about **2.36x**. That
+one-binary gate also compared index, column order, dtype, null/scalar variants, and every Float64 payload bit exactly. A fresh
+strict-remote baseline on `vmi1167313` measured the unchanged reference Criterion row at **5.2058 ms** with 95% interval
+**[4.9112, 5.5128] ms**. The current candidate build on `vmi1227854` measured **1.4397 ms** with interval
+**[1.3880, 1.4953] ms**; this cross-worker result is confirmation only, not the ship ratio.
+
+The corrected module-qualified focused proof ran remotely on `vmi1227854` and passed **1/1**:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fp-join tests::merge_outer_ordered_unique_int64_subset_matches_generic_validated_route -- --exact --nocapture`
+
+The next required full-crate gate was invoked once with the same fail-closed prefix:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fp-join`
+
+RCH stopped before assignment with `no admissible workers: insufficient_slots=8,hard_preflight=1` and `remote required;
+refusing local fallback (no worker assigned)`. Per the terminal `rch degraded = SURFACE` rule, there was no retry and no local
+Cargo command. The candidate hunk was removed manually; `crates/fp-join/src/lib.rs` is again byte-identical to `origin/main`.
+
+**RETRY-CONDITION:** this remains a measured positive, not a performance reject. Resume only when strict RCH can admit the full
+`fp-join`, conformance, check, clippy, and fmt sequence. Reapply only the dtype-presence plan gate, retain the recorded
+same-binary median as long as the `fp-join` source blob is unchanged, and never substitute local Cargo.

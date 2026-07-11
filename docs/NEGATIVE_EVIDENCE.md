@@ -14119,3 +14119,40 @@ byte-identical to `origin/main`; no production or benchmark change remains. Resu
 and gate on per-arm median plus an effect larger than the adjacent A/A floor, then prove Var and Std exact bits across sorted and
 first-seen order, missing/singleton/all-missing groups, cancellation, infinities, and signed zero. Agent Mail reservation writes
 still fail on its malformed SQLite index, so the clean hunk was coordinated through the Bead and Git/ledger truth.
+
+### 2026-07-11 cc_fp — WIN: contiguous-Utf8 `min`/`max` byte-span reduction bypasses Scalar materialization — 18.06x fp-side, bit-identical (biggest string-ops win of the campaign)
+
+`Column::min`/`max` had typed fast paths for Float64/Int64/Datetime64/Timedelta64 but NOT Utf8, so a Utf8 column's min/max fell to
+`nanmin`/`nanmax(&self.values)` — materializing a `Vec<Scalar::Utf8>` (one heap `String` per row) then folding the lexicographic
+extreme. Added a contiguous-Utf8 byte-span fast path to both: `as_utf8_contiguous()` → track the min/max `&[u8]` span directly over
+the contiguous buffer (`offsets.windows(2)`), then build ONE `Scalar::Utf8` from the winning span.
+
+BIT-IDENTICAL: `&[u8]` ordering equals `&str`/`String` ordering for valid UTF-8 (Rust compares both byte-lexicographically), so
+the byte-span comparison is exactly `nanmin`/`nanmax`'s `Scalar::Utf8` comparison; strict `<`/`>` keeps the FIRST occurrence on a
+tie exactly as `nanmin`/`nanmax` do. `as_utf8_contiguous` matches only an all-valid backing, so there is no missing value to skip
+(matching `is_missing`'s continue); an empty column has zero spans (`offsets.windows(2).next()` is `None`) so it falls THROUGH to
+`nanmin`/`nanmax` → `Null(NaN)`, unchanged. Parity asserted vs the exact Scalar `nanmin`/`nanmax` on a populated column (ties +
+first-seen tie-break), a single element, and empty, for BOTH ops.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `nanmin(col.values.as_slice())` vs CAND `min()` interleaved,
+per-arm A/A null control; 4M rows, 100k distinct `"val_{:07}"` labels):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `d224d980d444aab6afc211b99d1e4ca9085a66827f934b0c2facd64ad2dcea28` |
+| worker | `vmi1227854` |
+| ORIG `nanmin(Vec<Scalar::Utf8>)` | 174.768 ms (cv 4.20%) |
+| CAND byte-span min | 9.679 ms (cv 8.07%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0520x -> 5.20% floor** |
+| **fp-side ratio (min-of-blocks)** | **18.056x (+1705.6%) — DECIDABLE (1705% is ~328x the 5.20% floor)** |
+
+18x — the LARGEST string-ops win to date (replace was 2.667x, isin 1.844x) — because `min`/`max` fully scan (no early exit) and
+the ORIG path performs ~4M heap `String` allocations (a malloc storm) just to compare, whereas the byte-span path does ZERO
+per-row allocation (pure pointer/slice comparison) and allocates only the ONE result string. `min`/`max` are symmetric, so `max`
+inherits the win. GREEN remote fail-closed: fp-columnar lib **480/0**, fp-conformance **2048/0**; rustfmt clean; clippy
+`-D warnings` clean. `crates/fp-frame` untouched.
+
+**Refutes "contiguous-Utf8 byte-span CORE SURFACE EXHAUSTED":** the dedup/tally/membership family (unique/value_counts/nunique/
+mode/duplicated/isin/replace) was harvested, but the EXTREME reductions (`min`/`max`) were a second, un-harvested algorithmic gap —
+and the biggest one, because reductions fully materialize with no early exit. Sibling candidates worth checking: any other
+`&self.values`-iterating Utf8 consumer that fully scans (e.g. a Utf8 `argmin`/`argmax`, sort-key extraction).

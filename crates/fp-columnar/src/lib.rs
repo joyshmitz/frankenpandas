@@ -14273,6 +14273,30 @@ impl Column {
                 return Scalar::Timedelta64(m);
             }
         }
+        // Contiguous-Utf8 fast path (byte-span sibling of unique/value_counts):
+        // a Utf8 column's min otherwise falls to `nanmin`, which materializes a
+        // `Vec<Scalar::Utf8>` (one heap `String` per row) then folds the
+        // lexicographic minimum. Track the min byte span directly over the
+        // contiguous buffer instead. Bit-identical to `nanmin`'s Utf8 arm: `&[u8]`
+        // ordering equals `&str`/`String` ordering for valid UTF-8, and strict `<`
+        // keeps the FIRST occurrence on a tie exactly as `nanmin` does.
+        // `as_utf8_contiguous` matches only an all-valid backing (no missing to
+        // skip); an empty column has no spans, so it falls through to `nanmin`
+        // (→ `Null(NaN)`, unchanged).
+        if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+            let mut spans = offsets.windows(2);
+            if let Some(first) = spans.next() {
+                let mut best = &bytes[first[0]..first[1]];
+                for w in spans {
+                    let span = &bytes[w[0]..w[1]];
+                    if span < best {
+                        best = span;
+                    }
+                }
+                let s = std::str::from_utf8(best).expect("contiguous-Utf8 spans are valid UTF-8");
+                return Scalar::Utf8(s.to_owned());
+            }
+        }
         nanmin(&self.values)
     }
 
@@ -14333,6 +14357,25 @@ impl Column {
                     }
                 }
                 return Scalar::Timedelta64(m);
+            }
+        }
+        // Contiguous-Utf8 fast path (symmetric to `min`): track the max byte span
+        // directly over the contiguous buffer via strict `>` (keeps the FIRST on a
+        // tie exactly like `nanmax`; `&[u8]` order == `&str` order for valid UTF-8)
+        // instead of materializing a `Vec<Scalar::Utf8>`. All-valid only; empty
+        // falls through to `nanmax` (→ `Null(NaN)`, unchanged).
+        if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+            let mut spans = offsets.windows(2);
+            if let Some(first) = spans.next() {
+                let mut best = &bytes[first[0]..first[1]];
+                for w in spans {
+                    let span = &bytes[w[0]..w[1]];
+                    if span > best {
+                        best = span;
+                    }
+                }
+                let s = std::str::from_utf8(best).expect("contiguous-Utf8 spans are valid UTF-8");
+                return Scalar::Utf8(s.to_owned());
             }
         }
         nanmax(&self.values)
@@ -38217,6 +38260,162 @@ mod ab_i64_quantile_ccfp {
         );
         println!(
             "  CAND typed &[i64]->f64 select min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_utf8_minmax_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, Scalar, nanmax, nanmin};
+
+    /// Seeded (splitmix64) contiguous-Utf8 buffer: `n` rows drawn from `distinct`
+    /// fixed-width `"val_{:07}"` labels.
+    fn mk(n: usize, distinct: usize) -> (Vec<u8>, Vec<usize>) {
+        let mut s: u64 = 0x1234_5678_9ABC_DEF1;
+        let mut bytes: Vec<u8> = Vec::with_capacity(n * 11);
+        let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        for _ in 0..n {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let key = (z as usize) % distinct;
+            bytes.extend_from_slice(b"val_");
+            let mut buf = [0u8; 7];
+            let mut k = key;
+            for slot in buf.iter_mut().rev() {
+                *slot = b'0' + (k % 10) as u8;
+                k /= 10;
+            }
+            bytes.extend_from_slice(&buf);
+            offsets.push(bytes.len());
+        }
+        (bytes, offsets)
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    fn ab_utf8_minmax_parity() {
+        // Byte-span min/max == the exact Scalar nanmin/nanmax across a populated
+        // column (with ties + first-seen tie-break), a single element, and empty
+        // (no spans → falls through to nanmin/nanmax → Null).
+        let (b, o) = mk(10_000, 500);
+        let c = Column::from_utf8_contiguous(b, o);
+        assert_eq!(nanmin(c.values.as_slice()), c.min(), "utf8 min diverged");
+        assert_eq!(nanmax(c.values.as_slice()), c.max(), "utf8 max diverged");
+        let (b1, o1) = mk(1, 1);
+        let c1 = Column::from_utf8_contiguous(b1, o1);
+        assert_eq!(nanmin(c1.values.as_slice()), c1.min(), "utf8 min single");
+        assert_eq!(nanmax(c1.values.as_slice()), c1.max(), "utf8 max single");
+        let empty = Column::from_utf8_contiguous(Vec::new(), vec![0]);
+        assert_eq!(
+            nanmin(empty.values.as_slice()),
+            empty.min(),
+            "utf8 min empty"
+        );
+        assert_eq!(
+            nanmax(empty.values.as_slice()),
+            empty.max(),
+            "utf8 max empty"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_utf8_min() {
+        const N: usize = 4_000_000;
+        const DISTINCT: usize = 100_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let (bytes, offsets) = mk(N, DISTINCT);
+        let mk_col = || Column::from_utf8_contiguous(bytes.clone(), offsets.clone());
+        let orig_min = |c: &Column| nanmin(c.values.as_slice());
+
+        // Parity guard inside the perf run too.
+        assert_eq!(
+            orig_min(&mk_col()),
+            mk_col().min(),
+            "utf8 min diverged (perf)"
+        );
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_min(&mk_col()));
+            std::hint::black_box(mk_col().min());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_min(std::hint::black_box(&co)));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).min());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).min());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB utf8 min (ONE binary, ONE invocation) N={N} distinct={DISTINCT}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG nanmin(Vec<Scalar::Utf8>) min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND byte-span min             min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

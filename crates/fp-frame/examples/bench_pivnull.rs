@@ -28,7 +28,7 @@ fn main() {
         .collect();
     let val: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 7) % 5 == 0 {
+            if sm(i, 7).is_multiple_of(5) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Float64((sm(i, 9) % 1000) as f64)

@@ -1573,7 +1573,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         // An empty (0-row) or all-NA numeric column is Null/empty dtype in the
         // Scalar path, not Int64 — route it to the fallback for exact parity.
         let has_value = |buf_len: usize, valid: &Option<Vec<bool>>| -> bool {
-            buf_len > 0 && valid.as_ref().map_or(true, |v| v.iter().any(|&b| b))
+            buf_len > 0 && valid.as_ref().is_none_or(|v| v.iter().any(|&b| b))
         };
         let column = match acc {
             // Typed fast paths (all-valid OR nullable): taken when every cell was
@@ -6068,6 +6068,7 @@ fn promote_synthetic_row_multiindex_if_present(frame: &DataFrame) -> Result<Data
 ///   (matching `serde_json`'s `preserve_order` map);
 /// - the frame is assembled with the same `column_from_json_values` +
 ///   `promote_synthetic_row_multiindex_if_present` tail.
+///
 /// Depth- and string-aware scan of a records array `[ {...}, {...}, … ]`: returns the
 /// body byte range `[body_start, body_end)` (just inside `[` … `]`) and the byte offset
 /// of every DEPTH-1 (record-separating) comma. `None` unless the input is a non-empty
@@ -6348,6 +6349,7 @@ fn try_read_json_records_flat_parallel(input: &str) -> Result<Option<DataFrame>,
         ranges.push((lo, hi));
         rstart = rend;
     }
+    #[allow(clippy::type_complexity)]
     let parsed: Vec<Option<(Vec<String>, Vec<Vec<Scalar>>, usize)>> = std::thread::scope(|scope| {
         ranges
             .iter()

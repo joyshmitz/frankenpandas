@@ -49,7 +49,7 @@ fn main() {
         let a: Vec<Scalar> = (0..n)
             .map(|i| {
                 let g = sm(i, 1) % card as u64;
-                if g == 4 || sm(i, 7) % 4 == 0 {
+                if g == 4 || sm(i, 7).is_multiple_of(4) {
                     Scalar::Null(NullKind::Null)
                 } else {
                     Scalar::Int64((sm(i, 9) % 50) as i64 + 1)
@@ -81,7 +81,7 @@ fn main() {
         for op in [
             "sum", "mean", "max", "min", "count", "prod", "var", "std", "median", "first", "last",
         ] {
-            let g = df.groupby(&["k".into()]).unwrap();
+            let g = df.groupby(&["k"]).unwrap();
             let r = match op {
                 "sum" => g.sum(),
                 "mean" => g.mean(),

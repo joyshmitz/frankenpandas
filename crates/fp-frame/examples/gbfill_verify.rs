@@ -31,7 +31,7 @@ fn main() {
     let iv: Vec<Scalar> = (0..n)
         .map(|i| {
             let g = sm(i, 1) % card as u64;
-            if g == 3 || sm(i, 7) % 3 == 0 {
+            if g == 3 || sm(i, 7).is_multiple_of(3) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Int64((sm(i, 9) % 50) as i64)
@@ -40,7 +40,7 @@ fn main() {
         .collect();
     let sv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 11) % 3 == 0 {
+            if sm(i, 11).is_multiple_of(3) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Utf8(format!("s{}", sm(i, 13) % 40))
@@ -49,10 +49,10 @@ fn main() {
         .collect();
     let bv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 17) % 4 == 0 {
+            if sm(i, 17).is_multiple_of(4) {
                 Scalar::Null(NullKind::Null)
             } else {
-                Scalar::Bool(sm(i, 19) % 2 == 0)
+                Scalar::Bool(sm(i, 19).is_multiple_of(2))
             }
         })
         .collect();

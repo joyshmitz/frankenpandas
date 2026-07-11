@@ -28,7 +28,8 @@ fn main() {
             "normalize" => d.normalize().map(|_| ()),
             _ => panic!("op"),
         };
-        std::hint::black_box(r.unwrap());
+        let _: () = r.unwrap();
+        std::hint::black_box(());
         let e = t.elapsed().as_nanos();
         if e < best {
             best = e;

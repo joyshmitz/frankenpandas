@@ -20,7 +20,7 @@ fn main() {
     let n = 2_000_000usize;
     let vv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 1) % 5 == 0 {
+            if sm(i, 1).is_multiple_of(5) {
                 Scalar::Null(NullKind::NaN)
             } else {
                 Scalar::Float64((sm(i, 7) % 100000) as f64)
@@ -72,13 +72,13 @@ fn main() {
     for seed in 0..400u64 {
         let sz = (sm(seed as usize, 3) % 200) as usize; // 0..199 spans <1, =1, >1 words
         let nan_rate = sm(seed as usize, 4) % 4; // 0=none,1=~25%,2=~50%,3=all
-        let neg = sm(seed as usize, 5) % 2 == 0; // negative-only ranges (tests INIT, not 0.0-fill)
+        let neg = sm(seed as usize, 5).is_multiple_of(2); // negative-only ranges (tests INIT, not 0.0-fill)
         let vv: Vec<Scalar> = (0..sz)
             .map(|i| {
                 let drop = match nan_rate {
                     0 => false,
-                    1 => sm(i, seed * 7 + 1) % 4 == 0,
-                    2 => sm(i, seed * 7 + 1) % 2 == 0,
+                    1 => sm(i, seed * 7 + 1).is_multiple_of(4),
+                    2 => sm(i, seed * 7 + 1).is_multiple_of(2),
                     _ => true,
                 };
                 if drop {
@@ -93,16 +93,16 @@ fn main() {
         let (mut omax, mut omin): (Option<usize>, Option<usize>) = (None, None);
         let (mut bmax, mut bmin) = (f64::NEG_INFINITY, f64::INFINITY);
         for (i, s) in vv.iter().enumerate() {
-            if let Scalar::Float64(v) = s {
-                if !v.is_nan() {
-                    if omax.is_none() || *v > bmax {
-                        bmax = *v;
-                        omax = Some(i);
-                    }
-                    if omin.is_none() || *v < bmin {
-                        bmin = *v;
-                        omin = Some(i);
-                    }
+            if let Scalar::Float64(v) = s
+                && !v.is_nan()
+            {
+                if omax.is_none() || *v > bmax {
+                    bmax = *v;
+                    omax = Some(i);
+                }
+                if omin.is_none() || *v < bmin {
+                    bmin = *v;
+                    omin = Some(i);
                 }
             }
         }

@@ -16,7 +16,7 @@ fn main() {
         Column::from_values(
             (0..n)
                 .map(|i| {
-                    if sm(i, nm) % 4 == 0 {
+                    if sm(i, nm).is_multiple_of(4) {
                         Scalar::Null(NullKind::Null)
                     } else {
                         Scalar::Float64((sm(i, seed) % 100) as f64)

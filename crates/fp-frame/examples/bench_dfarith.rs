@@ -26,7 +26,7 @@ fn mkdf(n: usize, off: i64, ncols: usize) -> DataFrame {
         let nm = format!("c{c}");
         let col: Vec<Scalar> = (0..n)
             .map(|i| {
-                if sm(i, 3) % 4 == 0 {
+                if sm(i, 3).is_multiple_of(4) {
                     Scalar::Null(fp_types::NullKind::Null)
                 } else {
                     Scalar::Float64((sm(i, c as u64 + 1) % 1000) as f64)

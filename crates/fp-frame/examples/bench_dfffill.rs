@@ -27,7 +27,7 @@ fn main() {
         let nm = format!("c{j}");
         let v: Vec<Scalar> = (0..n)
             .map(|i| {
-                if sm(i, j as u64 + 1) % 4 == 0 {
+                if sm(i, j as u64 + 1).is_multiple_of(4) {
                     Scalar::Null(NullKind::NaN)
                 } else {
                     Scalar::Float64((sm(i, j as u64) % 1000) as f64)

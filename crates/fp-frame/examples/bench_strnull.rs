@@ -32,7 +32,7 @@ fn main() {
     ];
     let vals: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 3) % 10 == 0 {
+            if sm(i, 3).is_multiple_of(10) {
                 Scalar::Null(fp_types::NullKind::Null)
             } else {
                 Scalar::Utf8(format!(

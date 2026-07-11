@@ -1,7 +1,7 @@
 use fp_columnar::Column;
 use fp_types::{NullKind, Scalar};
 fn main() {
-    let av: Vec<Scalar> = (0..10).map(|i| Scalar::Int64(i)).collect();
+    let av: Vec<Scalar> = (0..10).map(Scalar::Int64).collect();
     let nv: Vec<Scalar> = (0..10)
         .map(|i| {
             if i % 5 == 0 {

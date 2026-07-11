@@ -21,7 +21,7 @@ fn main() {
     let b = Series::new(
         "b",
         Index::from_range(0, n as i64, 1),
-        Column::from_bool_values((0..n).map(|i| sm(i, 1) % 2 == 0).collect()),
+        Column::from_bool_values((0..n).map(|i| sm(i, 1).is_multiple_of(2)).collect()),
     )
     .unwrap();
     let nl: Vec<IndexLabel> = ((n / 2) as i64..(n / 2 + n) as i64)
@@ -30,7 +30,7 @@ fn main() {
     // correctness: first entries present, tail (>=n) null
     let r = b.reindex(nl.clone()).unwrap();
     let vals = r.column().values();
-    let ok = matches!(&vals[0], Scalar::Bool(x) if *x==(sm(n/2,1)%2==0))
+    let ok = matches!(&vals[0], Scalar::Bool(x) if *x==sm(n/2,1).is_multiple_of(2))
         && matches!(&vals[n - 1], Scalar::Null(_));
     println!("bool reindex correct: {ok}");
     timeit("bool reindex 2M half-miss", || {

@@ -72,7 +72,7 @@ fn main() {
     writeln!(f, "ROWS\t{}", rows.join("|")).unwrap();
     let dumpin = |f: &mut std::fs::File, tag: &str, labels: &[i64], seed: u64| {
         let vals: Vec<String> = (0..labels.len())
-            .map(|i| (sm(i, 0 + seed) % 50).to_string())
+            .map(|i| (sm(i, seed) % 50).to_string())
             .collect();
         writeln!(
             f,

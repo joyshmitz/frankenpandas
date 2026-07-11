@@ -28,7 +28,7 @@ fn main() {
         .collect();
     let iv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 7) % 5 == 0 {
+            if sm(i, 7).is_multiple_of(5) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Int64((sm(i, 9) % 1000) as i64)
@@ -37,7 +37,7 @@ fn main() {
         .collect();
     let sv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 11) % 5 == 0 {
+            if sm(i, 11).is_multiple_of(5) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Utf8(format!("v{}", sm(i, 13) % 200))

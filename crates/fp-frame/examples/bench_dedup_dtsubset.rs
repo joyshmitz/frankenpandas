@@ -34,7 +34,7 @@ fn main() {
     let mut best = u128::MAX;
     for _ in 0..6 {
         let t = std::time::Instant::now();
-        let _ = match op {
+        match op {
             "drop" => {
                 std::hint::black_box(
                     df.drop_duplicates(Some(&subset), DuplicateKeep::First, false)

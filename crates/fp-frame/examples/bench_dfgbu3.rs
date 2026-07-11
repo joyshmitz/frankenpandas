@@ -40,7 +40,12 @@ fn main() {
     );
     cols.insert(
         "bo".to_string(),
-        Column::from_values((0..n).map(|i| Scalar::Bool(sm(i, 3) % 2 == 0)).collect()).unwrap(),
+        Column::from_values(
+            (0..n)
+                .map(|i| Scalar::Bool(sm(i, 3).is_multiple_of(2)))
+                .collect(),
+        )
+        .unwrap(),
     );
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     let df = DataFrame::new_with_column_order(

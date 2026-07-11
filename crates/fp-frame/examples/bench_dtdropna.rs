@@ -33,7 +33,7 @@ fn main() {
         Column::from_values(
             (0..n)
                 .map(|i| {
-                    if sm(i, 3) % 20 == 0 {
+                    if sm(i, 3).is_multiple_of(20) {
                         Scalar::Null(NullKind::NaN)
                     } else {
                         Scalar::Float64((sm(i, 2) % 1000) as f64)

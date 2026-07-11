@@ -13,7 +13,7 @@ fn main() {
     let mut d = 0u64;
     for seed in 0..40u64 {
         let n = (sm(seed as usize, 3) % 2000 + 1) as usize;
-        let card = (sm(seed as usize, 4) % 20 + 1) as u64;
+        let card = sm(seed as usize, 4) % 20 + 1;
         let mut m = BTreeMap::new();
         m.insert(
             "c".to_string(),

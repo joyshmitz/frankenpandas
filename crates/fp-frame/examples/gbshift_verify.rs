@@ -28,7 +28,7 @@ fn ref_shift(vals: &[Scalar], keys: &[Scalar], periods: i64) -> Column {
             .push(i);
     }
     let mut out = vec![Scalar::Null(NullKind::NaN); n];
-    for (_kk, indices) in &groups {
+    for indices in groups.values() {
         let gv: Vec<Scalar> = indices.iter().map(|&i| vals[i].clone()).collect();
         let m = gv.len();
         let mut t = vec![Scalar::Null(NullKind::NaN); m];
@@ -55,7 +55,7 @@ fn main() {
             .collect();
         let iv: Vec<Scalar> = (0..n)
             .map(|i| {
-                if nullable && sm(i, 7) % 4 == 0 {
+                if nullable && sm(i, 7).is_multiple_of(4) {
                     Scalar::Null(NullKind::Null)
                 } else {
                     Scalar::Int64((sm(i, 9) % 100) as i64 - 50)

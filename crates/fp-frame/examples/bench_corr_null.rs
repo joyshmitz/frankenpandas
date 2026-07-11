@@ -24,7 +24,7 @@ fn build(n: usize, m: usize) -> DataFrame {
     for c in 0..m {
         let vv: Vec<Scalar> = (0..n)
             .map(|i| {
-                if sm(i, (c as u64) * 97 + 1) % 10 == 0 {
+                if sm(i, (c as u64) * 97 + 1).is_multiple_of(10) {
                     Scalar::Null(NullKind::NaN)
                 } else {
                     Scalar::Float64((sm(i, (c as u64) * 13 + 7) % 100000) as f64)

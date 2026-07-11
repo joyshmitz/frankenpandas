@@ -49,7 +49,7 @@ fn main() {
         let a: Vec<Scalar> = (0..n)
             .map(|i| {
                 let g = sm(i, 1) % card as u64;
-                if g == 4 || sm(i, 7) % 4 == 0 {
+                if g == 4 || sm(i, 7).is_multiple_of(4) {
                     Scalar::Null(NullKind::Null)
                 } else {
                     Scalar::Int64((sm(i, 9) % 100) as i64)
@@ -58,7 +58,7 @@ fn main() {
             .collect();
         let b: Vec<Scalar> = (0..n)
             .map(|i| {
-                if sm(i, 3) % 3 == 0 {
+                if sm(i, 3).is_multiple_of(3) {
                     Scalar::Null(NullKind::Null)
                 } else {
                     Scalar::Float64((sm(i, 5) % 100) as f64)
@@ -101,7 +101,7 @@ fn main() {
         dumpdf(
             &mut f,
             &format!("count_{tag}"),
-            &df.groupby(&["k".into()]).unwrap().count().unwrap(),
+            &df.groupby(&["k"]).unwrap().count().unwrap(),
         );
     }
     println!("wrote /tmp/fp_dfgbcount.txt");

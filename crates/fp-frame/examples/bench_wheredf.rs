@@ -26,7 +26,7 @@ fn mkf(off: i64, n: usize, ncol: usize, nullable: bool) -> DataFrame {
         let nm = format!("c{c}");
         let v: Vec<Scalar> = (0..n)
             .map(|i| {
-                if nullable && sm(i, c as u64 + 7) % 5 == 0 {
+                if nullable && sm(i, c as u64 + 7).is_multiple_of(5) {
                     Scalar::Null(NullKind::Null)
                 } else {
                     Scalar::Float64((sm(i, c as u64 + 1) % 100) as f64)
@@ -45,7 +45,7 @@ fn mkbool(off: i64, n: usize, ncol: usize) -> DataFrame {
     for c in 0..ncol {
         let nm = format!("c{c}");
         let v: Vec<Scalar> = (0..n)
-            .map(|i| Scalar::Bool(sm(i, c as u64 + 3) % 2 == 0))
+            .map(|i| Scalar::Bool(sm(i, c as u64 + 3).is_multiple_of(2)))
             .collect();
         m.insert(nm.clone(), Column::from_values(v).unwrap());
         order.push(nm);

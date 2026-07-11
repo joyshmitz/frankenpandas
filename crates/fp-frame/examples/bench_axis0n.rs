@@ -37,7 +37,7 @@ fn main() {
                 (0..n)
                     .map(|i| {
                         let z = sm(i, c as u64);
-                        if z % 10 == 0 {
+                        if z.is_multiple_of(10) {
                             f64::NAN
                         } else {
                             (z >> 11) as f64 / 1e9

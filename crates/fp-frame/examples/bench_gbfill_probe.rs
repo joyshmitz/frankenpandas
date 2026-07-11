@@ -28,7 +28,7 @@ fn build(n: usize, card: usize) -> DataFrame {
     // nullable Int64 value: 20% missing
     let iv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 7) % 5 == 0 {
+            if sm(i, 7).is_multiple_of(5) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Int64((sm(i, 9) % 1000) as i64)
@@ -38,7 +38,7 @@ fn build(n: usize, card: usize) -> DataFrame {
     // Utf8 value: 20% missing, ~200 distinct
     let sv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 11) % 5 == 0 {
+            if sm(i, 11).is_multiple_of(5) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Utf8(format!("v{}", sm(i, 13) % 200))
@@ -59,7 +59,8 @@ fn build(n: usize, card: usize) -> DataFrame {
 
 fn main() {
     let n = 2_000_000usize;
-    for card in [1000usize] {
+    {
+        let card = 1000usize;
         let df = build(n, card);
         let sv_i = df.column("iv").unwrap().clone();
         let sv_s = df.column("sv").unwrap().clone();

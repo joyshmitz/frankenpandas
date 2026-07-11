@@ -22,7 +22,7 @@ fn main() {
     let b = Series::new(
         "b",
         idx,
-        Column::from_bool_values((0..n).map(|i| sm(i, 1) % 2 == 0).collect()),
+        Column::from_bool_values((0..n).map(|i| sm(i, 1).is_multiple_of(2)).collect()),
     )
     .unwrap();
     let pos: Vec<i64> = (0..n).map(|i| (sm(i, 7) % n as u64) as i64).collect();
@@ -33,7 +33,7 @@ fn main() {
         .values()
         .iter()
         .zip(&pos)
-        .all(|(v, &p)| matches!(v,Scalar::Bool(x) if *x==(sm(p as usize,1)%2==0)));
+        .all(|(v, &p)| matches!(v,Scalar::Bool(x) if *x==sm(p as usize,1).is_multiple_of(2)));
     println!("bool take correct: {ok}");
     timeit("bool take 2M scattered", || {
         std::hint::black_box(b.take(&pos).unwrap());

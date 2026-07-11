@@ -28,7 +28,7 @@ fn main() {
         .collect();
     let a: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 7) % 5 == 0 {
+            if sm(i, 7).is_multiple_of(5) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Float64((sm(i, 9) % 1000) as f64)
@@ -37,7 +37,7 @@ fn main() {
         .collect();
     let b: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 3) % 5 == 0 {
+            if sm(i, 3).is_multiple_of(5) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Int64((sm(i, 5) % 1000) as i64)
@@ -57,19 +57,9 @@ fn main() {
     )
     .unwrap();
     timeit("dfgb.sum  multi-i64 nullable x2", || {
-        std::hint::black_box(
-            df.groupby(&["k1".into(), "k2".into()])
-                .unwrap()
-                .sum()
-                .unwrap(),
-        );
+        std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().sum().unwrap());
     });
     timeit("dfgb.mean multi-i64 nullable x2", || {
-        std::hint::black_box(
-            df.groupby(&["k1".into(), "k2".into()])
-                .unwrap()
-                .mean()
-                .unwrap(),
-        );
+        std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().mean().unwrap());
     });
 }

@@ -16,7 +16,7 @@ fn main() {
         Column::from_values(
             (0..n)
                 .map(|i| {
-                    if sm(i, nm) % 5 == 0 {
+                    if sm(i, nm).is_multiple_of(5) {
                         Scalar::Null(NullKind::Null)
                     } else {
                         Scalar::Float64((sm(i, seed) % 100) as f64)
@@ -27,7 +27,12 @@ fn main() {
         .unwrap()
     };
     let ccol = |seed: u64| -> Column {
-        Column::from_values((0..n).map(|i| Scalar::Bool(sm(i, seed) % 2 == 0)).collect()).unwrap()
+        Column::from_values(
+            (0..n)
+                .map(|i| Scalar::Bool(sm(i, seed).is_multiple_of(2)))
+                .collect(),
+        )
+        .unwrap()
     };
     let mkdf = |cols: Vec<(String, Column)>| {
         let mut m = BTreeMap::new();

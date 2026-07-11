@@ -26,7 +26,7 @@ fn main() {
     );
     cols.insert(
         "a".to_string(),
-        Column::from_bool_values((0..n).map(|i| sm(i, 2) % 7 != 0).collect()),
+        Column::from_bool_values((0..n).map(|i| !sm(i, 2).is_multiple_of(7)).collect()),
     );
     cols.insert(
         "b".to_string(),

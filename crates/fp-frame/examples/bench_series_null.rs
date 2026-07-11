@@ -14,7 +14,7 @@ fn main() {
     let n: usize = 1_000_000;
     let av: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 1) % 5 == 0 {
+            if sm(i, 1).is_multiple_of(5) {
                 Scalar::Null(NullKind::NaN)
             } else {
                 Scalar::Float64((sm(i, 1) % 100_000) as f64)

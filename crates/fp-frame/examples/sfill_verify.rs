@@ -11,7 +11,7 @@ fn mks(off: i64, n: usize, seed: u64) -> Series {
     let idx = Index::from_range(off, off + n as i64, 1);
     let v: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, seed) % 4 == 0 {
+            if sm(i, seed).is_multiple_of(4) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Float64((sm(i, seed) % 50) as f64)

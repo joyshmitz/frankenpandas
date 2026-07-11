@@ -24,7 +24,7 @@ fn main() {
         );
         let vals: Vec<Scalar> = (0..lbl.len())
             .map(|i| {
-                if sm(i, 3) % nullmod == 0 {
+                if sm(i, 3).is_multiple_of(nullmod) {
                     Scalar::Null(NullKind::Null)
                 } else {
                     Scalar::Float64((sm(i, seed + 1) % 50) as f64)

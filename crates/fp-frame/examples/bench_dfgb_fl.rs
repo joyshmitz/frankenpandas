@@ -27,7 +27,7 @@ fn main() {
     );
     cols.insert(
         "b".to_string(),
-        Column::from_bool_values((0..n).map(|i| sm(i, 2) % 7 != 0).collect()),
+        Column::from_bool_values((0..n).map(|i| !sm(i, 2).is_multiple_of(7)).collect()),
     );
     let df =
         DataFrame::new_with_column_order(index, cols, vec!["k".into(), "a".into(), "b".into()])

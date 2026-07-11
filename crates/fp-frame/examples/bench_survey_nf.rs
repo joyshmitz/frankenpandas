@@ -28,7 +28,7 @@ fn main() {
         let nm = format!("c{c}");
         let col: Vec<Scalar> = (0..n)
             .map(|i| {
-                if sm(i, c as u64 + 1) % 7 == 0 {
+                if sm(i, c as u64 + 1).is_multiple_of(7) {
                     Scalar::Null(NullKind::Null)
                 } else {
                     Scalar::Float64((sm(i, c as u64 + 9) % 1000) as f64)
@@ -51,7 +51,7 @@ fn main() {
     // Series nullable ops
     let sv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 7) % 6 == 0 {
+            if sm(i, 7).is_multiple_of(6) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Int64((sm(i, 9) % 5000) as i64)

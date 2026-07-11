@@ -27,7 +27,7 @@ fn ref_diff(vals: &[Scalar], keys: &[Scalar], periods: usize) -> Column {
             .push(i);
     }
     let mut out = vec![Scalar::Null(NullKind::NaN); n];
-    for (_kk, idxs) in &groups {
+    for idxs in groups.values() {
         let gv: Vec<Scalar> = idxs.iter().map(|&i| vals[i].clone()).collect();
         for (li, &si) in idxs.iter().enumerate() {
             if li < periods {
@@ -57,7 +57,7 @@ fn main() {
             .collect();
         let iv: Vec<Scalar> = (0..n)
             .map(|i| {
-                if nullable && sm(i, 7) % 4 == 0 {
+                if nullable && sm(i, 7).is_multiple_of(4) {
                     Scalar::Null(NullKind::Null)
                 } else {
                     Scalar::Int64((sm(i, 9) % 200) as i64 - 100)

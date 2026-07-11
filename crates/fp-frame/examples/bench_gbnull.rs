@@ -30,7 +30,7 @@ fn main() {
     // nullable i64 key: 10% missing
     let kv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 0) % 10 == 0 {
+            if sm(i, 0).is_multiple_of(10) {
                 Scalar::Null(fp_types::NullKind::Null)
             } else {
                 Scalar::Int64((sm(i, 0) % card as u64) as i64)

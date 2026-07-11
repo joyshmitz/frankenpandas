@@ -15,7 +15,7 @@ fn main() {
     let op = a.get(2).map(String::as_str).unwrap_or("year");
     let it: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
     // datetimes around 2020-2024, ns
-    let base = 1577836800_000_000_000u64; // 2020-01-01
+    let base = 1_577_836_800_000_000_000_u64; // 2020-01-01
     let vals: Vec<Scalar> = (0..n)
         .map(|i| Scalar::Datetime64((base + (sm(i, 0) % (126_000_000)) * 1_000_000_000) as i64))
         .collect();

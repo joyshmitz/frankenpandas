@@ -22,7 +22,7 @@ fn main() {
         Column::from_i64_values((0..n).map(|i| (sm(i, 0) as i64) % g).collect()),
     )
     .unwrap();
-    let bvals: Vec<bool> = (0..n).map(|i| sm(i, 1) % 7 != 0).collect();
+    let bvals: Vec<bool> = (0..n).map(|i| !sm(i, 1).is_multiple_of(7)).collect();
     let vs = Series::new(
         "a".to_string(),
         Index::new(labels),

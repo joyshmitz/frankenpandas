@@ -1,6 +1,4 @@
 use fp_columnar::Column;
-use fp_frame::Series;
-use fp_index::Index;
 use fp_types::Scalar;
 fn sm(i: usize, s: u64) -> u64 {
     let mut h = (i as u64).wrapping_add(s).wrapping_mul(0x9E3779B97F4A7C15);

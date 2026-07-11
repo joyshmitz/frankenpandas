@@ -30,7 +30,7 @@ fn build(n: usize, utf8key: bool, card: usize) -> DataFrame {
     };
     let nv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 7) % 5 == 0 {
+            if sm(i, 7).is_multiple_of(5) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Int64((sm(i, 9) % 1000) as i64)
@@ -39,7 +39,7 @@ fn build(n: usize, utf8key: bool, card: usize) -> DataFrame {
         .collect();
     let nv2: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 3) % 5 == 0 {
+            if sm(i, 3).is_multiple_of(5) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Float64((sm(i, 5) % 1000) as f64)
@@ -61,13 +61,13 @@ fn main() {
     ] {
         let df = build(n, utf8, card);
         timeit(&format!("dfgb.sum   {tag} nullable x2"), || {
-            std::hint::black_box(df.groupby(&["k".into()]).unwrap().sum().unwrap());
+            std::hint::black_box(df.groupby(&["k"]).unwrap().sum().unwrap());
         });
         timeit(&format!("dfgb.mean  {tag} nullable x2"), || {
-            std::hint::black_box(df.groupby(&["k".into()]).unwrap().mean().unwrap());
+            std::hint::black_box(df.groupby(&["k"]).unwrap().mean().unwrap());
         });
         timeit(&format!("dfgb.count {tag} nullable x2"), || {
-            std::hint::black_box(df.groupby(&["k".into()]).unwrap().count().unwrap());
+            std::hint::black_box(df.groupby(&["k"]).unwrap().count().unwrap());
         });
     }
 }

@@ -60,7 +60,7 @@ fn main() {
     let iv: Vec<Scalar> = (0..n)
         .map(|i| {
             let g = sm(i, 1) % card as u64;
-            if g == 4 || sm(i, 7) % 4 == 0 {
+            if g == 4 || sm(i, 7).is_multiple_of(4) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Int64((sm(i, 9) % 100) as i64 - 50)
@@ -109,7 +109,7 @@ fn main() {
         .collect();
     let v2: Vec<Scalar> = (0..n2)
         .map(|i| {
-            if sm(i, 7) % 5 == 0 {
+            if sm(i, 7).is_multiple_of(5) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Int64((sm(i, 9) % 1000) as i64)

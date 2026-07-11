@@ -15,7 +15,7 @@ fn main() {
         let idx = Index::from_range(start, start + n as i64, 1);
         let v: Vec<Scalar> = (0..n)
             .map(|i| {
-                if wn && sm(i, 3) % 3 == 0 {
+                if wn && sm(i, 3).is_multiple_of(3) {
                     Scalar::Null(NullKind::Null)
                 } else {
                     Scalar::Float64((sm(i, seed) % 100) as f64)
@@ -59,7 +59,7 @@ fn main() {
                 format!(
                     "{}:{}",
                     start + i as i64,
-                    if wn && sm(i, 3) % 3 == 0 {
+                    if wn && sm(i, 3).is_multiple_of(3) {
                         "NA".into()
                     } else {
                         format!("{}", sm(i, seed) % 100)

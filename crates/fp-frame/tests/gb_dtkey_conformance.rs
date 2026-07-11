@@ -163,7 +163,7 @@ fn groupby_timedelta_key_matches_int64_key() {
 fn groupby_datetime_key_with_nat_bails_and_is_correct() {
     let base = 1_577_836_800_000_000_000i64;
     let day = 86_400_000_000_000i64;
-    let ns = vec![base, i64::MIN, base + day, base, i64::MIN, base + day];
+    let ns = [base, i64::MIN, base + day, base, i64::MIN, base + day];
     let vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let dt = df_with_key(
         ns.iter().map(|&v| IndexLabel::Datetime64(v)).collect(),

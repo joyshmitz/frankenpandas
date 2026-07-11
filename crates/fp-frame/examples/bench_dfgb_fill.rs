@@ -26,7 +26,7 @@ fn main() {
     for c in ["a", "b"] {
         let vals: Vec<Scalar> = (0..n)
             .map(|i| {
-                if sm(i, c.as_bytes()[0] as u64) % 5 == 0 {
+                if sm(i, c.as_bytes()[0] as u64).is_multiple_of(5) {
                     Scalar::Null(fp_types::NullKind::NaN)
                 } else {
                     Scalar::Float64(sm(i, c.as_bytes()[0] as u64) as f64)

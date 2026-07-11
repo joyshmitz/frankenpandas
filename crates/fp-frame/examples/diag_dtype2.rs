@@ -25,7 +25,7 @@ fn main() {
     for op in [
         "sum", "mean", "max", "min", "first", "last", "prod", "var", "std", "median",
     ] {
-        let g = df.groupby(&["k".into()]).unwrap();
+        let g = df.groupby(&["k"]).unwrap();
         let r = match op {
             "sum" => g.sum(),
             "mean" => g.mean(),

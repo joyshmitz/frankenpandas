@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use fp_columnar::Column;
-use fp_frame::{DataFrame, Series};
+use fp_frame::DataFrame;
 use fp_index::Index;
 use fp_types::Scalar;
 fn t(l: &str, mut f: impl FnMut()) {

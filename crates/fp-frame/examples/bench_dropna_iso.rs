@@ -1,5 +1,4 @@
 use fp_columnar::Column;
-use fp_frame::Series;
 use fp_index::Index;
 use fp_types::{NullKind, Scalar};
 fn sm(i: usize, s: u64) -> u64 {
@@ -22,7 +21,7 @@ fn main() {
     let col = Column::from_values(
         (0..n)
             .map(|i| {
-                if sm(i, 1) % 5 == 0 {
+                if sm(i, 1).is_multiple_of(5) {
                     Scalar::Null(NullKind::NaN)
                 } else {
                     Scalar::Float64((sm(i, 9) % 100000) as f64)
@@ -31,7 +30,7 @@ fn main() {
             .collect(),
     )
     .unwrap();
-    let positions: Vec<usize> = (0..n).filter(|&i| sm(i, 1) % 5 != 0).collect();
+    let positions: Vec<usize> = (0..n).filter(|&i| !sm(i, 1).is_multiple_of(5)).collect();
     println!("kept={}", positions.len());
     t("index.take", || {
         std::hint::black_box(idx.take(&positions));

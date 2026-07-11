@@ -27,7 +27,7 @@ fn main() {
     // nullable 20%, same distinct
     let nv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 1) % 5 == 0 {
+            if sm(i, 1).is_multiple_of(5) {
                 Scalar::Null(NullKind::NaN)
             } else {
                 Scalar::Float64((sm(i, 7) % 100000) as f64)
@@ -42,7 +42,7 @@ fn main() {
     let sal = Series::new("v", idx.clone(), Column::from_values(al).unwrap()).unwrap();
     let nl: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 1) % 5 == 0 {
+            if sm(i, 1).is_multiple_of(5) {
                 Scalar::Null(NullKind::NaN)
             } else {
                 Scalar::Float64((sm(i, 7) % 500) as f64)

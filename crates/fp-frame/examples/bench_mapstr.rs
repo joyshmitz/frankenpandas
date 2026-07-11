@@ -21,25 +21,20 @@ fn main() {
     let ncat = 1000usize;
     // Utf8 input column: "cat_<k>" for k in 0..ncat
     let v: Vec<Scalar> = (0..n)
-        .map(|i| Scalar::Utf8(format!("cat_{}", sm(i, 1) % ncat as u64).into()))
+        .map(|i| Scalar::Utf8(format!("cat_{}", sm(i, 1) % ncat as u64)))
         .collect();
     let idx = Index::from_range(0, n as i64, 1);
     let s = Series::new("s", idx, Column::from_values(v).unwrap()).unwrap();
     // mapping "cat_k" -> f64 k  (Utf8->Float64, full coverage)
     let map_f64: Vec<(Scalar, Scalar)> = (0..ncat)
-        .map(|k| {
-            (
-                Scalar::Utf8(format!("cat_{k}").into()),
-                Scalar::Float64(k as f64),
-            )
-        })
+        .map(|k| (Scalar::Utf8(format!("cat_{k}")), Scalar::Float64(k as f64)))
         .collect();
     // mapping "cat_k" -> "grp_<k%10>" (Utf8->Utf8 recode, full coverage)
     let map_str: Vec<(Scalar, Scalar)> = (0..ncat)
         .map(|k| {
             (
-                Scalar::Utf8(format!("cat_{k}").into()),
-                Scalar::Utf8(format!("grp_{}", k % 10).into()),
+                Scalar::Utf8(format!("cat_{k}")),
+                Scalar::Utf8(format!("grp_{}", k % 10)),
             )
         })
         .collect();

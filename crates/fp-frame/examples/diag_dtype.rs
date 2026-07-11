@@ -22,7 +22,7 @@ fn main() {
     map.insert("a".into(), Column::from_values(a).unwrap());
     let df = DataFrame::new_with_column_order(idx, map, vec!["k".into(), "a".into()]).unwrap();
     for op in ["sum", "mean", "max", "min"] {
-        let g = df.groupby(&["k".into()]).unwrap();
+        let g = df.groupby(&["k"]).unwrap();
         let r = match op {
             "sum" => g.sum(),
             "mean" => g.mean(),

@@ -19,7 +19,7 @@ fn t(l: &str, mut f: impl FnMut()) {
 fn main() {
     let n = 2_000_000usize;
     let idx = Index::from_range(0, n as i64, 1);
-    let base: i64 = 1420070400_000_000_000; // 2015-01-01 ns
+    let base: i64 = 1_420_070_400_000_000_000; // 2015-01-01 ns
     let s = Series::new(
         "t",
         idx.clone(),

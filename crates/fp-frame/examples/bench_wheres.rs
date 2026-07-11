@@ -20,7 +20,7 @@ fn mkf(off: i64, n: usize, seed: u64, nullable: bool) -> Series {
     let idx = Index::from_range(off, off + n as i64, 1);
     let v: Vec<Scalar> = (0..n)
         .map(|i| {
-            if nullable && sm(i, seed) % 5 == 0 {
+            if nullable && sm(i, seed).is_multiple_of(5) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Float64((sm(i, seed) % 100) as f64)
@@ -31,7 +31,9 @@ fn mkf(off: i64, n: usize, seed: u64, nullable: bool) -> Series {
 }
 fn mkbool(off: i64, n: usize) -> Series {
     let idx = Index::from_range(off, off + n as i64, 1);
-    let v: Vec<Scalar> = (0..n).map(|i| Scalar::Bool(sm(i, 3) % 2 == 0)).collect();
+    let v: Vec<Scalar> = (0..n)
+        .map(|i| Scalar::Bool(sm(i, 3).is_multiple_of(2)))
+        .collect();
     Series::new("c", idx, Column::from_values(v).unwrap()).unwrap()
 }
 fn main() {

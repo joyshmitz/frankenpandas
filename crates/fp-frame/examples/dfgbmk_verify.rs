@@ -50,7 +50,7 @@ fn main() {
         .collect();
     let a: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 7) % 4 == 0 {
+            if sm(i, 7).is_multiple_of(4) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Float64((sm(i, 9) % 100) as f64 - 50.0)
@@ -59,7 +59,7 @@ fn main() {
         .collect();
     let b: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 3) % 3 == 0 {
+            if sm(i, 3).is_multiple_of(3) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Int64((sm(i, 5) % 50) as i64 + 1)
@@ -113,7 +113,7 @@ fn main() {
     for op in [
         "sum", "mean", "max", "min", "count", "var", "std", "prod", "median",
     ] {
-        let gb = df.groupby(&["k1".into(), "k2".into()]).unwrap();
+        let gb = df.groupby(&["k1", "k2"]).unwrap();
         let r = match op {
             "sum" => gb.sum(),
             "mean" => gb.mean(),

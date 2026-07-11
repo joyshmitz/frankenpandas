@@ -25,7 +25,7 @@ fn main() {
     let sa = Series::new("v", idx.clone(), Column::from_values(av).unwrap()).unwrap();
     let nv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 1) % 5 == 0 {
+            if sm(i, 1).is_multiple_of(5) {
                 Scalar::Null(NullKind::NaN)
             } else {
                 Scalar::Float64((sm(i, 7) % 100000) as f64)

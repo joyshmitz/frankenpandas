@@ -7,22 +7,22 @@ fn gen_csv(n: usize, salt: u64) -> String {
     let mut s = String::with_capacity(n * 40);
     s.push_str("i0,f0,i1,f1,name\n");
     for i in 0..n {
-        let i0 = if sm(i, 9 + salt) % 10 == 0 {
+        let i0 = if sm(i, 9 + salt).is_multiple_of(10) {
             String::new()
         } else {
             (sm(i, 1 + salt) % 1_000_000).to_string()
         };
-        let f0 = if sm(i, 8 + salt) % 10 == 0 {
+        let f0 = if sm(i, 8 + salt).is_multiple_of(10) {
             String::new()
         } else {
             format!("{:.2}", (sm(i, 2 + salt) % 100000) as f64 / 100.0)
         };
-        let i1 = if sm(i, 7 + salt) % 10 == 0 {
+        let i1 = if sm(i, 7 + salt).is_multiple_of(10) {
             String::new()
         } else {
             (sm(i, 3 + salt) % 900000).to_string()
         };
-        let f1 = if sm(i, 6 + salt) % 10 == 0 {
+        let f1 = if sm(i, 6 + salt).is_multiple_of(10) {
             String::new()
         } else {
             format!("{:.1}", (sm(i, 4 + salt) % 50000) as f64 / 10.0)

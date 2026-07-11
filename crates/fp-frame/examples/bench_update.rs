@@ -28,7 +28,7 @@ fn main() {
             let nm = format!("c{c}");
             let col: Vec<Scalar> = (0..n)
                 .map(|i| {
-                    if withnull && sm(i, seed + c as u64) % 3 == 0 {
+                    if withnull && sm(i, seed + c as u64).is_multiple_of(3) {
                         Scalar::Null(NullKind::Null)
                     } else {
                         Scalar::Float64((sm(i, c as u64 + seed) % 1000) as f64)
@@ -43,7 +43,7 @@ fn main() {
     let a = mkdf(1, false);
     let b = mkdf(2, true);
     timeit("df.update aligned (5col,1M)", || {
-        let mut aa = a.clone();
+        let aa = a.clone();
         std::hint::black_box(aa.update(&b).unwrap());
     });
 }

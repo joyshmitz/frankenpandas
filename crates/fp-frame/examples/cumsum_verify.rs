@@ -16,7 +16,7 @@ fn main() {
     // leading missing + interior missing
     let iv: Vec<Scalar> = (0..n)
         .map(|i| {
-            if i < 3 || sm(i, 7) % 4 == 0 {
+            if i < 3 || sm(i, 7).is_multiple_of(4) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Int64((sm(i, 9) % 100) as i64 - 50)

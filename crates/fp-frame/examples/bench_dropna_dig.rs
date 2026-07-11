@@ -18,8 +18,8 @@ fn main() {
             .map(|i| {
                 let drop = match rate {
                     0 => false,
-                    1 => sm(i, seed * 7 + 1) % 4 == 0,
-                    2 => sm(i, seed * 7 + 1) % 2 == 0,
+                    1 => sm(i, seed * 7 + 1).is_multiple_of(4),
+                    2 => sm(i, seed * 7 + 1).is_multiple_of(2),
                     _ => true,
                 };
                 if drop {

@@ -20,7 +20,7 @@ fn mks(n: usize, off: i64, seed: u64, nullable: bool) -> Series {
     let idx = Index::from_range(off, off + n as i64, 1);
     let v: Vec<Scalar> = (0..n)
         .map(|i| {
-            if nullable && sm(i, seed) % 4 == 0 {
+            if nullable && sm(i, seed).is_multiple_of(4) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Float64((sm(i, seed) % 1000) as f64)

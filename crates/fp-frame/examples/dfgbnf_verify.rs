@@ -43,7 +43,7 @@ fn main() {
     let a: Vec<Scalar> = (0..n)
         .map(|i| {
             let g = sm(i, 1) % card as u64;
-            if g == 4 || sm(i, 7) % 4 == 0 {
+            if g == 4 || sm(i, 7).is_multiple_of(4) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Float64((sm(i, 9) % 100) as f64 - 50.0)
@@ -52,7 +52,7 @@ fn main() {
         .collect();
     let b: Vec<Scalar> = (0..n)
         .map(|i| {
-            if sm(i, 3) % 3 == 0 {
+            if sm(i, 3).is_multiple_of(3) {
                 Scalar::Null(NullKind::Null)
             } else {
                 Scalar::Float64((sm(i, 5) % 100) as f64)
@@ -94,35 +94,15 @@ fn main() {
     writeln!(f, "K\t{}", ks.join(",")).unwrap();
     writeln!(f, "A\t{}", av.join(",")).unwrap();
     writeln!(f, "B\t{}", bv.join(",")).unwrap();
-    dumpdf(
-        &mut f,
-        "sum",
-        &df.groupby(&["k".into()]).unwrap().sum().unwrap(),
-    );
-    dumpdf(
-        &mut f,
-        "mean",
-        &df.groupby(&["k".into()]).unwrap().mean().unwrap(),
-    );
-    dumpdf(
-        &mut f,
-        "max",
-        &df.groupby(&["k".into()]).unwrap().max().unwrap(),
-    );
-    dumpdf(
-        &mut f,
-        "min",
-        &df.groupby(&["k".into()]).unwrap().min().unwrap(),
-    );
+    dumpdf(&mut f, "sum", &df.groupby(&["k"]).unwrap().sum().unwrap());
+    dumpdf(&mut f, "mean", &df.groupby(&["k"]).unwrap().mean().unwrap());
+    dumpdf(&mut f, "max", &df.groupby(&["k"]).unwrap().max().unwrap());
+    dumpdf(&mut f, "min", &df.groupby(&["k"]).unwrap().min().unwrap());
     dumpdf(
         &mut f,
         "count",
-        &df.groupby(&["k".into()]).unwrap().count().unwrap(),
+        &df.groupby(&["k"]).unwrap().count().unwrap(),
     );
-    dumpdf(
-        &mut f,
-        "std",
-        &df.groupby(&["k".into()]).unwrap().std().unwrap(),
-    );
+    dumpdf(&mut f, "std", &df.groupby(&["k"]).unwrap().std().unwrap());
     println!("wrote /tmp/fp_dfgbnf.txt");
 }

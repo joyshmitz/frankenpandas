@@ -36,7 +36,7 @@ fn main() {
         Column::from_values(
             (0..n)
                 .map(|i| {
-                    if sm(i, 1) % 5 == 0 {
+                    if sm(i, 1).is_multiple_of(5) {
                         Scalar::Null(NullKind::NaN)
                     } else {
                         Scalar::Float64((sm(i, 9) % 100000) as f64)
@@ -50,7 +50,7 @@ fn main() {
     let cond = Series::new(
         "c",
         idx.clone(),
-        Column::from_bool_values((0..n).map(|i| sm(i, 3) % 2 == 0).collect()),
+        Column::from_bool_values((0..n).map(|i| sm(i, 3).is_multiple_of(2)).collect()),
     )
     .unwrap();
     t("where", || {

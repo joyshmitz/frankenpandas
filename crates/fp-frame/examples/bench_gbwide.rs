@@ -48,7 +48,7 @@ fn main() {
         std::hint::black_box(sv.groupby(&k).unwrap().count().unwrap());
     });
     timeit("dfgb.sum wide-i64key", || {
-        std::hint::black_box(df.groupby(&["k".into()]).unwrap().sum().unwrap());
+        std::hint::black_box(df.groupby(&["k"]).unwrap().sum().unwrap());
     });
     timeit("sgb.transform_sum wide", || {
         std::hint::black_box(sv.groupby(&k).unwrap().transform("sum").unwrap());

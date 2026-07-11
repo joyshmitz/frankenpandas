@@ -28,7 +28,7 @@ fn main() {
             let nm = format!("c{c}");
             let col: Vec<Scalar> = if bools {
                 (0..n)
-                    .map(|i| Scalar::Bool(sm(i, c as u64 + seed) % 2 == 0))
+                    .map(|i| Scalar::Bool(sm(i, c as u64 + seed).is_multiple_of(2)))
                     .collect()
             } else {
                 (0..n)

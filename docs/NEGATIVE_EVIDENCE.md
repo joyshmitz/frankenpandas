@@ -13865,3 +13865,34 @@ REMOTE GATES: full `fp-conformance` is green (**2048/0**, 16 ignored), including
 `fp-frame`/example backlog, with no finding in either touched groupby file. No local Cargo command or fallback was used. Risk
 note: dispatch precedence only; no compatibility, threat, recovery, or security surface changed. Bead:
 `br-frankenpandas-41c95`.
+
+### 2026-07-10 cc_fp — WIN: Bool `sum` typed &[bool] count bypasses Scalar materialization + autovectorizes — 5.496x fp-side, bit-identical (biggest micro-opt of the session)
+
+`Column::sum` had typed fast paths for Float64 and Timedelta64 but NOT Bool, so a Bool column's `sum` fell to
+`nansum(&self.values)` — materializing a `Vec<Scalar>` (≈24 B/elem ⇒ ~192 MB @ 8M) then a per-Scalar `to_f64` fold. Added a Bool
+fast path: `as_bool_slice()` → `data.iter().filter(|&&b| b).count()` (a branchless count LLVM autovectorizes over the 8 MB
+`Arc<[bool]>`), returning `Scalar::Float64(count as f64)`.
+
+Why 5.5x (biggest typed micro-opt — median/quantile were ~2x): this removes TWO compounding costs — the ~192 MB `Vec<Scalar>`
+materialization AND the per-Scalar `to_f64` dispatch — and replaces the fold with an autovectorized byte count over a 24× smaller
+buffer. BIT-IDENTICAL: `Bool.to_f64()` is exactly `1.0`/`0.0`, so `nansum` returns `Float64(Σ)`; a sequential f64 fold of 0.0/1.0
+values is EXACT (every partial sum is an integer < 2^53), so `Σ == count`, and `count as f64` is that same exact value. Common op:
+`(s > x).sum()` / `mask.sum()` counts filter matches.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `nansum(col.values.as_slice())` vs CAND `sum()`
+interleaved, per-arm A/A null control; 8M ~50%-true bools):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `93ef3fa9bb028087da271bdb307ac384edaabec3e741868ef9a4f07396d77cc5` |
+| worker | `vmi1227854` |
+| ORIG `nansum(Vec<Scalar>)` | 267.290 ms (cv 1.46%) |
+| CAND typed `&[bool]` count | 48.635 ms (cv 8.88%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0381x -> 3.81% floor** |
+| **fp-side ratio (min-of-blocks)** | **5.496x (+449.6%) — DECIDABLE (449.6% is ~118x the 3.81% floor)** |
+
+CAND cv is high (8.88%) because the fast path is so fast (~48 ms) that fixed timing jitter is relatively larger on the noisy
+`vmi1227854`, but the min-of-blocks ratio clears the floor by ~118x — robust. BIT-IDENTICAL: the A/B parity asserts equality vs
+the exact Scalar `nansum` on mixed, all-true, all-false, and empty. GREEN remote fail-closed: fp-columnar lib **475/0**,
+fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. `crates/fp-frame` untouched. SIBLINGS still open: `any`/`all`
+(typed `&[bool]` any/all with early-exit — Bool output, trivially bit-identical) — the same `as_bool_slice` bypass.

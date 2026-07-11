@@ -13982,3 +13982,47 @@ for Datetime64/Timedelta64, mirroring the Utf8 family. This lever ALSO plugs the
 bonus (same primitive). Remaining fp-columnar typed micro-opts: Int64 `median`/`quantile`. The next genuine STRUCTURAL swing still
 needs radix-partitioned `value_counts`/`mode` (first-seen-order-hard) or cod's fp-join/groupby crates.
 
+### 2026-07-11 cc_fp — WIN: Int64 `median` typed &[i64]→f64 select bypasses Scalar materialization — 4.134x fp-side, bit-identical (extends the order-statistics typed-select family to Int64)
+
+`Column::median` had a Float64 typed path but Int64 fell to `nanmedian(&self.values)`, which coerces `self.values` to `&[Scalar]`
+(materializing a `Vec<Scalar::Int64>`, ~24 B/elem) then `collect_finite` maps each `Scalar::Int64` through per-Scalar `to_f64` (an
+enum match). Extracted the Float64 path's order-statistics core into `median_from_f64_vec(Vec<f64>)` and added an Int64 branch:
+`as_i64_slice()` → `data.iter().map(|&v| v as f64).collect()` → the SAME helper. Both fast paths now provably run the identical
+computation `nanmedian`'s numeric arm performs.
+
+BIT-IDENTICAL: `nanmedian`'s numeric arm is `collect_finite(values)` then O(n) `select_nth_unstable_by(mid, partial_cmp)` +
+odd/even midpoint. For an all-valid Int64 column `collect_finite` = `data.iter().map(|&v| v as f64)` in order (nothing missing to
+drop, `to_f64` never NaN for i64) — exactly the CAND's conversion; `v as f64` is exact for |v| < 2^53 and IDENTICALLY lossy above
+it on both sides, so the order statistics agree. Timedelta64/Datetime64 are NOT affected: `as_i64_slice` gates `dtype == Int64`,
+so `nanmedian`'s dtype-preserving Timedelta64 arm (checked BEFORE the numeric arm) still runs for those. Parity asserted vs the
+exact Scalar `nanmedian` across even/odd/empty sizes AND a large-magnitude (> 2^53) case.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `nanmedian(col.values.as_slice())` vs CAND `median()`
+interleaved, per-arm A/A null control; 4M all-valid i64):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `1efd54de26b65cc6f537f3f6bfb0d698d73840d1b10f9b2165e425d4ae576e23` |
+| worker | `vmi1152480` (noisy) |
+| ORIG `nanmedian(Vec<Scalar>)` | 73.226 ms (cv 6.92%) |
+| CAND typed `&[i64]`→f64 select | 17.713 ms (cv 8.96%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0664x -> 6.64% floor** |
+| **fp-side ratio (min-of-blocks)** | **4.134x (+313.4%) — DECIDABLE (313% is ~47x the 6.64% floor)** |
+
+⚠️ HONEST — the worker was NOISY (`vmi1152480`, cv ~7-9%, A/A floor 6.64%); a first run on the same worker gave 4.301x @ 14.56%
+floor. Both clear the floor decisively (DECIDABLE) and the min-of-blocks ratio is stable at ~4.1–4.3x, so the WIN is robust even
+though the precise magnitude carries the worker's noise. This is BIGGER than the Float64 median (2.066x, `bafe9faef`) because the
+Int64 ORIG stacks TWO costs: the `Vec<Scalar::Int64>` materialization AND `collect_finite`'s per-Scalar enum-match `to_f64` (vs
+Float64's trivial value extraction).
+
+GREEN remote fail-closed: fp-columnar lib **478/0**; rustfmt clean; clippy `-D warnings` clean. fp-conformance
+FUNCTIONAL/DIFFERENTIAL suite GREEN (**1595/0** in the run that got a slot); the sole red — `cargo_lock_excludes_tokio_runtime_family`
+— is a PEER-TRANSIENT supply-chain artifact (a concurrent uncommitted dependency edit regenerated `Cargo.lock` with tokio during
+that one remote build; the local + origin `Cargo.lock` are tokio-free and this lever touches NO dependencies), so it is unrelated
+to this change; a fully-clean 2048/0 re-run is blocked on fleet saturation (no slot — SURFACED per the no-local-cargo rule).
+`crates/fp-frame` untouched.
+
+Order-statistics typed-select family now covers Float64 median/quantile + Int64 median. IMMEDIATE sibling: Int64 `quantile` (same
+`as_i64_slice`→f64 helper-extraction pattern against `nanquantile`). Remaining fp-columnar typed micro-opts after that: Int64
+var/std/skew/kurt/prod/sem (all still generic `nan*` for non-Float64).
+

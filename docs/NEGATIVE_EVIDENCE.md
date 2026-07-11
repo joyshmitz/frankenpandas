@@ -14645,3 +14645,39 @@ reconciliation is a peer nudge, not a cc_fp task.
 **CORRECTION recorded:** `skew` and `kurt` were ALREADY Int64-optimized — they use `typed_collect_finite_f64()` (which covers
 `as_i64_slice`), not the Float64-only `as_f64_slice`. So the Int64 reduction family is now CLOSED: var/std/skew/kurt/**sem** all
 typed; only `prod` remains untyped for Int64 (skipped — Int64 integer-output, different overflow semantics, not a Float64 bypass).
+
+
+### 2026-07-11 cc_fp — REJECT (byte-identity-blocked): typed Int64 fast path for default `Series.shift` (NaN fill)
+
+TRIAGE + LEDGER-FIRST survey (bv --robot-triage + this ledger): the actionable perf beads are cod-claimed (uza04 + RangeIndex
+correctness children) or, per this ledger, unmeasurable / not byte-identical — `br-6vep3`/`br-g1de8` (general dedup / value_counts
+FxHashMap) have NO measured win (the SipHash "general" path is only hit by non-typed/mixed columns no bench exercises; the
+typed/dense paths already win), and `br-8qn9i` (Series.astype route-through) is explicitly NOT bit-transparent (Float64->Int64
+error->truncate). The astype Utf8->numeric losses this ledger flagged were already flipped LOSS->WIN (2026-07-01). The fp-columnar
+typed-materialization-bypass families are all CLOSED (reductions var/std/skew/kurt/sem/median/quantile/min/max/sum/mean/prod/any/all,
+cardinality unique/value_counts/nunique/duplicated/mode/isin, searchsorted all dtypes, cumulative cumsum/cummax/cummin + diff +
+pct_change, clip/abs/mask/rank/shift-common) — verified by code inspection.
+
+PROFILED CANDIDATE (real gap, reachable): the default `int64.shift(periods)` (missing fill) skips all three frame fast paths in
+`Series::shift_with_fill_value` (they need a Float64 column or a `Scalar::Int64` fill) and hits the generic tail
+(`self.column.values()` Vec<Scalar> materialization + `Column::from_values` rebuild). Existing `bench_shift.rs` only covers the
+Int64-**fill** path (already typed), so this NaN-fill path is un-benched.
+
+WHY BYTE-IDENTITY-BLOCKED: `infer_dtype([Null(NaN), Int64,..])` = Int64 (Null is `DType::Null`, skipped), and
+`Column::new(Int64, ..)`'s no-coercion branch runs `normalize_missing_for_dtype`, whose FIRST arm PRESERVES `Null(NullKind::NaN)`
+(does NOT remap to the Int64 canonical `Null(NullKind::Null)`). So the generic output is a **Vec<Scalar>-backed nullable Int64 with
+`Null(NaN)` missing slots**. A typed `from_i64_values_with_validity` backing materializes `Null(NullKind::Null)` — parity test
+(`ab_shift_i64_nanfill` example) FAILED at periods=1 exactly here (Null(NaN) != Null(Null)). The only byte-identical variant (build
+the out `Vec<Scalar>` directly off `as_i64_slice`, skipping the source `values()` materialization, then the SAME `from_values`)
+still pays the dominant `from_values` normalize+rebuild and only helps an UNCACHED source, so the ceiling is ~1.25x — below a
+useful, clearly-decidable bar. NOT SHIPPED; production `crates/fp-frame/src/lib.rs` reverted to peer state (byte-for-byte).
+
+RETRY-CONDITION: only worthwhile if the shift-of-int64 OUTPUT representation is first normalised to typed nullable Int64 with
+`Null(Null)` (or Float64, matching pandas int64.shift -> float64) — a deliberate parity/golden change with conformance regen,
+OUTSIDE the byte-identical constraint. The A/B harness lives at `crates/fp-frame/examples/ab_shift_i64_nanfill.rs`.
+
+FRONTIER+HOLD: the clean, measurable, byte-identical typed-bypass frontier in the cc lane (fp-columnar + fp-frame Series/DataFrame,
+excluding cod's groupby/join/io) is exhausted. The one remaining fp-columnar STRUCTURAL vein — radix-partition `value_counts`/`mode`
+at high cardinality — is byte-identity-hard: at high card nearly every value ties at count 1, so the stable first-seen tie order
+dominates the sorted output, and radix partitioning scrambles first-seen order (recovering it needs a per-value min-index pass that
+defeats the cache-locality the radix win depends on). Needs an explicit design decision before a real attempt.

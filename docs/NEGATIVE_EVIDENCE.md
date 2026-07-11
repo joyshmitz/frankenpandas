@@ -14312,3 +14312,39 @@ materialization the searches force) has run-to-run timing jitter; but the min-of
 the verdict is robust. The win is the ~2.6 s of redundant validation removed (1000 × O(4M) → 1 × O(4M)); materialization (~140 ms)
 is common to both arms. Applies to ALL dtypes using the sorter path. GREEN remote fail-closed: fp-columnar lib **484/0**,
 fp-conformance **2048/0** (clean run); rustfmt clean; clippy `-D warnings` clean. `crates/fp-frame` untouched.
+
+
+### 2026-07-11 cc_fp — WIN: `searchsorted_values` gains a Float64 `partition_point` typed path — 57.9x median, bit-identical
+
+`Column::searchsorted_values` already had typed `partition_point` fast paths for Int64, Datetime64, and (byte-span) Utf8, but a
+sorted **Float64** column fell to the per-needle generic `searchsorted_position`, which accesses `&self.values[mid]` and thereby
+forces `as_slice()`'s `get_or_init` to materialize the WHOLE `Vec<Scalar::Float64>` (24 B/elem, ~96 MB at 4M) just to serve `k`
+searches — the SUB-LINEAR-TAKE pathology (work is O(k·logN) but the generic path pays O(N) materialization, ~99% of the cost). The
+lever: when `as_f64_slice()` is `Some` (all-valid Float64) and every needle is a **non-NaN** `Scalar::Float64`, run
+`partition_point(|&v| v < nv)` (side="left") / `(|&v| v <= nv)` (side="right") over the raw `&[f64]` — zero allocation, mirroring
+the Int64 arm.
+
+**BIT-IDENTITY (under searchsorted's sorted precondition):** a sorted Float64 column sorts NaN LAST, so for a non-NaN needle the
+predicate `v < nv` is partitioned `[< nv | >= nv | NaN]` (`NaN < nv` is false, so any NaN datum lands in the `>=` tail exactly
+where `compare_scalars_na_last` places it), giving the same first-`>=` (left) / first-`>` (right) index the generic binary search
+returns; `-0.0`/`+0.0` compare equal on both paths. A **NaN needle is deliberately EXCLUDED from the guard** — it is MISSING, so
+the whole batch falls through to the generic loop, which errors `ValueIsMissing{NaN}` identically to the per-needle path (were NaN
+NOT excluded, `partition_point(v < NaN)` would silently return 0 instead of erroring: divergence). A non-Float64 needle also fails
+the all-Float64 guard and falls through to the generic cross-dtype comparator.
+
+**MEASURED (substrate-v2, one binary / one rch invocation, interleaved ORIG/CAND, per-arm A/A null control, min-of-9-blocks,
+median gate; N=4,000,000, needles=1,000, worker vmi1149989):**
+
+| arm | min ms | cv |
+| --- | --- | --- |
+| ORIG generic `Vec<Scalar>` bsearch | 31.312 | 5.84% |
+| CAND `partition_point &[f64]` | 0.541 | 27.90% |
+
+fp-side ratio ORIG/CAND = **57.897x** (+5689.7%); NULL-CONTROL (CAND A/A) median 1.1264x, floor 12.64% — **DECIDABLE** (effect
+≈450x the elevated floor; CAND's higher cv is sub-ms timing jitter that the paired A/A floor already prices in).
+
+Parity test `ab_f64_searchsorted_parity` asserts typed == per-needle-generic for BOTH sides across before-first / present-first /
+present-mid-exact / just-below / just-above / present-last / after-last needles, plus empty needles, plus that a NaN needle errors
+on BOTH paths. GREEN remote fail-closed: fp-columnar lib **485/0**, fp-conformance all-green (main suite **1596/0**, searchsorted
+oracle `_left`/`_right`/`_exact_match`/`_integers`/`_strings` all pass, tokio supply-chain policy passed this run); rustfmt clean;
+clippy `-D warnings` clean. `crates/fp-frame` and cod's groupby/join untouched.

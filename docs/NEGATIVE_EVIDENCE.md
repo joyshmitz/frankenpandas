@@ -14589,3 +14589,15 @@ Null(NaN) boundary and a single element) plus a signed large-magnitude column. G
 **488/0**, fp-conformance all-green (main suite **1596/0**, tokio supply-chain policy passed); rustfmt clean; clippy `-D warnings`
 clean. `crates/fp-frame` and cod's groupby/join untouched. Remaining sibling reductions: Int64 `skew`, `kurt` (collect_finite +
 moment math), `sem` (NO typed path at all).
+
+### 2026-07-11 HazyPrairie — FRONTIER+HOLD: groupby/join/IO cod lane remains exhausted
+
+Rechecked after current `origin/main` moved only in cc-owned `fp-columnar` (`std` Int64 typed path, `7d23e78f0`). No
+groupby, join, or IO source changed. The cod-owned groupby Var/Std mean-hoist remains a measured no-ship
+(`68c4b536e`); join `br-frankenpandas-nzqj6` remains blocked because remote profiling denied `cycles:u`; and IO
+`br-frankenpandas-92n1x` remains blocked before its post-parallel `read_json(records)` baseline. The only apparent open
+alternatives are cc-assigned index gather work, an older cod-b RangeIndex task without profile evidence, or golden-breaking
+moment arithmetic. None is an eligible output-identical one-lever cod change for this request.
+
+This is a frontier+hold closeout. No Cargo command was run because there was no honest candidate to gate; no local Cargo
+fallback occurred. Existing blocked beads and the prior measured rows remain the resumption points.

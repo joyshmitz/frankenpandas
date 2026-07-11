@@ -14542,3 +14542,17 @@ The corrected build used exactly
 `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench -p fp-groupby --example bench_groupby_median dense_int64_var_mean_hoist_ab -- --exact --nocapture`;
 no local Cargo command ran. Agent Mail registration succeeded, but its exclusive reservation write still failed on the malformed
 SQLite index, so the isolated current-main worktree, Beads, and Git remain coordination truth.
+
+### 2026-07-11 HazyPrairie — FRONTIER+HOLD: no eligible output-identical cod lane remains
+
+This follow-up re-ranked the four user-authorized non-columnar families against current `origin/main` after the corrected
+groupby gate. Groupby Var/Std mean hoisting is a measured no-ship (`68c4b536e`); wide rolling indexed heaps are a measured
+no-ship (`c599f3a3e`); join `br-frankenpandas-nzqj6` has only a baseline because remote `perf_event_paranoid=4` denied the
+profile; and IO `br-frankenpandas-92n1x` still lacks a fresh post-parallel phase attribution because its strict remote baseline
+was refused before compilation. No new profile-backed one-lever candidate survives these holds.
+
+The remaining open-looking items are fenced or invalid for this request: `br-frankenpandas-0rhjk` is cc-assigned index
+gather work, `br-frankenpandas-wvlfh` is an older cod-b RangeIndex/index-owned code-first task with no profile, and stale
+`br-frankenpandas-nsyti` requires the golden-breaking `powf` arithmetic change rather than output-identical behavior. The
+current ledger therefore has no honest candidate to build or benchmark. This is a frontier+hold closeout, not a performance
+claim: no Cargo command was run, and no local Cargo fallback occurred.

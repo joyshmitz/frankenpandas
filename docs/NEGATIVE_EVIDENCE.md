@@ -14742,3 +14742,50 @@ RETRY-CONDITION for the 14.9x: a deliberate PARITY change with golden regen — 
 shift missing (repr "NaN"->"None"), OR (better, pandas-exact) make int64.shift() return **Float64** [NaN,..] like pandas (missing
 stays "NaN", present "1"->"1.0", dtype Int64->Float64). Both are observable-output changes needing conformance/golden regen — a
 human parity decision, outside "byte-identical".
+
+### 2026-07-11 HazyPrairie — SURFACE: ordered-unique outer join no-Utf8 plan gate measures 1.371x, final strict-remote validation denied admission
+
+Negative-ledger-first routing plus `bv --robot-triage` (`data_hash=af9128bf0c909c65`) excluded cc-owned columnar work, the
+measured groupby Var/Std mean-hoist and wide-rolling indexed-heap no-ships, and the peer-active `fp-io` JSON chunk-concatenation
+A/B hunk. The remaining resumable cod-owned lane was the ordered-unique Int64 outer merge behind
+`br-frankenpandas-nzqj6`; its earlier remote `perf` profile had been blocked by `perf_event_paranoid=4`, so this pass used coarse
+in-process phase timers inside the existing Criterion row instead of retrying the forbidden sampler.
+
+Fresh strict-remote baseline on current `origin/main`, worker `vmi1227854`, Criterion row
+`joins/merge_outer/rows/50000`: point estimate **2.0874 ms** with 95% interval **[2.0389, 2.1384] ms**, 100 samples and six high
+outliers. Temporary median-of-32 phase aggregation ranked the retained path as: position tapes **0.906022 ms**, output-column
+compute **0.672006 ms**, output setup **0.289439 ms**, final insertion **0.004296 ms**. The instrumented absolute time was not
+used as a performance claim; the phase split only established that setup was a measured top-three opportunity.
+
+Exactly one join-only lever was attempted: in `build_single_key_ordered_unique_outer_merge_output`, construct each shared
+optional-Utf8 gather plan only when that input frame actually contains a contiguous Utf8 column. On the profiled numeric frame,
+the old code scanned both full position tapes to build plans that `reindex_eager_utf8_with_plan` could never consume; every
+column immediately took the unchanged typed or generic reindex fallback. Utf8-bearing frames kept the old plan path unchanged.
+
+The one-binary gate on remote worker `vmi1264463` used 25 alternating reference/candidate pairs and 13 adjacent candidate A/A
+pairs:
+
+| arm | median |
+| --- | ---: |
+| reference, both unused Utf8 plans forced | 5.272840 ms |
+| candidate, no-Utf8 plans skipped | 3.847150 ms |
+| candidate A/A controls | 3.826531 / 4.428218 ms |
+
+Reference/candidate ratio was **1.370583x** (+37.06%). The adjacent A/A null ratio was noisy at **1.157241x** (15.72% floor),
+but the effect still cleared that floor by about **2.36x**. The same binary compared reference and candidate outputs exactly:
+index labels, column order, dtype, scalar/null variants, every non-float scalar, and every Float64 payload via `to_bits()` were
+identical.
+
+**SURFACED, NOT SHIPPED:** the first final-validation command used the required fail-closed prefix exactly:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fp-join merge_outer_ordered_unique_int64_subset_matches_generic_validated_route -- --exact --nocapture`
+
+RCH stopped before compilation with `no admissible workers: insufficient_slots=7,hard_preflight=2` and `remote required;
+refusing local fallback (no worker assigned)`. Per the terminal `rch degraded = SURFACE` rule, there was no retry and no local
+Cargo command. The temporary timers, force switch, A/B harness, and production candidate were all removed; `crates/fp-join`
+is byte-identical to `origin/main`.
+
+**FRONTIER+HOLD / RETRY-CONDITION:** this is a measured positive candidate, not a reject. Resume only after strict RCH admission
+materially changes: reapply the no-Utf8 plan gate, run the focused ordered-outer equality test plus full `fp-join`, conformance,
+check, clippy, and fmt gates through strict RCH plus targeted UBS, then rerun the one-binary median gate if source ancestry
+changed. Do not retry remote `perf`, the rejected groupby/rolling levers, or the peer-owned IO chunk-concatenation hunk.

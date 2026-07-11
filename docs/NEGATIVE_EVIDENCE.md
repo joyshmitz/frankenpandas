@@ -14409,3 +14409,28 @@ boundary scanning, parallel parsing, serial per-column chunk merge, typed column
 then score and implement one lever, using a one-binary interleaved A/B plus an adjacent A/A median floor and exact frame equality.
 Agent Mail reservation writes were also unavailable because its malformed SQLite index opened the corruption circuit breaker;
 Git, the isolated `origin/main` worktree, and the Bead were used without disturbing shared-tree peer work.
+
+### 2026-07-11 HazyPrairie — SURFACE retry: profiled dense groupby Var/Std A/B still blocked at RCH admission
+
+The next cod-lane pass resumed `br-frankenpandas-moyq8`, not a cc-owned columnar/string operation. This remains the strongest
+ready exact-output lever: prior same-worker profiling put the division-bearing dense Var/Std second pass at **7.288 ms median**,
+or **38.11%** of the **19.122 ms** phase total, for an opportunity score of **20**. The one lever computes each populated
+bucket's existing `sum / count` division once in the completed `sum` workspace, then loads that identical Float64 result during
+the unchanged row-order squared-deviation fold. No reciprocal multiply, reassociation, fallback change, or output-order change
+was admitted.
+
+The temporary candidate and one-binary gate were recreated with 25 alternating reference/candidate pairs, exact output-bit
+assertion, and 13 adjacent candidate/candidate pairs for the median null floor. The first and only strict-remote invocation was:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench -p fp-groupby --example bench_groupby_median dense_int64_var_mean_hoist_ab -- --exact --nocapture`
+
+RCH again stopped before compilation with `no admissible workers: insufficient_slots=7,hard_preflight=2`, followed by
+`remote required; refusing local fallback (no worker assigned)`. Per the user-defined `rch degraded=SURFACE` terminal rule,
+there was no retry, no alternate Cargo target, and no local Cargo command. All temporary benchmark-switch, A/B-harness, and
+candidate code was removed; both `fp-groupby` files are byte-identical to `origin/main`. No new timing or keep/reject claim is
+made.
+
+**BLOCKED, NOT REJECTED:** resume only after strict remote admission materially changes, then recreate the same one-binary median
+gate and prove exact Var and Std bits across sorted/first-seen order, missing/singleton/all-missing groups, cancellation,
+infinities, and signed zero. Agent Mail reservation writes still fail on its malformed SQLite index, so Git, the isolated
+current-main worktree, and the Bead remain the coordination truth.

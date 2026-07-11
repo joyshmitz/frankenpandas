@@ -14195,3 +14195,46 @@ not output-identical — deliberately left on the generic path. (2) Utf8 argmin 
 every Utf8 value skipped → returns `None`); making it work would be a correctness change, and Series `idxmin` on Utf8 is already
 handled in fp-frame (br-7db78). (3) f64/i64 argmin still materialize (numeric, out of the string/temporal lane) — a clean ~2-4x
 sibling for later (f64: skip-NaN + f64 compare; i64: f64 compare over the raw slice to match `nanargmin`'s lossy `to_f64`).
+
+### 2026-07-11 cc_fp — WIN: contiguous-Utf8 `searchsorted` byte-span binary search bypasses Scalar materialization — 82.4x fp-side, bit-identical (BIGGEST win of the campaign)
+
+`Column::searchsorted_values` had typed fast paths for Int64 and Datetime64 (`partition_point` over the raw slice) but NOT Utf8, so
+a Utf8 column fell to per-needle `searchsorted_position`, whose binary search reads `&self.values[mid]` — forcing `as_slice()` to
+materialize the WHOLE `Vec<Scalar::Utf8>` (one heap `String` per row, via the `get_or_init` OnceCell) just to serve `k` searches.
+Added a contiguous-Utf8 branch: an all-valid Utf8 column with all-Utf8 needles binary-searches directly over the byte spans.
+
+BIT-IDENTICAL: the typed search uses the SAME `lo/hi/mid` probe sequence and the SAME go-right rule as `searchsorted_position`
+(`mid < needle` for side="left", `mid <= needle` for "right"), with `&[u8]` order == `&str`/`String` order for valid UTF-8
+(`compare_scalars_na_last` on two Utf8 = `str::cmp`). `as_utf8_contiguous` matches only an all-valid backing so the
+"missing-sorts-last" branch never fires (no sorter here either); a manual binary search (not `partition_point`) means the probe
+sequence matches the generic path exactly on ALL inputs, not just sorted. Non-Utf8 needles fall through to the generic
+cross-dtype comparator. Parity asserted vs the generic `searchsorted_position` for BOTH sides across before-first / present-first
+/ present-mid / present-last / after-last / after-all needles, plus empty needles.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG per-needle `searchsorted_position` vs CAND `searchsorted_values`
+interleaved, per-arm A/A null control; 4M sorted `"val_{:07}"` rows, 1000 needles, side="left"):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `4cec0f37f16087d848d8a1b07af2f0071cf8a3acaf93e72df2307cdcee3c3b54` |
+| worker | `vmi1293453` |
+| ORIG generic `Vec<Scalar>` bsearch | 145.124 ms (cv 2.16%) |
+| CAND byte-span bsearch | 1.761 ms (cv 4.82%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0145x -> 1.45% floor** |
+| **fp-side ratio (min-of-blocks)** | **82.426x (+8142.6%) — DECIDABLE (8142% is ~5600x the 1.45% floor)** |
+
+82x — the LARGEST win of the campaign (prev: min/max 18x, argmin 14.8x) — because `searchsorted` does only O(k·log N) USEFUL work
+(here ~22k byte comparisons) but the generic path pays O(N) String materialization (4M `String` allocs, ~99% of the 145 ms) merely
+to make `&self.values[mid]` addressable. The byte-span path does the SAME ~22k comparisons with ZERO allocation. This is the
+sharpest instance of the byte-span vein's rule: **the win is biggest when the op's real work is sub-linear but the generic path
+still forces a full O(N) `Vec<Scalar::Utf8>` materialization** (min/max fully scan, so materialization ≈ work; searchsorted's work
+is tiny, so materialization ≫ work). GREEN remote fail-closed: fp-columnar lib **482/0**; rustfmt clean; clippy `-D warnings`
+clean. fp-conformance: all **2047 functional tests pass — INCLUDING every searchsorted test** this lever exercises
+(`live_oracle_series_searchsorted_strings` / `_left` / `_right` / `_exact_match` / `_integers`, all `ok`); the sole red is
+`ci_supply_chain_policy::cargo_lock_excludes_tokio_runtime_family` — a recurring workspace/peer supply-chain artifact (the remote
+build regenerates `Cargo.lock` with tokio from a concurrent peer dep edit; the local `Cargo.lock` is tokio-free and this lever
+touches NO dependencies), so it is provably unrelated to this change. `crates/fp-frame` untouched.
+
+REFUTES last turn's "string/temporal clean frontier empty" — sub-linear-work Utf8 consumers (searchsorted) are a distinct,
+un-harvested sub-vein. Siblings worth checking with the SAME lens (sub-linear work forcing O(N) materialization): Utf8 `get_indexer`
+/ label-lookup binary searches, any `iloc`/`take` over a contiguous-Utf8 that materializes to index a few rows.

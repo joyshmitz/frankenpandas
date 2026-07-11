@@ -17374,6 +17374,46 @@ impl Column {
                 .collect();
             return Ok(Self::from_i64_values_owned(out));
         }
+        // Contiguous-Utf8 analogue: an all-valid (sorted) Utf8 column with all-Utf8
+        // needles binary-searches over the byte spans directly, instead of
+        // `searchsorted_position` accessing `&self.values[mid]` -- which forces
+        // `as_slice()` to materialize the WHOLE `Vec<Scalar::Utf8>` (one heap
+        // `String` per row) just to serve `k` searches. Bit-identical: same
+        // lo/hi/mid probe sequence and the same go-right rule (mid < needle for
+        // "left", mid <= needle for "right") as `searchsorted_position`, with
+        // `&[u8]` order == `&str`/`String` order for valid UTF-8. `as_utf8_contiguous`
+        // matches only an all-valid backing, so the "missing sorts last" branch
+        // never fires (no sorter here either). Any non-Utf8 needle falls through to
+        // the generic cross-dtype comparator.
+        if (side == "left" || side == "right")
+            && needles.iter().all(|n| matches!(n, Scalar::Utf8(_)))
+            && let Some((bytes, offsets)) = self.as_utf8_contiguous()
+        {
+            let left = side == "left";
+            let n_spans = offsets.len().saturating_sub(1);
+            let out: Vec<i64> = needles
+                .iter()
+                .map(|n| {
+                    let nb = match n {
+                        Scalar::Utf8(s) => s.as_bytes(),
+                        _ => unreachable!("guarded all-Utf8 above"),
+                    };
+                    let (mut lo, mut hi) = (0usize, n_spans);
+                    while lo < hi {
+                        let mid = lo + (hi - lo) / 2;
+                        let span = &bytes[offsets[mid]..offsets[mid + 1]];
+                        let go_right = if left { span < nb } else { span <= nb };
+                        if go_right {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    lo as i64
+                })
+                .collect();
+            return Ok(Self::from_i64_values_owned(out));
+        }
         let positions: Vec<Scalar> = needles
             .iter()
             .map(|needle| self.searchsorted_position(needle, side, None))
@@ -38630,6 +38670,196 @@ mod ab_td_argminmax_ccfp {
         );
         println!(
             "  CAND typed &[i64] scan      min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_utf8_searchsorted_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, DType, Scalar};
+
+    /// SORTED contiguous-Utf8 buffer of fixed-width `"val_{:07}"` labels for
+    /// `0..n` (zero-padded ⇒ lexicographically sorted, searchsorted's precondition).
+    fn sorted_utf8(n: usize) -> (Vec<u8>, Vec<usize>) {
+        let mut bytes = Vec::with_capacity(n * 11);
+        let mut offsets = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        for i in 0..n {
+            bytes.extend_from_slice(b"val_");
+            let mut buf = [0u8; 7];
+            let mut k = i;
+            for slot in buf.iter_mut().rev() {
+                *slot = b'0' + (k % 10) as u8;
+                k /= 10;
+            }
+            bytes.extend_from_slice(&buf);
+            offsets.push(bytes.len());
+        }
+        (bytes, offsets)
+    }
+    /// Faithful replica of the pre-lever generic path: per-needle
+    /// `searchsorted_position` (forces the whole `Vec<Scalar::Utf8>` via
+    /// `&self.values[mid]`), then a Vec<Scalar::Int64> position column.
+    fn orig_ss(col: &Column, needles: &[Scalar], side: &str) -> Column {
+        let positions: Vec<Scalar> = needles
+            .iter()
+            .map(|needle| col.searchsorted_position(needle, side, None))
+            .map(|r| r.map(|p| Scalar::Int64(p as i64)))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("searchsorted");
+        Column::new(DType::Int64, positions).expect("int64 col")
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    fn ab_utf8_searchsorted_parity() {
+        // Typed byte-span binary search == generic searchsorted_position for
+        // BOTH sides across before-first / present-first / present-mid /
+        // present-last / after-last / after-all needles, plus empty needles.
+        let (b, o) = sorted_utf8(10_000);
+        let col = || Column::from_utf8_contiguous(b.clone(), o.clone());
+        let needles: Vec<Scalar> = [
+            "aaa",
+            "val_0000000",
+            "val_0005000",
+            "val_0009999",
+            "val_0010000",
+            "zzz",
+        ]
+        .iter()
+        .map(|s| Scalar::Utf8((*s).to_string()))
+        .collect();
+        for side in ["left", "right"] {
+            assert_eq!(
+                orig_ss(&col(), &needles, side).values.as_slice(),
+                col()
+                    .searchsorted_values(&needles, side)
+                    .expect("ss")
+                    .values
+                    .as_slice(),
+                "utf8 searchsorted diverged side={side}"
+            );
+        }
+        let empty: Vec<Scalar> = Vec::new();
+        assert_eq!(
+            orig_ss(&col(), &empty, "left").values.as_slice(),
+            col()
+                .searchsorted_values(&empty, "left")
+                .expect("ss")
+                .values
+                .as_slice(),
+            "utf8 searchsorted empty-needles diverged"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_utf8_searchsorted() {
+        const N: usize = 4_000_000;
+        const NEEDLES: usize = 1_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let (bytes, offsets) = sorted_utf8(N);
+        let mk_col = || Column::from_utf8_contiguous(bytes.clone(), offsets.clone());
+        let needles: Vec<Scalar> = (0..NEEDLES)
+            .map(|j| Scalar::Utf8(format!("val_{:07}", j * (N / NEEDLES))))
+            .collect();
+
+        // Parity guard inside the perf run too.
+        assert_eq!(
+            orig_ss(&mk_col(), &needles, "left").values.as_slice(),
+            mk_col()
+                .searchsorted_values(&needles, "left")
+                .unwrap()
+                .values
+                .as_slice(),
+            "utf8 searchsorted diverged (perf)"
+        );
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_ss(&mk_col(), &needles, "left"));
+            std::hint::black_box(mk_col().searchsorted_values(&needles, "left").unwrap());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_ss(std::hint::black_box(&co), &needles, "left"));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(
+                    std::hint::black_box(&c1)
+                        .searchsorted_values(&needles, "left")
+                        .unwrap(),
+                );
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(
+                    std::hint::black_box(&c2)
+                        .searchsorted_values(&needles, "left")
+                        .unwrap(),
+                );
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB utf8 searchsorted (ONE binary, ONE invocation) N={N} needles={NEEDLES}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic Vec<Scalar> bsearch min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND byte-span bsearch           min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

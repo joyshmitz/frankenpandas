@@ -14601,3 +14601,47 @@ moment arithmetic. None is an eligible output-identical one-lever cod change for
 
 This is a frontier+hold closeout. No Cargo command was run because there was no honest candidate to gate; no local Cargo
 fallback occurred. Existing blocked beads and the prior measured rows remain the resumption points.
+
+### 2026-07-11 cc_fp — WIN: `Column::sem` typed std/sqrt(n) over the raw buffer instead of nansem — 6.3x median, bit-identical (Int64 + Float64)
+
+Completes the Int64 reduction family. `sem` had NO typed path at all (not even Float64): `sem(ddof)` was just
+`nansem(&self.values, ddof)`, which for a non-Timedelta column (a) materializes `Vec<Scalar>`, (b) runs `collect_finite` for the
+count `n`, then (c) calls `nanstd->nanvar` which runs `collect_finite` AGAIN — a DOUBLE collect_finite plus the materialization.
+The lever adds a typed arm (mirror of the existing `skew`/`kurt` fast paths) that computes everything off
+`typed_collect_finite_f64()`'s `nums` once: `mean`, `sum_sq`, `std = (sum_sq/(n-ddof)).sqrt()`, `sem = std/sqrt(n)`. Because
+`typed_collect_finite_f64` already routes BOTH `as_f64_slice` (filter NaN) and `as_i64_slice` (`x as f64`), this one arm covers
+Float64 AND Int64.
+
+**BIT-IDENTITY:** `nansem`'s numeric arm is `nanstd(values,ddof) / sqrt(collect_finite(values).len())` =
+`nanvar(..).sqrt() / sqrt(n)`. For all-valid Float64/Int64, `typed_collect_finite_f64 == collect_finite` (same filtered `nums`,
+same order), so the same `n`, the same two-pass var `sum_sq/(n-ddof)`, the same `.sqrt()`, and the same `/sqrt(n)` — including the
+`n <= ddof -> Null(NaN)` guard. Deliberately computed off `nums` (NOT `self.std`) so a NaN-carrying all-valid Float64 column
+filters NaN consistently for both the count and the moments (avoiding an `as_f64_slice`-vs-filtered mismatch). Timedelta64
+(`typed_collect_finite_f64 -> None`) keeps nansem's dtype-preserving arm; nullable Float64/Int64 fall through.
+
+**MEASURED (substrate-v2, one binary / one rch invocation, interleaved ORIG/CAND, per-arm A/A null control, min-of-9-blocks,
+median gate; N=4,000,000, ddof=1, worker vmi1227854):**
+
+| arm | min ms | cv |
+| --- | --- | --- |
+| ORIG nansem `Vec<Scalar>` + DOUBLE collect_finite | 78.650 | 7.29% |
+| CAND typed `std/sqrt(n)` `&[i64]` | 12.530 | 7.37% |
+
+fp-side ratio ORIG/CAND = **6.277x** (+527.7%); NULL-CONTROL (CAND A/A) median 1.0827x, floor 8.27% — **DECIDABLE** (effect ≈64x
+the floor). Smaller ratio than `var`/`std` (~11x) is worker-relative (this run's ORIG nansem was 78.6 ms on vmi1227854 vs 128 ms
+nanvar on vmi1264463; the interleaved same-worker ratio is the honest number) plus CAND does the extra sqrt+divide. ORIG replica =
+the exact pre-lever `nansem(col.values.as_slice(), ddof)`.
+
+Parity test `ab_i64_sem_parity` asserts typed == nansem bits for ddof 0/1 across n in {0,1,2,3,1000,4096} (incl. the n<=ddof
+Null(NaN) boundary and a single element) for BOTH Int64 and Float64, plus a signed large-magnitude Int64 column. GREEN remote
+fail-closed: fp-columnar lib **489/0**; rustfmt clean; clippy `-D warnings` clean. `crates/fp-frame` and cod's groupby/join
+untouched. **fp-conformance 1595/1596** — the ONE red is the KNOWN peer/workspace flake
+`ci_supply_chain_policy::cargo_lock_excludes_tokio_runtime_family` ("Cargo.lock contains name = tokio"), NOT my change: my commit
+touches no `Cargo.toml`/`Cargo.lock`, local `Cargo.lock` is tokio-clean (`grep -c 'name = "tokio"'` = 0), and all 1595 real
+correctness tests pass (this same suite came back tokio-clean on my f64/td64/var/std levers earlier today, so a peer just pulled
+tokio into the remote-regenerated lock transitively). Surfaced + cited per the recurring-gotcha protocol; a workspace Cargo.lock
+reconciliation is a peer nudge, not a cc_fp task.
+
+**CORRECTION recorded:** `skew` and `kurt` were ALREADY Int64-optimized — they use `typed_collect_finite_f64()` (which covers
+`as_i64_slice`), not the Float64-only `as_f64_slice`. So the Int64 reduction family is now CLOSED: var/std/skew/kurt/**sem** all
+typed; only `prod` remains untyped for Int64 (skipped — Int64 integer-output, different overflow semantics, not a Float64 bypass).

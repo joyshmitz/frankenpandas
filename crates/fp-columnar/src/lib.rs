@@ -15333,6 +15333,30 @@ impl Column {
     /// Matches `pd.Series.sem(ddof=1)`.
     #[must_use]
     pub fn sem(&self, ddof: usize) -> Scalar {
+        // Typed fast path (mirror of skew/kurt): sem == std / sqrt(n) over the
+        // finite values, computed straight off the raw Float64/Int64 buffer via
+        // typed_collect_finite_f64, skipping nansem's Vec<Scalar> materialization
+        // AND its DOUBLE collect_finite (nansem collects once for `n`, then again
+        // inside nanstd->nanvar). Bit-identical to nansem's numeric arm:
+        // collect_finite == typed_collect_finite_f64 for all-valid Float64/Int64
+        // (same filtered `nums`, same order), so the same n, the same two-pass var
+        // `sum_sq/(n-ddof)`, the same `std = var.sqrt()`, and the same `std/sqrt(n)`
+        // — including the `n <= ddof -> Null(NaN)` guard. Computed entirely off
+        // `nums` (not self.std) so a NaN-carrying all-valid Float64 column filters
+        // NaN consistently for BOTH the count and the moments. Timedelta64
+        // (typed_collect_finite_f64 -> None) keeps nansem's dtype-preserving arm;
+        // nullable Float64/Int64 (validity not all) also fall through.
+        if let Some(nums) = self.typed_collect_finite_f64() {
+            let n = nums.len();
+            if n <= ddof {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let nf = n as f64;
+            let mean = nums.iter().sum::<f64>() / nf;
+            let sum_sq: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+            let std = (sum_sq / (n - ddof) as f64).sqrt();
+            return Scalar::Float64(std / nf.sqrt());
+        }
         nansem(&self.values, ddof)
     }
 
@@ -39706,6 +39730,156 @@ mod ab_i64_std_ccfp {
         );
         println!(
             "  CAND typed sqrt(var) &[i64]            min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_i64_sem_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, Scalar, nansem};
+
+    /// All-valid Int64 column `[0, 1, ..., n-1]` (the `as_i64_slice` typed path).
+    fn mk_col(n: usize) -> Column {
+        Column::from_i64_values_owned((0..n as i64).collect())
+    }
+    /// Bit key for a sem result: Float64 by its bits; Null (n<=ddof) as a sentinel.
+    fn sem_bits(s: &Scalar) -> u64 {
+        match s {
+            Scalar::Float64(v) => v.to_bits(),
+            Scalar::Null(_) => u64::MAX,
+            other => panic!("unexpected sem result: {other:?}"),
+        }
+    }
+    /// The pre-lever path: nansem over the materialized `Vec<Scalar>`.
+    fn orig_sem(col: &Column, ddof: usize) -> Scalar {
+        nansem(col.values.as_slice(), ddof)
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    fn ab_i64_sem_parity() {
+        // Typed sem == nansem (materialized) for ddof 0 and 1, across shapes incl.
+        // the n<=ddof Null(NaN) boundary and a single element -- for BOTH Int64 and
+        // Float64 (the typed_collect_finite_f64 path covers both dtypes).
+        for n in [0usize, 1, 2, 3, 1000, 4096] {
+            let icol = mk_col(n);
+            let fcol = Column::from_f64_values_owned((0..n).map(|i| i as f64 * 1.5).collect());
+            for ddof in [0usize, 1] {
+                assert_eq!(
+                    sem_bits(&orig_sem(&icol, ddof)),
+                    sem_bits(&icol.sem(ddof)),
+                    "i64 sem diverged n={n} ddof={ddof}"
+                );
+                assert_eq!(
+                    sem_bits(&orig_sem(&fcol, ddof)),
+                    sem_bits(&fcol.sem(ddof)),
+                    "f64 sem diverged n={n} ddof={ddof}"
+                );
+            }
+        }
+        // Negative + large-magnitude Int64.
+        let data: Vec<i64> = (0..5000).map(|i| (i as i64 - 2500) * 100_003).collect();
+        let col = Column::from_i64_values_owned(data);
+        for ddof in [0usize, 1] {
+            assert_eq!(
+                sem_bits(&orig_sem(&col, ddof)),
+                sem_bits(&col.sem(ddof)),
+                "i64 sem diverged (signed) ddof={ddof}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_i64_sem() {
+        const N: usize = 4_000_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        const DDOF: usize = 1;
+
+        // Parity guard inside the perf run too.
+        assert_eq!(
+            sem_bits(&orig_sem(&mk_col(N), DDOF)),
+            sem_bits(&mk_col(N).sem(DDOF)),
+            "i64 sem diverged (perf)"
+        );
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_sem(&mk_col(N), DDOF));
+            std::hint::black_box(mk_col(N).sem(DDOF));
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col(N);
+                let t0 = Instant::now();
+                std::hint::black_box(orig_sem(std::hint::black_box(&co), DDOF));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col(N);
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).sem(DDOF));
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col(N);
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).sem(DDOF));
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB i64 sem (ONE binary, ONE invocation) N={N} ddof={DDOF}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG nansem Vec<Scalar>+DOUBLE collect_finite min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND typed std/sqrt(n) &[i64]                 min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

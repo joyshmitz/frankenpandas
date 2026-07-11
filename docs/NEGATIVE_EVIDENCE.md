@@ -14434,3 +14434,39 @@ made.
 gate and prove exact Var and Std bits across sorted/first-seen order, missing/singleton/all-missing groups, cancellation,
 infinities, and signed zero. Agent Mail reservation writes still fail on its malformed SQLite index, so Git, the isolated
 current-main worktree, and the Bead remain the coordination truth.
+
+### 2026-07-11 HazyPrairie — FRONTIER+HOLD: wide rolling median indexed heaps are inside the median null floor
+
+The final honest non-columnar frontier after the stronger groupby, join, and IO holds was the documented wide-window residual
+in `rolling_order_stat`: clean trailing `Series.rolling(8192).median()` still uses whole-series coordinate compression and a
+global-`U` Fenwick tree above `ROLLING_SORTED_WINDOW_MAX_W=4096`. The existing rolling profile already identified those
+cache-cold global-`U` walks as the root cause. A fresh strict-remote baseline on 1M unique all-valid Float64 values established
+the live path at **371.6449475 ms/iter** on `vmi1227854`; the analytic output witness passed (8191 missing-prefix rows, then
+499999.5/500000.0 alternating medians, unchanged 1M-row index and name).
+
+Exactly one lever was attempted: replace only the clean, all-valid, trailing, count-window, Float64 median path above 4096 with
+two window-sized indexed binary heaps. A ring of heap positions removed the outgoing row in `O(log window)` while retaining the
+existing `eval_kth` arithmetic. Nullable, NaN, negative-zero, centered, offset-window, non-Float64, and quantile cases stayed on
+their existing paths. The same remote binary forced two Fenwick controls and the candidate, and compared all 1M output rows
+bit-for-bit before timing:
+
+| arm | remote median-style libtest result |
+| --- | ---: |
+| Fenwick control A | 566.8700711 ms/iter |
+| Fenwick control B | 573.0011082 ms/iter |
+| indexed-heaps candidate | 571.4039157 ms/iter |
+
+Worker: `vmi1264463`. The A/A controls span **1.0816%**; their midpoint is **569.9355897 ms**. The candidate is **0.2576% slower**
+than that midpoint and lies between the two controls, so it is indistinguishable from null. This is a decisive median-gate
+reject despite exact output parity. The candidate, public benchmark toggle, and temporary libtest rows were all removed;
+`crates/fp-frame/src/lib.rs` and `crates/fp-frame/examples/bench_roll_os.rs` are byte-identical to `origin/main`.
+
+**FRONTIER+HOLD:** do not retry indexed dual heaps for the 1M unique Float64, `w=8192` median seam. Groupby
+`br-frankenpandas-moyq8`, join `br-frankenpandas-nzqj6`, and IO `br-frankenpandas-92n1x` remain held at their stronger
+profile/admission blockers. Reopen wide rolling only for a materially different profile-backed structure or workload that can
+clear the ~1.08% adjacent A/A floor; do not infer a general treap/quantile/rank win from this null median result.
+
+Both build/benchmark invocations used the required fail-closed prefix
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench`; no local Cargo command ran. Agent Mail reservation
+bootstrap again failed because its SQLite image is malformed, so the isolated current-main worktree, Git, and
+`br-frankenpandas-bviik` remain the coordination truth.

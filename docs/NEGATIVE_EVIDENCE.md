@@ -14505,3 +14505,40 @@ Null(NaN) boundary and a single element) plus a signed large-magnitude column. G
 clean. `crates/fp-frame` and cod's groupby/join untouched. Sibling reductions still open: Int64 `std` (its
 `as_f64_slice().is_some()` gate misses Int64 -> nanstd), `skew`, `kurt`, `sem`, `prod` (prod is Int64-output — different, overflow
 semantics) — each likely ~11x too (same double-materialization pathology).
+
+### 2026-07-11 HazyPrairie — FRONTIER+HOLD: dense groupby Var/Std mean hoist is inside the median null floor
+
+With strict remote admission recovered, the strongest live cod-lane target was resumed from `br-frankenpandas-moyq8`:
+`try_groupby_agg_dense_int64(..., Var | Std, ...)` still recomputed the bit-identical `sum[bucket] /
+non_missing[bucket] as f64` division for every non-missing row in pass 2. Existing same-worker profiling ranked that pass at
+**7.288 ms median**, **38.11%** of the **19.122 ms** phase total (opportunity score 20). The single attempted lever divided
+each observed bucket once after pass 1 and reused the result during the unchanged row-order `sum_sq += (x - mean).powi(2)` fold;
+the reference arm retained the per-row division. No reciprocal, reassociation, Welford rewrite, output-order change, or fallback
+change was introduced.
+
+The corrected same-binary A/A/B gate ran remotely on `vmi1227854`; Var and Std outputs were compared bit-for-bit, including
+Series name, dtype, index, Null variants, and every Float64 payload. The candidate and controls were 25 alternating pairs plus
+13 adjacent candidate/candidate pairs:
+
+| arm | median |
+| --- | ---: |
+| reference per-row division | 22.117441 ms |
+| mean-hoist candidate | 22.224071 ms |
+| candidate A/A controls | 25.036580 / 22.190901 ms |
+
+Reference/candidate ratio was **0.995202** (candidate slower). The adjacent A/A null ratio was **1.128236** (12.824% floor), so
+the candidate is decisively not a keep. A first remote compile caught only a temporary benchmark type annotation error; it was
+corrected and the exact same strict command then completed successfully. No production timing is claimed beyond the corrected
+gate above.
+
+**FRONTIER+HOLD:** the Var/Std mean-hoist seam is now a measured no-ship on this 2M-row/200-group workload. Do not retry this
+same lever without a materially different profile-backed workload or substantially quieter same-binary floor. Join
+`br-frankenpandas-nzqj6` remains profile-blocked by remote perf permissions; IO `br-frankenpandas-92n1x` lacks fresh post-parallel
+phase attribution; and rolling `br-frankenpandas-bviik` is already held after its indexed-heaps null result. The temporary setter,
+candidate, and A/B harness were removed; `crates/fp-groupby/src/lib.rs` and
+`crates/fp-groupby/examples/bench_groupby_median.rs` are byte-identical to `origin/main`.
+
+The corrected build used exactly
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench -p fp-groupby --example bench_groupby_median dense_int64_var_mean_hoist_ab -- --exact --nocapture`;
+no local Cargo command ran. Agent Mail registration succeeded, but its exclusive reservation write still failed on the malformed
+SQLite index, so the isolated current-main worktree, Beads, and Git remain coordination truth.

@@ -14273,3 +14273,42 @@ still does the full O(N·MSD) sort (not a bounded partial-select like the Int64/
 remains (byte-span top-k select), but bit-identity with the stable sort's tie order makes that harder. GREEN remote fail-closed:
 fp-columnar lib **483/0**, fp-conformance **2048/0** (clean run — the recurring tokio supply-chain artifact passed); rustfmt clean;
 clippy `-D warnings` clean. `crates/fp-frame` untouched.
+
+### 2026-07-11 cc_fp — WIN: `searchsorted_values_with_sorter` hoists the O(N) sorter validation out of the per-needle loop (O(k·N) → O(N)) — 20.6x fp-side, bit-identical
+
+`Column::searchsorted_values_with_sorter` (backs `Series.searchsorted(values, sorter=perm)`) mapped each needle through
+`searchsorted_position`, which called `validate_searchsorted_sorter` (an O(N) permutation check) for EVERY needle — O(k·N) total.
+Extracted the binary-search core (`searchsorted_binary_core`, which assumes a pre-validated sorter) and rewrote the bulk method to
+validate the sorter at most ONCE (lazily, on the first needle that clears the side + non-missing checks) and reuse it.
+
+This is the lever the PREVIOUS turn's rejected byte-span attempt surfaced: extending the byte-span searchsorted to the sorter
+variants showed a spurious "loss" precisely because this O(k·N) validation — not materialization — dominated the sorter path.
+The validation-dominance WAS the real lever.
+
+BIT-IDENTICAL: the per-needle `side` + `is_missing` checks and their ORDER are unchanged; validating on the first passing needle
+raises the exact error the pre-lever's first `searchsorted_position` raised (a bad side or invalid sorter still errors on the first
+needle, after that needle's side/missing checks — including the `first-needle-missing` case, where missing is still checked before
+validation); empty needles never validate (the loop body never runs), exactly as before; the searches themselves are the SAME
+shared `searchsorted_binary_core`. Dtype-independent (the sorter validation is over indices, not values). `searchsorted_position`
+(single needle) is refactored to call the same core after validating, so it is unchanged in behavior. Parity asserted vs the
+per-needle pre-lever for both sides + boundary needles + the single `searchsorted`; the conformance searchsorted oracle tests
+(`_left`/`_right`/`_exact_match`/`_integers`/`_strings`) all pass unchanged.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG per-needle `searchsorted_position` vs CAND
+`searchsorted_values_with_sorter` interleaved, per-arm A/A null control; 4M sorted Utf8 rows, 1000 needles, identity sorter,
+side="left"):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `c65bf5ee5bb09986f9ac56e1d50ec4dfa350ad65a506336ed4c753c25b0d4bac` |
+| worker | `vmi1149989` |
+| ORIG per-needle validate (O(k·N)) | 2761.139 ms (cv 5.22%) |
+| CAND validate once (hoisted) | 133.813 ms (cv 6.01%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.2133x -> 21.33% floor** |
+| **fp-side ratio (min-of-blocks)** | **20.634x (+1963.4%) — DECIDABLE (1963% is ~92x the 21.33% floor)** |
+
+⚠️ HONEST — the null floor is ELEVATED (21.33%) because CAND (~134 ms, dominated by the one-time `Vec<Scalar::Utf8>`
+materialization the searches force) has run-to-run timing jitter; but the min-of-blocks win (1963%) clears the floor by ~92x, so
+the verdict is robust. The win is the ~2.6 s of redundant validation removed (1000 × O(4M) → 1 × O(4M)); materialization (~140 ms)
+is common to both arms. Applies to ALL dtypes using the sorter path. GREEN remote fail-closed: fp-columnar lib **484/0**,
+fp-conformance **2048/0** (clean run); rustfmt clean; clippy `-D warnings` clean. `crates/fp-frame` untouched.

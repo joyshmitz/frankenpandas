@@ -21111,6 +21111,45 @@ impl Column {
             }
         }
 
+        // Typed i64-hashset membership for the cases the dense Int64 bitset above
+        // does NOT cover: a WIDE-range all-valid Int64 column (span > 2^24, which
+        // falls through the dense block), and all-valid Datetime64/Timedelta64
+        // columns (i64-ns-backed, which `as_i64_slice`'s Int64 gate rejects). Probe
+        // the raw `&[i64]` buffer against an `FxHashSet<i64>` of the SAME-dtype
+        // needles' i64 payloads, bypassing the generic `Vec<Scalar>` materialization
+        // + per-row `key_of` + `Key`-hashset probe below.
+        //
+        // Bit-identical: a value's generic `Key` is dtype-tagged (`Key::Int64` /
+        // `Key::Datetime64` / `Key::Timedelta64`), so it matches ONLY a needle of
+        // its own dtype and the raw i64 payload IS that key's discriminant. The
+        // all-valid gate means there is no missing value (which the generic path
+        // maps to false), so direct probing introduces no spurious match; missing
+        // needles are skipped exactly as `key_of` skips them.
+        let i64_raw: Option<&[i64]> = match self.dtype {
+            DType::Int64 => self.as_i64_slice(),
+            DType::Datetime64 if self.validity.all() => self.as_datetime64_slice(),
+            DType::Timedelta64 if self.validity.all() => self.as_timedelta64_slice(),
+            _ => None,
+        };
+        if let Some(data) = i64_raw {
+            let mut set: FxHashSet<i64> = FxHashSet::default();
+            for n in needles {
+                if n.is_missing() {
+                    continue;
+                }
+                match (self.dtype, n) {
+                    (DType::Int64, Scalar::Int64(v))
+                    | (DType::Datetime64, Scalar::Datetime64(v))
+                    | (DType::Timedelta64, Scalar::Timedelta64(v)) => {
+                        set.insert(*v);
+                    }
+                    _ => {}
+                }
+            }
+            let out: Vec<bool> = data.iter().map(|v| set.contains(v)).collect();
+            return Ok(Self::from_bool_values(out));
+        }
+
         // Contiguous-Utf8 fast path (cardinality/dedup-vein sibling of
         // unique/value_counts/nunique/mode/duplicated): the generic scan below
         // iterates `&self.values`, forcing `as_slice()` to materialize a
@@ -37649,6 +37688,214 @@ mod ab_bool_anyall_ccfp {
         );
         println!(
             "  CAND typed &[bool] all   min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_dt_isin_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, DType, FxHashSet, Scalar};
+
+    /// Seeded (splitmix64) non-negative i64 ns spread across a wide range (well
+    /// beyond 2^24, so the dense Int64 bitset never applies for the Int64 twin).
+    fn ns_values(n: usize) -> Vec<i64> {
+        let mut s: u64 = 0xA13F_C9E7_5B02_16DD;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                (z >> 1) as i64
+            })
+            .collect()
+    }
+
+    /// Faithful replica of the pre-change generic isin path for a Datetime64
+    /// column: materialize `values.as_slice()` (Vec<Scalar::Datetime64>) then
+    /// probe per-Scalar and build a Vec<Scalar::Bool> output.
+    fn orig_isin_dt(col: &Column, needles: &[Scalar]) -> Column {
+        let mut lookup: FxHashSet<i64> = FxHashSet::default();
+        for n in needles {
+            if let Scalar::Datetime64(v) = n {
+                lookup.insert(*v);
+            }
+        }
+        let scalars = col.values.as_slice();
+        let out: Vec<Scalar> = scalars
+            .iter()
+            .map(|v| {
+                Scalar::Bool(match v {
+                    Scalar::Datetime64(x) => lookup.contains(x),
+                    _ => false,
+                })
+            })
+            .collect();
+        Column::new(DType::Bool, out).expect("bool")
+    }
+
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    fn ab_isin_i64_parity() {
+        let vals = ns_values(20_000);
+
+        // (1) Datetime64: fast path == the generic reference across present +
+        // absent needles, empty needles (all false), and an Int64 needle (inert
+        // against a Datetime64 value -- dtype-tagged keys never cross).
+        let dt = || Column::from_datetime64_values(vals.clone());
+        let mut needles: Vec<Scalar> = vals
+            .iter()
+            .step_by(7)
+            .take(1000)
+            .map(|&v| Scalar::Datetime64(v))
+            .collect();
+        needles.extend((0..500).map(|k| Scalar::Datetime64(-(k as i64) - 1))); // absent
+        assert_eq!(
+            orig_isin_dt(&dt(), &needles).values.as_slice(),
+            dt().isin(&needles).expect("isin").values.as_slice(),
+            "dt isin diverged"
+        );
+        let empty: Vec<Scalar> = Vec::new();
+        assert_eq!(
+            orig_isin_dt(&dt(), &empty).values.as_slice(),
+            dt().isin(&empty).expect("isin").values.as_slice(),
+            "dt isin empty diverged"
+        );
+        let int_needle = vec![Scalar::Int64(vals[0])];
+        assert_eq!(
+            orig_isin_dt(&dt(), &int_needle).values.as_slice(),
+            dt().isin(&int_needle).expect("isin").values.as_slice(),
+            "dt isin int-needle-inert diverged"
+        );
+
+        // (2) Wide-range Int64 (span > 2^24, so the dense bitset falls through to
+        // the i64-hashset path) matches a direct i64-set membership truth.
+        let int_col = || Column::from_i64_values(vals.clone());
+        let int_needles: Vec<Scalar> = vals
+            .iter()
+            .step_by(7)
+            .take(1000)
+            .map(|&v| Scalar::Int64(v))
+            .collect();
+        let set: FxHashSet<i64> = int_needles
+            .iter()
+            .filter_map(|n| match n {
+                Scalar::Int64(v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        let truth: Vec<bool> = vals.iter().map(|v| set.contains(v)).collect();
+        let cand = int_col().isin(&int_needles).expect("isin");
+        let cand_bools: Vec<bool> = cand
+            .values
+            .as_slice()
+            .iter()
+            .map(|s| matches!(s, Scalar::Bool(true)))
+            .collect();
+        assert_eq!(truth, cand_bools, "wide-int64 isin diverged");
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_dt_isin() {
+        const N: usize = 8_000_000;
+        const NEEDLES: usize = 5_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let vals = ns_values(N);
+        let mk_col = || Column::from_datetime64_values(vals.clone());
+        // ~NEEDLES present needles sampled across the column.
+        let needles: Vec<Scalar> = vals
+            .iter()
+            .step_by(N / NEEDLES)
+            .map(|&v| Scalar::Datetime64(v))
+            .collect();
+
+        // Parity guard inside the perf run too.
+        assert_eq!(
+            orig_isin_dt(&mk_col(), &needles).values.as_slice(),
+            mk_col().isin(&needles).expect("isin").values.as_slice(),
+            "dt isin diverged (perf parity)"
+        );
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_isin_dt(&mk_col(), &needles));
+            std::hint::black_box(mk_col().isin(&needles).unwrap());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_isin_dt(std::hint::black_box(&co), &needles));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).isin(&needles).unwrap());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).isin(&needles).unwrap());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB dt isin (ONE binary, ONE invocation) N={N} needles={NEEDLES}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic Vec<Scalar> probe min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND typed &[i64] FxHashSet     min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

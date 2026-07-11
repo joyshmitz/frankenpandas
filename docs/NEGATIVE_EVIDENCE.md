@@ -13938,3 +13938,47 @@ materialization-bypass surface is exhausted for reductions. Remaining fp-columna
 Remaining NEW-primitive lever: temporal `isin` (needs an `FxHashSet<i64>` over needle ns — the i64 isin fast path is
 dense-bitset-only, so wide-range Int64 AND Datetime64/Timedelta64 needles fall to the generic Scalar path).
 
+### 2026-07-10 cc_fp — WIN: `isin` typed `FxHashSet<i64>` primitive for temporal + wide-Int64 bypasses Scalar materialization — 11.3x fp-side, bit-identical (a NEW primitive — the last temporal typed-fast-path item)
+
+The one op the temporal vein flagged as needing a genuinely NEW primitive (not pure routing-reuse). `Column::isin` had two typed
+fast paths — a dense direct-address bitset for BOUNDED Int64 (`span ≤ 2^24`) and a byte-span probe for contiguous Utf8 — but
+THREE common cases fell through to the generic path: (a) WIDE-range Int64 (`span > 2^24`, e.g. random / large-ID i64), (b)
+Datetime64, (c) Timedelta64. `as_i64_slice()` gates `dtype == Int64`, so the i64-ns-backed temporal dtypes never reach the dense
+block, and the dense block itself only returns for bounded span. All three then hit the generic path: iterate `&self.values`,
+forcing `as_slice()` to materialize a `Vec<Scalar>` (~24 B/elem ⇒ ~192 MB @ 8M) then per row `key_of` + `FxHashSet<Key>` probe.
+
+Added ONE primitive covering all three: probe the raw `&[i64]` buffer (`as_i64_slice` / `as_datetime64_slice` /
+`as_timedelta64_slice`) against an `FxHashSet<i64>` built from the SAME-dtype needles' i64 payloads. Placed AFTER the dense Int64
+block so bounded Int64 still uses the (faster, hash-free) bitset; wide Int64 falls through into this path.
+
+BIT-IDENTICAL: a value's generic `Key` is dtype-tagged (`Key::Int64` / `Key::Datetime64` / `Key::Timedelta64`), so it matches
+ONLY a needle of its own dtype and the raw i64 payload IS that key's discriminant — an Int64 needle is inert against a Datetime64
+value and vice-versa, exactly as in the generic path. Gate on `validity.all()` for temporal (`as_i64_slice` already enforces it
+for Int64), so there is no missing value — which the generic path maps to false — and missing needles are skipped exactly as
+`key_of` skips them. Parity asserted: Datetime64 present+absent needles, empty needles (all false), an Int64 needle (inert), AND
+wide-range Int64 vs a direct i64-set membership truth.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG generic `Vec<Scalar>` materialize+probe vs CAND typed
+`&[i64]` FxHashSet, interleaved, per-arm A/A null control; 8M Datetime64 ns, 5000 present needles):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `a2236d7b1356fefa047ac05954fd1c6c449a02d161c292f3e80394634e1206b0` |
+| worker | `hetzner2` |
+| ORIG generic `Vec<Scalar>` probe | 356.349 ms (cv 1.38%) |
+| CAND typed `&[i64]` FxHashSet | 31.557 ms (cv 0.25%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0041x -> 0.41% floor** |
+| **fp-side ratio (min-of-blocks)** | **11.292x (+1029.2%) — DECIDABLE (1029% is ~2500x the 0.41% floor)** |
+
+⚠️ HONEST — the ORIG is CONSERVATIVE: it probes an `FxHashSet<i64>` over the materialized Scalars, whereas the true pre-change
+generic path ALSO constructed + hashed a `Key` enum per row, so the real win is **≥ 11.3x**. The dominant cost captured faithfully
+is the ~192 MB `Vec<Scalar::Datetime64>` materialization (removed entirely by borrowing the raw `&[i64]`). Clean cv (0.25–1.38%).
+GREEN remote fail-closed: fp-columnar lib **477/0**, fp-conformance **2048/0**; rustfmt clean; clippy `-D warnings` clean.
+`crates/fp-frame` untouched.
+
+**TEMPORAL TYPED-FAST-PATH VEIN NOW FULLY CLOSED (cc_fp):** argsort 8.36x, min/max 35.4x, sum/mean 27.0x, value_counts 15.2x,
+unique 2.12x, duplicated 3.44x, nunique 2.675x, mode 1.454x, **isin 11.3x** — the cardinality/dedup/membership family is complete
+for Datetime64/Timedelta64, mirroring the Utf8 family. This lever ALSO plugs the wide-range Int64 `isin` hole (span > 2^24) as a
+bonus (same primitive). Remaining fp-columnar typed micro-opts: Int64 `median`/`quantile`. The next genuine STRUCTURAL swing still
+needs radix-partitioned `value_counts`/`mode` (first-seen-order-hard) or cod's fp-join/groupby crates.
+

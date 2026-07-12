@@ -13436,6 +13436,62 @@ impl Column {
                     .collect();
                 return Ok(Self::from_i64_values_owned(gathered));
             }
+            // Nullable typed gathers (mirror take_positions' variant-gated nullable
+            // path): a nullable Int64/Float64 column declined the all-valid
+            // as_i64/f64_slice gathers above and would otherwise clone a 32-byte
+            // Scalar per selected row + rescan in Self::new. Gate on the VALUES
+            // VARIANT — NOT as_*_slice_with_validity, which also matches an Eager
+            // ColumnData::Float64 whose Scalar values legally hold Null(NaT)/Null(Null)
+            // — so only the canonical-missing lazy backings take this path. Gather the
+            // raw datum by mask and carry the (NaN-folded) validity into the typed
+            // nullable constructor. Bit-identical to the Scalar-clone + Self::new path
+            // (present ⇒ same datum Scalar; missing ⇒ Null(NaN)/Null(Null) ==
+            // missing_for_dtype; Column::eq compares materialized values).
+            let typed_f64: Option<&[f64]> = match &self.values {
+                ScalarValues::LazyNullableFloat64 { data, .. } => Some(data.as_slice()),
+                ScalarValues::LazyAllValidFloat64 { data, .. } => Some(data.as_ref()),
+                _ => None,
+            };
+            if let Some(src) = typed_f64 {
+                let count = mask_bits.iter().filter(|&&m| m).count();
+                let mut gathered = Vec::with_capacity(count);
+                let mut words = vec![0_u64; count.div_ceil(64)];
+                let mut out_idx = 0usize;
+                for (i, &m) in mask_bits.iter().enumerate() {
+                    if m {
+                        let x = src[i];
+                        gathered.push(x);
+                        if self.validity.get(i) && !x.is_nan() {
+                            words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                        }
+                        out_idx += 1;
+                    }
+                }
+                return Ok(Self::from_f64_values_with_validity(
+                    gathered,
+                    ValidityMask::from_words(words, count),
+                ));
+            }
+            if let ScalarValues::LazyNullableInt64 { data, .. } = &self.values {
+                let src = data.as_slice();
+                let count = mask_bits.iter().filter(|&&m| m).count();
+                let mut gathered = Vec::with_capacity(count);
+                let mut words = vec![0_u64; count.div_ceil(64)];
+                let mut out_idx = 0usize;
+                for (i, &m) in mask_bits.iter().enumerate() {
+                    if m {
+                        gathered.push(src[i]);
+                        if self.validity.get(i) {
+                            words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                        }
+                        out_idx += 1;
+                    }
+                }
+                return Ok(Self::from_i64_values_with_validity(
+                    gathered,
+                    ValidityMask::from_words(words, count),
+                ));
+            }
             let values = self
                 .values
                 .iter()
@@ -25624,6 +25680,88 @@ mod tests {
                     Scalar::Float64(f64::INFINITY),
                 ]
             );
+        }
+
+        #[test]
+        fn filter_by_mask_nullable_typed_gather_matches_reference_cf() {
+            // Variant-gated nullable typed gather must equal the Scalar-clone
+            // reference: a selected present slot keeps its datum; a selected
+            // missing slot stays missing; a NaN in a LazyAllValidFloat64 source
+            // folds to missing. mask-true positions: 0, 2, 3, 5, 6.
+            let mask =
+                Column::from_bool_values(vec![true, false, true, true, false, true, true]);
+
+            // (a) LazyNullableInt64 (missing ⇒ Null(Null)).
+            let mut ival = ValidityMask::all_valid(7);
+            ival.set(2, false);
+            ival.set(5, false);
+            let icol = Column::from_i64_values_with_validity(vec![10, 20, 0, -5, 7, 0, 3], ival);
+            let ir = icol.filter_by_mask(&mask).expect("i64 filter");
+            assert_eq!(ir.dtype(), DType::Int64);
+            assert_eq!(
+                ir.values(),
+                &[
+                    Scalar::Int64(10),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(-5),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(3),
+                ]
+            );
+
+            // (b) LazyNullableFloat64.
+            let mut fval = ValidityMask::all_valid(7);
+            fval.set(2, false);
+            fval.set(5, false);
+            let fcol =
+                Column::from_f64_values_with_validity(vec![1.5, 2.0, 0.0, -3.5, 7.0, 0.0, 9.25], fval);
+            let fr = fcol.filter_by_mask(&mask).expect("f64 filter");
+            assert_eq!(fr.dtype(), DType::Float64);
+            let fv = fr.values();
+            assert_eq!(fv.len(), 5);
+            match &fv[0] {
+                Scalar::Float64(x) => assert_eq!(*x, 1.5),
+                o => panic!("fv0={o:?}"),
+            }
+            assert!(matches!(fv[1], Scalar::Null(_)), "pos2 missing");
+            match &fv[2] {
+                Scalar::Float64(x) => assert_eq!(*x, -3.5),
+                o => panic!("fv2={o:?}"),
+            }
+            assert!(matches!(fv[3], Scalar::Null(_)), "pos5 missing");
+            match &fv[4] {
+                Scalar::Float64(x) => assert_eq!(*x, 9.25),
+                o => panic!("fv4={o:?}"),
+            }
+
+            // (c) NaN-bearing LazyAllValidFloat64 (from_f64_values). A source NaN is
+            // validity-cleared (missing) but its datum stays a PRESENT Float64(NaN)
+            // in values() — the three-way rep — so the filtered slot must too (the
+            // Scalar-clone path clones Float64(NaN) and Self::new re-marks it missing).
+            let ncol =
+                Column::from_f64_values(vec![1.0, 2.0, f64::NAN, 4.0, 5.0, f64::NAN, 7.0]);
+            let nr = ncol.filter_by_mask(&mask).expect("nan filter");
+            let nv = nr.values();
+            match &nv[0] {
+                Scalar::Float64(x) => assert_eq!(*x, 1.0),
+                o => panic!("nv0={o:?}"),
+            }
+            match &nv[1] {
+                Scalar::Float64(x) => assert!(x.is_nan(), "pos2 stays present-NaN"),
+                o => panic!("nv1={o:?}"),
+            }
+            match &nv[2] {
+                Scalar::Float64(x) => assert_eq!(*x, 4.0),
+                o => panic!("nv2={o:?}"),
+            }
+            match &nv[3] {
+                Scalar::Float64(x) => assert!(x.is_nan(), "pos5 stays present-NaN"),
+                o => panic!("nv3={o:?}"),
+            }
+            match &nv[4] {
+                Scalar::Float64(x) => assert_eq!(*x, 7.0),
+                o => panic!("nv4={o:?}"),
+            }
         }
 
         #[test]

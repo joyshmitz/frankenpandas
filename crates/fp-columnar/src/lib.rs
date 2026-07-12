@@ -11539,26 +11539,25 @@ impl Column {
                     return Some(Ok(Self::from_f64_values_owned(result_data)));
                 }
 
-                // Build output scalars respecting NaN propagation: if either
-                // input was NaN (not just Null), mark output as Null(NaN).
-                let values: Vec<Scalar> = result_data
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        if !result_validity.get(i) {
-                            // Preserve NaN vs Null distinction from inputs.
-                            if self.is_nan_at(i) || right.is_nan_at(i) {
-                                Scalar::Null(NullKind::NaN)
-                            } else {
-                                Scalar::missing_for_dtype(out_dtype)
-                            }
-                        } else {
-                            Scalar::Float64(*v)
-                        }
-                    })
-                    .collect();
-
-                Some(Self::new(out_dtype, values))
+                // Typed nullable output: reproduce the Vec<Scalar> + Self::new
+                // representation with the purpose-built LazyNullableFloat64
+                // constructor, skipping the 32-byte-per-cell Vec<Scalar> alloc
+                // (~160MB/5M rows) and the Self::new validity/data rescan.
+                // Bit-identical (ScalarValues::eq compares materialized values):
+                // from_f64_values_nullable renders validity-set ⇒ Float64(data);
+                // cleared-bit + NaN-datum ⇒ present Float64(NaN) (op-produced NaN,
+                // = the old Scalar::Float64(NaN) that Self::new marked missing);
+                // cleared-bit + non-NaN-datum ⇒ Null(NaN) (absent operand — the
+                // 0.0 sentinel vectorized_binary_f64 stored at combined-invalid
+                // slots — == missing_for_dtype(Float64), which equals the old
+                // is_nan_at Null(NaN) arm since both are Null(NaN) for Float64).
+                // Validity set iff combined-valid AND datum non-NaN: ValidityMask::
+                // from_f64 clears exactly the NaN slots, AND-ed with combined
+                // (already false at input-missing slots, whose datum is the 0.0
+                // sentinel so from_f64 keeps them set — combined does the masking).
+                let final_validity =
+                    result_validity.and_mask(&ValidityMask::from_f64(&result_data));
+                Some(Ok(Self::from_f64_values_nullable(result_data, final_validity)))
             }
             DType::Int64 if !matches!(op, ArithmeticOp::Div) => {
                 // Both must actually be Int64 for the i64 fast path.
@@ -24689,6 +24688,63 @@ mod tests {
             reference(|a, b| a.wrapping_mul(b)),
             "nullable Int64 mul"
         );
+    }
+
+    #[test]
+    fn nullable_f64_two_col_arith_matches_reference_cf() {
+        // Nullable Float64 × Float64 arithmetic routes through the typed
+        // from_f64_values_nullable output path. Bit-identical to the old
+        // Vec<Scalar>+Self::new: both-valid ⇒ Float64(op); either missing ⇒
+        // Null(NaN); op-produced NaN (0/0) ⇒ present Float64(NaN) with validity
+        // cleared. add/sub/mul over finite inputs never produce NaN → clean
+        // assert_eq; div's 0/0 exercises the op-NaN three-way slot.
+        let build = |vals: &[Option<f64>]| {
+            let data: Vec<f64> = vals.iter().map(|v| v.unwrap_or(0.0)).collect();
+            let mut validity = ValidityMask::all_valid(vals.len());
+            for (i, v) in vals.iter().enumerate() {
+                if v.is_none() {
+                    validity.set(i, false);
+                }
+            }
+            Column::from_f64_values_with_validity(data, validity)
+        };
+        let lv = [Some(5.0), Some(-3.5), None, Some(2.0), Some(0.0), None, Some(7.25)];
+        let rv = [Some(2.0), None, Some(9.0), Some(4.0), Some(0.0), None, Some(-1.5)];
+        let left = build(&lv);
+        let right = build(&rv);
+
+        let reference = |op: fn(f64, f64) -> f64| -> Vec<Scalar> {
+            lv.iter()
+                .zip(rv.iter())
+                .map(|(a, b)| match (a, b) {
+                    (Some(x), Some(y)) => Scalar::Float64(op(*x, *y)),
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect()
+        };
+        assert_eq!(left.add(&right).expect("add").values(), reference(|a, b| a + b), "add");
+        assert_eq!(left.sub(&right).expect("sub").values(), reference(|a, b| a - b), "sub");
+        assert_eq!(left.mul(&right).expect("mul").values(), reference(|a, b| a * b), "mul");
+
+        // div: op-produced NaN (0/0 at idx 4) stays a present Float64(NaN); the
+        // absent-operand slots stay Null. NaN needs a bit-compare, not ==.
+        let d = left.div(&right).expect("div");
+        let dv = d.values();
+        match &dv[0] {
+            Scalar::Float64(x) => assert_eq!(*x, 2.5),
+            o => panic!("div[0]={o:?}"),
+        }
+        assert!(matches!(dv[1], Scalar::Null(_)), "div[1] null (rhs null)");
+        assert!(matches!(dv[2], Scalar::Null(_)), "div[2] null (lhs null)");
+        match &dv[3] {
+            Scalar::Float64(x) => assert_eq!(*x, 0.5),
+            o => panic!("div[3]={o:?}"),
+        }
+        match &dv[4] {
+            Scalar::Float64(x) => assert!(x.is_nan(), "0/0 ⇒ present NaN"),
+            o => panic!("div[4]={o:?}"),
+        }
+        assert!(matches!(dv[5], Scalar::Null(_)), "div[5] null (both null)");
     }
 
     #[test]

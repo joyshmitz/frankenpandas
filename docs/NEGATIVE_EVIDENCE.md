@@ -14863,3 +14863,41 @@ available strict-remote slot. Workspace all-target clippy reached only pre-exist
 far-away `fp-columnar` test modules and two `question_mark` suggestions in `fp-frame`). Bounded UBS reproduced the broad existing
 whole-file inventory while its fmt, clippy, check, and test-build subchecks were green; it emitted no focused finding on the
 touched comparison arm or benchmark mode.
+
+### 2026-07-12 MagentaOak — WIN: nullable Int64 `Series::between` typed validity path — 21.28x FP-side
+
+Negative-ledger-first routing excluded the two nullable Float64 `between` validity rearrangements already measured at 0.89x
+and 0.998x. The remaining representation asymmetry was nullable Int64: all-valid Int64 and all/nullable Float64 already read
+typed buffers, while nullable Int64 still materialized `Vec<Scalar>`, performed two scalar comparisons per present row, built
+`Vec<Scalar::Bool>`, and converted that output back into a typed Bool column.
+
+One lever (`br-frankenpandas-oj0ur`) adds the missing raw `&[i64]` + validity arm. It deliberately casts each present value to
+f64 because that is the established fallback contract (`Scalar::Int64(v).to_f64()`), including rounding and ties above 2^53;
+all four inclusive modes keep the same predicates, and invalid ranges are cleared to `false`, preserving the all-valid Bool
+output for missing inputs. String bounds and every non-Int64 backing retain the generic path.
+
+The existing `bench_between_bt` example now includes the nullable Int64 workload plus an in-binary copy of the former scalar
+implementation. Strict remote-only execution on `vmi1167313` used 2,000,000 rows with 20% missing, best of six, under the
+`release-perf` profile:
+
+| arm | best |
+| --- | ---: |
+| reference scalar materialization path | 133.85 ms |
+| candidate typed i64 + validity path | 6.29 ms |
+
+Reference/candidate = **21.28x** (95.30% latency reduction). This is the accepted ratio because both arms ran in the same
+binary on the same worker. Separate strict-remote release runs (91.98 ms reference on `vmi1293453`, 3.13 ms candidate on
+`vmi1149989`) were directionally consistent but are not used as ship evidence. One intervening strict-remote attempt failed
+inside RCH when its remote workspace lost the example source during compilation; no local Cargo fallback ran.
+
+Correctness: the focused remote test is **1/1 green** on `vmi1167313` and covers missing slots, every inclusive mode, and
+adjacent integer values above 2^53 to lock the existing f64-reduction semantics. The optimization does not change alignment,
+dtype promotion, null-kind observation, ordering, ingestion, or hardened/strict policy surfaces.
+
+Validation: strict-remote workspace `cargo check --workspace --all-targets` is green; focused `fp-frame` lib clippy is green
+with only the repository's two unrelated existing `question_mark` findings allowed. Workspace all-target clippy reached only
+those two findings plus two untouched `fp-columnar` test imports. Full conformance ran **1595/1596 green** on `vmi1149989`;
+its sole failure was an RCH-shared-workspace artifact claiming the remote `Cargo.lock` contained Tokio, while the live tracked
+lockfile does not. The exact supply-chain policy rerun on a clean `vmi1167313` workspace passed **1/1**, completing the 1596-test
+proof. Package fmt and `git diff --check` are green. The mandatory bounded UBS scan hit the documented 180-second
+`fp-frame/src/lib.rs` timeout without emitting a focused finding.

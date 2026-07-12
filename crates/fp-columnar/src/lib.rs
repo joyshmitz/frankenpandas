@@ -13030,6 +13030,36 @@ impl Column {
             };
             return Ok(Self::from_bool_values(bools));
         }
+        // Typed MIXED Int64×Float64 fast path: the both-same-dtype arms above miss a
+        // mixed numeric pair, dropping it to the generic per-element Scalar
+        // `scalar_compare`. Build an f64 view per side (an all-valid Float64 borrows its
+        // `&[f64]`; an all-valid Int64 maps `v as f64` once) and compare with the hoisted
+        // op. Bit-identical to `scalar_compare`'s Int64/Float64 arm, which promotes both
+        // to f64 (`a as f64 <op> b`); `as_f64_slice`/`as_i64_slice` are all-valid with no
+        // present NaN, so there is no Null/NaN branch. Both-Int64 keeps the EXACT i64
+        // compare arm above (never f64-promoted here — matters for |v| > 2^53). A local
+        // `fn` (not a closure) so elision ties the `Cow<'_>` output to the `&Column` arg.
+        fn f64_view(col: &Column) -> Option<std::borrow::Cow<'_, [f64]>> {
+            if let Some(d) = col.as_f64_slice() {
+                Some(std::borrow::Cow::Borrowed(d))
+            } else {
+                col.as_i64_slice()
+                    .map(|d| std::borrow::Cow::Owned(d.iter().map(|&v| v as f64).collect()))
+            }
+        }
+        if let (Some(lv), Some(rv)) = (f64_view(self), f64_view(right)) {
+            let (l, r) = (lv.as_ref(), rv.as_ref());
+            let zip = || l.iter().zip(r);
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => zip().map(|(&a, &b)| a > b).collect(),
+                ComparisonOp::Lt => zip().map(|(&a, &b)| a < b).collect(),
+                ComparisonOp::Eq => zip().map(|(&a, &b)| a == b).collect(),
+                ComparisonOp::Ne => zip().map(|(&a, &b)| a != b).collect(),
+                ComparisonOp::Ge => zip().map(|(&a, &b)| a >= b).collect(),
+                ComparisonOp::Le => zip().map(|(&a, &b)| a <= b).collect(),
+            };
+            return Ok(Self::from_bool_values(bools));
+        }
 
         let values = self
             .values

@@ -13109,6 +13109,43 @@ impl Column {
             };
             return Ok(Self::from_bool_values_with_validity(bools, lv.and_mask(rv)));
         }
+        // Typed MIXED-NULLABLE fast path: a nullable Int64 vs nullable Float64 pair (either
+        // side nullable, dtypes differ) matched neither same-dtype nullable arm above and
+        // fell to the generic Scalar `scalar_compare`. Build a validity-aware f64 view per
+        // side (an all-valid/nullable Float64 borrows its `&[f64]` + validity; an
+        // all-valid/nullable Int64 maps `v as f64` + validity) and compare f64-promoted,
+        // carrying the combined validity. Bit-identical to `scalar_compare`'s Int64/Float64
+        // arm (which promotes both to f64); present iff both present (`lv AND rv`), masked
+        // slots' bools never observed. Both-Int64 already took the EXACT-i64 nullable arm
+        // above (never reaches here), so no Int64 pair is f64-promoted; both-Float64 took
+        // its arm. A local `fn` so elision ties the outputs' lifetimes to the `&Column`.
+        fn nullable_f64_view(col: &Column) -> Option<(std::borrow::Cow<'_, [f64]>, &ValidityMask)> {
+            if let Some((d, v)) = col.as_f64_slice_with_validity() {
+                Some((std::borrow::Cow::Borrowed(d), v))
+            } else if let Some((d, v)) = col.as_i64_slice_with_validity() {
+                Some((
+                    std::borrow::Cow::Owned(d.iter().map(|&x| x as f64).collect()),
+                    v,
+                ))
+            } else {
+                None
+            }
+        }
+        if let (Some((lc, lv)), Some((rc, rv))) =
+            (nullable_f64_view(self), nullable_f64_view(right))
+        {
+            let (l, r) = (lc.as_ref(), rc.as_ref());
+            let zip = || l.iter().zip(r);
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => zip().map(|(&a, &b)| a > b).collect(),
+                ComparisonOp::Lt => zip().map(|(&a, &b)| a < b).collect(),
+                ComparisonOp::Eq => zip().map(|(&a, &b)| a == b).collect(),
+                ComparisonOp::Ne => zip().map(|(&a, &b)| a != b).collect(),
+                ComparisonOp::Ge => zip().map(|(&a, &b)| a >= b).collect(),
+                ComparisonOp::Le => zip().map(|(&a, &b)| a <= b).collect(),
+            };
+            return Ok(Self::from_bool_values_with_validity(bools, lv.and_mask(rv)));
+        }
 
         let values = self
             .values

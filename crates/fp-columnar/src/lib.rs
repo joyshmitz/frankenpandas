@@ -13060,6 +13060,31 @@ impl Column {
             };
             return Ok(Self::from_bool_values(bools));
         }
+        // Typed NULLABLE Float64 fast path (sister to the compare_scalar nullable arm):
+        // the all-valid arms above bail on ANY missing, so a nullable Float64 vs
+        // nullable Float64 pair fell to the generic per-element Scalar `scalar_compare`
+        // over `Vec<Scalar>`. Compare over the two raw `&[f64]` (masked slots' bools are
+        // never observed) and carry the combined validity (present iff BOTH present).
+        // Bit-identical to the Scalar path: a present pair (both validity-set, so both
+        // non-NaN — fp clears the validity bit for any NaN) yields `Bool(a <op> b)` (the
+        // same `scalar_compare` "both to f64" branch), an either-missing slot yields the
+        // invalid bit == `Null(NullKind::Null)`. `lv AND rv` is exactly the generic
+        // `!(l.is_missing() || r.is_missing())`.
+        if let (Some((ld, lv)), Some((rd, rv))) = (
+            self.as_f64_slice_with_validity(),
+            right.as_f64_slice_with_validity(),
+        ) {
+            let zip = || ld.iter().zip(rd);
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => zip().map(|(&a, &b)| a > b).collect(),
+                ComparisonOp::Lt => zip().map(|(&a, &b)| a < b).collect(),
+                ComparisonOp::Eq => zip().map(|(&a, &b)| a == b).collect(),
+                ComparisonOp::Ne => zip().map(|(&a, &b)| a != b).collect(),
+                ComparisonOp::Ge => zip().map(|(&a, &b)| a >= b).collect(),
+                ComparisonOp::Le => zip().map(|(&a, &b)| a <= b).collect(),
+            };
+            return Ok(Self::from_bool_values_with_validity(bools, lv.and_mask(rv)));
+        }
 
         let values = self
             .values

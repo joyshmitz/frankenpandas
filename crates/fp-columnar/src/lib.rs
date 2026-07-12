@@ -13085,6 +13085,30 @@ impl Column {
             };
             return Ok(Self::from_bool_values_with_validity(bools, lv.and_mask(rv)));
         }
+        // Typed NULLABLE Int64 fast path (sister to the nullable Float64 arm above): a
+        // nullable Int64 vs nullable Int64 pair also fell to the generic Scalar
+        // `scalar_compare`. Compare the two raw `&[i64]` EXACTLY — never f64-promoted,
+        // matching `scalar_compare`'s both-Int64 branch (an i64 comparison; matters for
+        // `|v| > 2^53` where `v as f64` would round) — and carry the combined validity.
+        // Bit-identical: present pair (both validity-set) => `Bool(a <op> b)`, either
+        // missing => the invalid bit == `Null(NullKind::Null)`; `lv AND rv` is exactly
+        // the generic `!(l.is_missing() || r.is_missing())`. All-valid Int64 pairs still
+        // take the exact-i64 borrow arm higher up (fires first).
+        if let (Some((ld, lv)), Some((rd, rv))) = (
+            self.as_i64_slice_with_validity(),
+            right.as_i64_slice_with_validity(),
+        ) {
+            let zip = || ld.iter().zip(rd);
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => zip().map(|(&a, &b)| a > b).collect(),
+                ComparisonOp::Lt => zip().map(|(&a, &b)| a < b).collect(),
+                ComparisonOp::Eq => zip().map(|(&a, &b)| a == b).collect(),
+                ComparisonOp::Ne => zip().map(|(&a, &b)| a != b).collect(),
+                ComparisonOp::Ge => zip().map(|(&a, &b)| a >= b).collect(),
+                ComparisonOp::Le => zip().map(|(&a, &b)| a <= b).collect(),
+            };
+            return Ok(Self::from_bool_values_with_validity(bools, lv.and_mask(rv)));
+        }
 
         let values = self
             .values

@@ -9966,6 +9966,29 @@ impl Column {
             return Self::from_f64_values_with_validity(data, ValidityMask::from_words(words, n));
         }
 
+        // Nullable Int64 sibling of the typed_f64 gather: a `LazyNullableInt64`
+        // (the backing every from_i64_values_with_validity / dense nullable-int op
+        // produces) otherwise cloned a 32 B Scalar per row in the generic gather
+        // below. Gate on the VARIANT (not `as_i64_slice_with_validity`, which also
+        // matches an Eager ColumnData::Int64 whose Scalars may legally hold
+        // Null(NaT)/Null(Null)); Int64 has no NaN so missingness is the validity
+        // bit alone. Bit-identical to the generic clone: present ⇒ Int64(data[pos]);
+        // missing ⇒ Null(Null) == `LazyNullableInt64`'s invalid emission ==
+        // missing_for_dtype(Int64), and `is_missing(values[pos]) == !validity.get(pos)`
+        // so the mask matches.
+        if let ScalarValues::LazyNullableInt64 { data, .. } = &self.values {
+            let src = data.as_slice();
+            let mut gathered = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, &pos) in positions.iter().enumerate() {
+                gathered.push(src[pos]);
+                if self.validity.get(pos) {
+                    words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                }
+            }
+            return Self::from_i64_values_with_validity(gathered, ValidityMask::from_words(words, n));
+        }
+
         let mut values = Vec::with_capacity(n);
         let mut words = vec![0_u64; n.div_ceil(64)];
         for (out_idx, &pos) in positions.iter().enumerate() {
@@ -22875,6 +22898,40 @@ mod tests {
                     "dtype {dtype:?}: validity must follow the gathered position {pos}",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn take_positions_nullable_int64_typed_gather_matches_reference_cf() {
+        // A LazyNullableInt64 take routes through the typed nullable-Int64 gather.
+        // Result must equal the Scalar-clone reference: a present source position
+        // ⇒ Int64(datum); a missing one ⇒ Null(Null); order follows `positions`
+        // (repeats allowed), and validity follows the gathered position.
+        let mut validity = ValidityMask::all_valid(6);
+        validity.set(1, false);
+        validity.set(4, false);
+        let col = Column::from_i64_values_with_validity(vec![10, 0, 30, -5, 0, 7], validity);
+        let positions = [5usize, 4, 0, 1, 3, 4, 2];
+        let taken = col.take_positions(&positions);
+        assert_eq!(taken.dtype(), DType::Int64);
+        assert_eq!(
+            taken.values(),
+            &[
+                Scalar::Int64(7),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(-5),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(30),
+            ]
+        );
+        for (out_idx, &pos) in positions.iter().enumerate() {
+            assert_eq!(
+                taken.validity().get(out_idx),
+                col.validity().get(pos),
+                "validity must follow gathered position {pos}",
+            );
         }
     }
 

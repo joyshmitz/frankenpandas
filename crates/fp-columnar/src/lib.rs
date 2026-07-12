@@ -11516,6 +11516,31 @@ impl Column {
                     };
                     return Some(Ok(Self::from_f64_values_owned(result)));
                 }
+                // Nullable-input fast path: skip the two `from_scalars` copies (each
+                // reads the cached Vec<Scalar> and rewrites a Vec<f64>) by borrowing
+                // both raw &[f64] buffers directly. Byte-identical to the from_scalars
+                // arm below: `as_f64_slice_with_validity`'s buffer equals what
+                // `from_scalars(&values, Float64)` builds (present ⇒ datum, missing ⇒
+                // 0.0 sentinel), `nan_aware_validity` is computed from the unchanged
+                // columns, and the kernel + output construction are identical. Only
+                // fires when BOTH sides expose a Float64-with-validity backing; any
+                // other shape (mixed dtype, exotic backing) declines and keeps the
+                // from_scalars path.
+                if let (Some((l, _)), Some((r, _))) = (
+                    self.as_f64_slice_with_validity(),
+                    right.as_f64_slice_with_validity(),
+                ) {
+                    let left_nan_aware = self.nan_aware_validity();
+                    let right_nan_aware = right.nan_aware_validity();
+                    let (result_data, result_validity) =
+                        vectorized_binary_f64(l, r, &left_nan_aware, &right_nan_aware, op);
+                    if result_validity.all() {
+                        return Some(Ok(Self::from_f64_values_owned(result_data)));
+                    }
+                    let final_validity =
+                        result_validity.and_mask(&ValidityMask::from_f64(&result_data));
+                    return Some(Ok(Self::from_f64_values_nullable(result_data, final_validity)));
+                }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Float64);
                 let right_data = ColumnData::from_scalars(&right.values, DType::Float64);
                 let (ColumnData::Float64(l), ColumnData::Float64(r)) = (&left_data, &right_data)
@@ -11964,11 +11989,6 @@ impl Column {
             }
         }
         mask
-    }
-
-    /// Check if position `i` holds a NaN-class missing value.
-    fn is_nan_at(&self, i: usize) -> bool {
-        self.values.get(i).is_some_and(|v| v.is_nan())
     }
 
     pub fn binary_numeric(&self, right: &Self, op: ArithmeticOp) -> Result<Self, ColumnError> {

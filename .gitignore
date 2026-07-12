@@ -149,6 +149,7 @@ crates/*/target/
 # nanos + retry counter) — created by concurrent `rch` cargo invocations.
 .rch-target/
 .rch-target-*/
+.rch-targets-*/
 .rch-deploy-root/
 
 # cargo-fuzz output

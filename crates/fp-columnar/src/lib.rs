@@ -5981,6 +5981,57 @@ fn argextreme_nullable_i64(data: &[i64], validity: Option<&ValidityMask>, want_m
     best.map(|(i, _)| i)
 }
 
+/// Typed nan-ptp (peak-to-peak = max − min over present values) over an f64 slice
+/// (+ optional validity), reproducing `nanptp` WITHOUT materializing the
+/// `Vec<Scalar>`. Present iff (validity-set) AND non-NaN (a NaN never updates
+/// lo/hi via `<`/`>` and — like `nanptp`'s `is_missing` skip — must NOT mark `seen`,
+/// else an all-NaN column would return `Float64(NaN)` instead of `Null(NaN)`).
+/// All-missing ⇒ `Null(NaN)`; otherwise `Float64(hi − lo)`.
+fn ptp_nullable_f64(data: &[f64], validity: Option<&ValidityMask>) -> Scalar {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut seen = false;
+    for (i, &x) in data.iter().enumerate() {
+        if validity.map_or(true, |v| v.get(i)) && !x.is_nan() {
+            seen = true;
+            if x < lo {
+                lo = x;
+            }
+            if x > hi {
+                hi = x;
+            }
+        }
+    }
+    if !seen {
+        Scalar::Null(NullKind::NaN)
+    } else {
+        Scalar::Float64(hi - lo)
+    }
+}
+
+/// Int64 sibling of [`ptp_nullable_f64`]: present iff validity-set; lo/hi fold
+/// `v as f64` (matching nanptp's `to_f64`), output Float64.
+fn ptp_nullable_i64(data: &[i64], validity: Option<&ValidityMask>) -> Scalar {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut seen = false;
+    for (i, &v) in data.iter().enumerate() {
+        if validity.map_or(true, |vm| vm.get(i)) {
+            let x = v as f64;
+            seen = true;
+            if x < lo {
+                lo = x;
+            }
+            if x > hi {
+                hi = x;
+            }
+        }
+    }
+    if !seen {
+        Scalar::Null(NullKind::NaN)
+    } else {
+        Scalar::Float64(hi - lo)
+    }
+}
+
 fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Column, ColumnError> {
     if !matches!(keep, "first" | "last" | "all") {
         return Err(ColumnError::Type(TypeError::NonNumericValue {
@@ -15591,6 +15642,41 @@ impl Column {
             }
             return Scalar::Float64(p);
         }
+        // Typed Int64 product: Π(v as f64) seeded 1.0 (all-valid), matching nanprod;
+        // empty ⇒ Float64(1.0). No Scalar materialization.
+        if let Some(data) = self.as_i64_slice() {
+            let mut p = 1.0_f64;
+            for &x in data {
+                p *= x as f64;
+            }
+            return Scalar::Float64(p);
+        }
+        // Nullable Float64/Int64 product: Π PRESENT values (validity-set AND non-NaN
+        // for Float64 — a valid-bit NaN is missing, exactly nanprod's skip; validity
+        // bit alone for Int64). All-missing ⇒ the 1.0 seed unchanged ⇒ Float64(1.0),
+        // exactly nanprod's empty behaviour.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let mut p = 1.0_f64;
+            for (i, &x) in data.iter().enumerate() {
+                if validity.get(i) && !x.is_nan() {
+                    p *= x;
+                }
+            }
+            return Scalar::Float64(p);
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut p = 1.0_f64;
+            for (i, &x) in data.iter().enumerate() {
+                if validity.get(i) {
+                    p *= x as f64;
+                }
+            }
+            return Scalar::Float64(p);
+        }
         nanprod(&self.values)
     }
 
@@ -16690,6 +16776,25 @@ impl Column {
     /// columns.
     #[must_use]
     pub fn ptp(&self) -> Scalar {
+        // Typed Float64/Int64 (all-valid + nullable): single-pass lo/hi over the
+        // raw slice + validity, instead of nanptp materializing the Vec<Scalar>.
+        // Bit-identical (skip missing/NaN, Float64(hi-lo), all-missing ⇒ Null(NaN)).
+        if let Some(data) = self.as_f64_slice() {
+            return ptp_nullable_f64(data, None);
+        }
+        if let Some(data) = self.as_i64_slice() {
+            return ptp_nullable_i64(data, None);
+        }
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            return ptp_nullable_f64(data, Some(validity));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            return ptp_nullable_i64(data, Some(validity));
+        }
         nanptp(&self.values)
     }
 
@@ -31801,6 +31906,54 @@ mod tests {
                     let vals = col.values().to_vec();
                     assert_eq!(col.sum(), fp_types::nansum(&vals), "sum trial {trial}");
                     assert_eq!(col.mean(), fp_types::nanmean(&vals), "mean trial {trial}");
+                }
+            }
+        }
+
+        #[test]
+        fn prod_ptp_typed_int64_and_nullable_match_nan_reference() {
+            // Typed Int64 + nullable Int64/Float64 prod/ptp must be BIT-IDENTICAL to
+            // nanprod/nanptp. prod: seed 1.0, all-missing ⇒ Float64(1.0); ptp:
+            // max-min, all-missing ⇒ Null(NaN). Narrow value range (near ±1 for
+            // prod so the product stays finite). Null-missing only.
+            let mut state: u64 = 0x9A0D_1234_5678_ABCD;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let n = (next() % 250) as usize; // include n=0
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 3) as i64 - 1 // {-1, 0, 1} — product stays bounded
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else {
+                            0.5 + (r % 3) as f64 * 0.5 // {0.5, 1.0, 1.5}
+                        }
+                    })
+                    .collect();
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                for col in [&i_all, &i_null, &f_null] {
+                    let vals = col.values().to_vec();
+                    assert_eq!(col.prod(), fp_types::nanprod(&vals), "prod trial {trial}");
+                    assert_eq!(col.ptp(), fp_types::nanptp(&vals), "ptp trial {trial}");
                 }
             }
         }

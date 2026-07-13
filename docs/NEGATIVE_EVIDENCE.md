@@ -15012,3 +15012,42 @@ pre-existing unused `Scalar` imports in untouched `fp-columnar` tests; focused `
 Three optional full-`fp-index` suite dispatches found no admissible RCH worker and refused local fallback; no local Cargo
 command ran. The static-only two-file UBS scan completed with **0 critical** findings and no focused production-path issue;
 its changed-line zero-iteration benchmark warning was fixed with a nonempty iteration clamp and checked percentile access.
+
+### 2026-07-12 MagentaOak — WIN: nullable Bool `Column::fillna` typed validity select — 15.00x FP-side
+
+Negative-ledger-first routing started from the June 27 nullable Int64 `fillna` keep: replacing scalar materialization with a
+raw-buffer validity select delivered 3.60x there, while Bool still fell through to the same generic `Vec<Scalar>` map and
+`Column::new` rebuild. The adjacent 12.10x nullable Bool `dropna` keep independently confirmed that
+`LazyNullableBool` representation access is the live seam; no Bool `fillna` row or prior rejection existed.
+
+One lever (`br-frankenpandas-rfwh8`) matches the post-cast fill as `Scalar::Bool` and variant-gates
+`LazyNullableBool`, selecting each present raw bit or the fill bit directly into an all-valid typed Bool output. Matching the
+post-cast value preserves numeric-to-Bool casting; a missing fill does not match and retains the generic nullable result.
+Scalar-backed Bool columns that may carry distinct `NullKind` values also retain the generic path unchanged. Length, dtype,
+row order, present bits, and filled values are identical; Bool has no NaN sentinel or floating-point behavior.
+
+Strict remote-only same-binary A/B on `vmi1227854` used 5,000,000 rows, 25% missing, and 15 alternating reference/candidate
+pairs under `release-perf`. The reference function casts the fill and reproduces the exact former scalar map plus
+`Column::new` body. The binary warmed both paths and asserted equal dtype, length, valid count, and every output value before
+timing:
+
+| arm | p50 | p95 | best |
+| --- | ---: | ---: | ---: |
+| reference scalar materialization path | 136.208 ms | 167.269 ms | 122.327 ms |
+| candidate raw Bool + validity select | 9.083 ms | 10.359 ms | 8.275 ms |
+
+Reference/candidate = **14.996x at p50** (93.33% latency reduction), **16.147x at p95**, and **14.782x best-to-best**.
+A pre-candidate A/A on the same remote worker measured 147.294 ms reference versus 159.354 ms current-method p50,
+confirming the scalar-materialization regime. Only the same-binary pair above is used as ship evidence.
+
+Correctness: the focused randomized strict-remote oracle is **1/1 green** on `vmi1227854`. Across 200 random shapes it now
+checks Bool alongside Int64 and Float64 for exact present/fill values, all-valid output, dtype, and order; the existing eager
+mixed-null differential continues to cover the untouched scalar fallback. Full `fp-conformance --lib` is **1596/1596
+green** on `vmi1153651`.
+
+Validation: strict-remote workspace `cargo check --workspace --all-targets` is green on `vmi1149989` with only the two
+pre-existing unused `Scalar` imports in untouched test modules; focused `fp-columnar` lib clippy is warning-clean on
+`vmi1152480`; the benchmark's pinned-rustfmt check and `git diff --check` are green. Whole-file rustfmt still reports
+unrelated existing drift in recently landed `fp-columnar` sections and was not applied. The mandatory static-only UBS scan
+completed with the broad existing test-panic inventory and emitted no finding on the new production arm; benchmark unwraps
+are deliberate fail-fast checks over fixed synthetic inputs.

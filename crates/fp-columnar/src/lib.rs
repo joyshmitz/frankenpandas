@@ -13788,6 +13788,24 @@ impl Column {
             return Ok(self.clone());
         }
 
+        // Typed nullable Bool fast path: `LazyNullableBool` materializes valid
+        // slots as the raw bool and invalid slots as `Null(Null)`. A post-cast
+        // Bool fill therefore makes every output slot valid, so select directly
+        // from the packed Bool data + validity and skip the Vec<Scalar> rebuild.
+        // Variant-gating preserves the generic path for eager Bool columns that
+        // may carry distinct NullKind values; a missing fill also remains generic
+        // because its post-cast scalar does not match `Scalar::Bool`.
+        if let Scalar::Bool(fv) = &cast_fill
+            && let ScalarValues::LazyNullableBool { data, validity, .. } = &self.values
+        {
+            let out = data
+                .iter()
+                .enumerate()
+                .map(|(i, &value)| if validity.get(i) { value } else { *fv })
+                .collect();
+            return Ok(Self::from_bool_values(out));
+        }
+
         let values = self
             .values
             .iter()
@@ -26380,10 +26398,14 @@ mod tests {
                 }
                 let icol = Column::from_i64_values_with_validity(ivals.clone(), vmask.clone());
                 let fcol = Column::from_f64_values_with_validity(fvals.clone(), vmask.clone());
+                let bvals: Vec<bool> = (0..n).map(|_| next() & 1 == 0).collect();
+                let bcol = Column::from_bool_values_with_validity(bvals.clone(), vmask.clone());
                 let ifill = 7_i64;
                 let ffill = 7.0_f64;
+                let bfill = next() & 1 == 0;
                 let igot = icol.fillna(&Scalar::Int64(ifill)).unwrap();
                 let fgot = fcol.fillna(&Scalar::Float64(ffill)).unwrap();
+                let bgot = bcol.fillna(&Scalar::Bool(bfill)).unwrap();
                 for i in 0..n {
                     let iexp = if valid[i] {
                         Scalar::Int64(ivals[i])
@@ -26397,7 +26419,14 @@ mod tests {
                     };
                     assert_eq!(igot.values()[i], iexp, "i64 idx {i}");
                     assert_eq!(fgot.values()[i], fexp, "f64 idx {i}");
+                    assert_eq!(
+                        bgot.values()[i],
+                        Scalar::Bool(if valid[i] { bvals[i] } else { bfill }),
+                        "bool idx {i}"
+                    );
                 }
+                assert_eq!(bgot.dtype(), DType::Bool);
+                assert_eq!(bgot.validity().count_valid(), n);
             }
         }
 

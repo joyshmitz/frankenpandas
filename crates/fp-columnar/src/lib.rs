@@ -16781,6 +16781,43 @@ impl Column {
             return Scalar::Int64(seen.len() as i64);
         }
 
+        // Nullable contiguous-Utf8 fast path (COLD cache): the all-valid arm above gates
+        // on `as_utf8_contiguous` (validity.all()), so a `LazyNullableUtf8` column — a
+        // string column WITH missing rows, the common CSV/parquet shape — fell to
+        // `nannunique(&self.values)` which materializes a `Vec<Scalar::Utf8>` (one heap
+        // `String` per row). Count distinct PRESENT byte spans via `FxHashSet<&[u8]>`
+        // (byte-eq == `&str`-eq for valid UTF-8), tracking whether any missing exists.
+        // Bit-identical to the generic path: `nannunique` skips missing (== my
+        // validity-gated insert) and `!dropna` adds exactly one bucket when any missing
+        // row exists (a `LazyNullableUtf8` missing slot is `Null(Null)`, all one kind).
+        // Gated on a COLD `values` cache: the win is skipping the materialization the cold
+        // generic path pays (~5x on a fresh column, the usual `df[col].nunique()` shape);
+        // a warm/already-materialized column defers to `nannunique` over the cached Scalar
+        // Vec (whose per-row hash beats the typed `validity.get` scan) — no regression.
+        if let ScalarValues::LazyNullableUtf8 {
+            bytes,
+            offsets,
+            validity,
+            values,
+        } = &self.values
+            && values.get().is_none()
+        {
+            let mut seen: FxHashSet<&[u8]> = FxHashSet::default();
+            let mut any_missing = false;
+            for (i, w) in offsets.windows(2).enumerate() {
+                if validity.get(i) {
+                    seen.insert(&bytes[w[0]..w[1]]);
+                } else {
+                    any_missing = true;
+                }
+            }
+            let mut distinct = seen.len() as i64;
+            if !dropna && any_missing {
+                distinct += 1;
+            }
+            return Scalar::Int64(distinct);
+        }
+
         let mut distinct = match nannunique(&self.values) {
             Scalar::Int64(count) => count,
             _ => 0,
@@ -37265,6 +37302,63 @@ mod tests {
             .expect("col");
             assert_eq!(col.nunique(), Scalar::Int64(0));
             assert_eq!(col.nunique_with_dropna(false), Scalar::Int64(1));
+        }
+
+        #[test]
+        fn nunique_nullable_utf8_typed_matches_generic() {
+            // The typed nullable-Utf8 nunique arm (cold cache) must be BIT-EXACT to the
+            // generic nannunique path for BOTH dropna values. A/B on identical
+            // LazyNullableUtf8 data: `col_cold` (fresh, cold cache) exercises the typed
+            // arm; `col_warm` has its Scalar cache pre-materialized so the cold-cache gate
+            // defers it to the generic path. Seeded short strings over {a,b,c,d} + ~25%
+            // nulls; some trials fully-null (distinct present = 0), some no-null.
+            let mut state: u64 = 0x4E17_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 300) as usize;
+                // Vary null density per trial: 0 (none), 1 (~25%), 2 (all-null).
+                let null_mode = next() % 3;
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for i in 0..n {
+                    let is_null = match null_mode {
+                        0 => false,
+                        2 => true,
+                        _ => next() % 4 == 0,
+                    };
+                    if is_null {
+                        validity.set(i, false);
+                    } else {
+                        let len = (next() % 5) as usize;
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                    }
+                    offsets.push(bytes.len());
+                }
+                let col_cold = Column::from_utf8_values_with_validity(
+                    bytes.clone(),
+                    offsets.clone(),
+                    validity.clone(),
+                );
+                let col_warm =
+                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
+                for dropna in [true, false] {
+                    assert_eq!(
+                        col_cold.nunique_with_dropna(dropna),
+                        col_warm.nunique_with_dropna(dropna),
+                        "trial {trial} null_mode={null_mode} dropna={dropna}"
+                    );
+                }
+            }
         }
 
         #[test]

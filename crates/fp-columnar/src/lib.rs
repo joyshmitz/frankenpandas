@@ -6032,6 +6032,58 @@ fn ptp_nullable_i64(data: &[i64], validity: Option<&ValidityMask>) -> Scalar {
     }
 }
 
+/// Two-pass moments over the PRESENT subset of an f64 slice (+ optional validity):
+/// returns `(n, mean, sum_sq)` where `n` = present count, `mean = Σ/n`, and
+/// `sum_sq = Σ(x − mean)²`. Present iff (validity-set) AND non-NaN — exactly
+/// `collect_finite`'s drop-missing. Same values, same order as
+/// `collect_finite(..).iter().sum()`, so the f64 accumulation is byte-identical to
+/// nanvar/nansem. `n == 0` ⇒ `(0, 0.0, 0.0)` (caller returns Null(NaN)).
+fn present_moments_f64(data: &[f64], validity: Option<&ValidityMask>) -> (usize, f64, f64) {
+    let mut sum = 0.0_f64;
+    let mut n = 0usize;
+    for (i, &x) in data.iter().enumerate() {
+        if validity.map_or(true, |v| v.get(i)) && !x.is_nan() {
+            sum += x;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return (0, 0.0, 0.0);
+    }
+    let mean = sum / n as f64;
+    let mut sum_sq = 0.0_f64;
+    for (i, &x) in data.iter().enumerate() {
+        if validity.map_or(true, |v| v.get(i)) && !x.is_nan() {
+            sum_sq += (x - mean).powi(2);
+        }
+    }
+    (n, mean, sum_sq)
+}
+
+/// Int64 sibling of [`present_moments_f64`]: present iff validity-set; folds
+/// `v as f64` (matching nanvar's `to_f64`), so bit-identical.
+fn present_moments_i64(data: &[i64], validity: Option<&ValidityMask>) -> (usize, f64, f64) {
+    let mut sum = 0.0_f64;
+    let mut n = 0usize;
+    for (i, &v) in data.iter().enumerate() {
+        if validity.map_or(true, |vm| vm.get(i)) {
+            sum += v as f64;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return (0, 0.0, 0.0);
+    }
+    let mean = sum / n as f64;
+    let mut sum_sq = 0.0_f64;
+    for (i, &v) in data.iter().enumerate() {
+        if validity.map_or(true, |vm| vm.get(i)) {
+            sum_sq += (v as f64 - mean).powi(2);
+        }
+    }
+    (n, mean, sum_sq)
+}
+
 fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Column, ColumnError> {
     if !matches!(keep, "first" | "last" | "all") {
         return Err(ColumnError::Type(TypeError::NonNumericValue {
@@ -16530,6 +16582,29 @@ impl Column {
             let sum_sq: f64 = data.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>();
             return Scalar::Float64(sum_sq / (n - ddof) as f64);
         }
+        // Nullable Float64/Int64: two-pass moments over the PRESENT subset, skipping
+        // nanvar's Vec<Scalar> materialization + collect_finite. Bit-identical (same
+        // present values, same order ⇒ same n/mean/sum_sq; n <= ddof ⇒ Null(NaN)).
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let (n, _mean, sum_sq) = present_moments_f64(data, Some(validity));
+            return if n <= ddof {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(sum_sq / (n - ddof) as f64)
+            };
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let (n, _mean, sum_sq) = present_moments_i64(data, Some(validity));
+            return if n <= ddof {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(sum_sq / (n - ddof) as f64)
+            };
+        }
         nanvar(&self.values, ddof)
     }
 
@@ -16546,7 +16621,11 @@ impl Column {
         // other }`, and typed var == nanvar for these dtypes, so the same var bits
         // are sqrt'd (and a n<=ddof Null(NaN) passes through unchanged). Non-Float64
         // /non-Int64 (e.g. Timedelta) keep nanstd's dtype-preserving path.
-        if self.as_f64_slice().is_some() || self.as_i64_slice().is_some() {
+        // Delegate to typed var for any Float64/Int64 column (all-valid OR nullable
+        // — var now has both). nanstd's numeric arm is literally sqrt(nanvar), and
+        // typed var == nanvar for these dtypes, so this is bit-identical. Timedelta
+        // and other dtypes keep nanstd's dtype-preserving path.
+        if matches!(self.dtype, DType::Float64 | DType::Int64) {
             return match self.var(ddof) {
                 Scalar::Float64(v) => Scalar::Float64(v.sqrt()),
                 other => other,
@@ -16583,6 +16662,29 @@ impl Column {
             let sum_sq: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
             let std = (sum_sq / (n - ddof) as f64).sqrt();
             return Scalar::Float64(std / nf.sqrt());
+        }
+        // Nullable Float64/Int64: sem = std / sqrt(n) over the PRESENT subset (n =
+        // present count), via the same two-pass moments — skipping nansem's
+        // Vec<Scalar> materialization + its DOUBLE collect_finite. Bit-identical.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let (n, _mean, sum_sq) = present_moments_f64(data, Some(validity));
+            if n <= ddof {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let std = (sum_sq / (n - ddof) as f64).sqrt();
+            return Scalar::Float64(std / (n as f64).sqrt());
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let (n, _mean, sum_sq) = present_moments_i64(data, Some(validity));
+            if n <= ddof {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let std = (sum_sq / (n - ddof) as f64).sqrt();
+            return Scalar::Float64(std / (n as f64).sqrt());
         }
         nansem(&self.values, ddof)
     }
@@ -31954,6 +32056,73 @@ mod tests {
                     let vals = col.values().to_vec();
                     assert_eq!(col.prod(), fp_types::nanprod(&vals), "prod trial {trial}");
                     assert_eq!(col.ptp(), fp_types::nanptp(&vals), "ptp trial {trial}");
+                }
+            }
+        }
+
+        #[test]
+        fn var_std_sem_nullable_typed_match_nan_reference() {
+            // Typed nullable Int64/Float64 var/std/sem (two-pass moments over the
+            // present subset) must be BIT-IDENTICAL to nanvar/nanstd/nansem, across
+            // ddof in {0, 1, 2}. Null-missing only. All-valid Int64 also exercised
+            // (the pre-existing arm). n<=ddof ⇒ Null(NaN).
+            let mut state: u64 = 0x7A21_1234_5678_9ABC;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let approx_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            for trial in 0..200 {
+                let n = (next() % 250) as usize; // include small n (n<=ddof edges)
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 200) as i64 - 100
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else {
+                            (r % 200) as f64 - 100.0
+                        }
+                    })
+                    .collect();
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                for col in [&i_all, &i_null, &f_null] {
+                    let vals = col.values().to_vec();
+                    for ddof in [0usize, 1, 2] {
+                        assert!(
+                            approx_eq(&col.var(ddof), &fp_types::nanvar(&vals, ddof)),
+                            "var trial {trial} ddof {ddof}"
+                        );
+                        assert!(
+                            approx_eq(&col.std(ddof), &fp_types::nanstd(&vals, ddof)),
+                            "std trial {trial} ddof {ddof}"
+                        );
+                        assert!(
+                            approx_eq(&col.sem(ddof), &fp_types::nansem(&vals, ddof)),
+                            "sem trial {trial} ddof {ddof}"
+                        );
+                    }
                 }
             }
         }

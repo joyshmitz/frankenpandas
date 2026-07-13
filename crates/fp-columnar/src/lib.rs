@@ -19172,6 +19172,36 @@ impl Column {
                 let out: Vec<i64> = (0..s.len()).map(|i| if cb[i] { s[i] } else { o }).collect();
                 return Ok(Self::from_i64_values_owned(out));
             }
+            // Nullable Int64 self (all-valid cond): the all-valid `as_i64_slice` arm
+            // above bails on ANY missing self slot, so a nullable Int64 self fell to the
+            // Scalar loop. With an ALL-VALID cond there is NO cond-missing, so the only
+            // missing source is a cond-true+self-missing slot ⇒ Null(Null) ==
+            // missing_for_dtype(Int64) in BOTH paths (from_i64_values_with_validity's
+            // cleared bit == the Scalar loop's v.clone() of an Int64-missing slot). Int64
+            // has no NaN, so — unlike a nullable FLOAT64 self, which is EXCLUDED because
+            // a validity-set NaN datum renders Float64(NaN) via from_f64_values but
+            // Null(NaN) via Self::new — there is no NaN/validity ambiguity. Bit-identical:
+            // cond[i] ? self[i] (present ⇒ Int64, missing ⇒ Null(Null)) : Int64(other).
+            if self.dtype == DType::Int64
+                && let Some((sd, sv)) = self.as_i64_slice_with_validity()
+                && let Scalar::Int64(o) = other
+            {
+                let o = *o;
+                let mut out = vec![0_i64; sd.len()];
+                let mut vmask = ValidityMask::all_valid(sd.len());
+                for i in 0..sd.len() {
+                    if cb[i] {
+                        if sv.get(i) {
+                            out[i] = sd[i];
+                        } else {
+                            vmask.set(i, false);
+                        }
+                    } else {
+                        out[i] = o;
+                    }
+                }
+                return Ok(Self::from_i64_values_with_validity(out, vmask));
+            }
         }
         let out: Vec<Scalar> = self
             .values
@@ -33101,6 +33131,90 @@ mod tests {
                             "quantile trial {trial} q {q}"
                         );
                     }
+                }
+            }
+        }
+
+        #[test]
+        fn where_cond_nullable_self_typed_match_scalar_reference() {
+            // The typed nullable-self arms for where_cond (all-valid Bool cond) must be
+            // BIT-EXACT to the generic Scalar loop: cond[i] ? self[i] : other. Covers
+            // Float64 self (with valid-bit-set NaN + ±inf) and Int64 self, self missing
+            // at cond-true (⇒ dtype-correct null) and cond-false, gaps.
+            let mut state: u64 = 0x3E4E_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Int64(x), Scalar::Int64(y)) => x == y,
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            // Replica of the generic loop for an ALL-VALID cond (no cond-missing branch).
+            fn ref_where(vals: &[Scalar], cb: &[bool], other: &Scalar, dtype: DType) -> Column {
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .zip(cb.iter())
+                    .map(|(v, &c)| if c { v.clone() } else { other.clone() })
+                    .collect();
+                Column::new(dtype, out).unwrap()
+            }
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let cb: Vec<bool> = (0..n).map(|_| next() % 2 == 0).collect();
+                let cond = Column::from_bool_values(cb.clone());
+                let is_f64 = trial % 2 == 0;
+                let (col, other) = if is_f64 {
+                    let mut vf = crate::ValidityMask::all_valid(n);
+                    let data: Vec<f64> = (0..n)
+                        .map(|i| {
+                            let r = next();
+                            match r % 7 {
+                                0 => {
+                                    vf.set(i, false);
+                                    0.0
+                                }
+                                1 => f64::NAN,
+                                2 => f64::INFINITY,
+                                _ => ((r % 400) as f64 - 200.0) * 0.25,
+                            }
+                        })
+                        .collect();
+                    (
+                        Column::from_f64_values_with_validity(data, vf),
+                        Scalar::Float64(-7.5),
+                    )
+                } else {
+                    let mut vi = crate::ValidityMask::all_valid(n);
+                    let data: Vec<i64> = (0..n)
+                        .map(|i| {
+                            let r = next();
+                            if r % 4 == 0 {
+                                vi.set(i, false);
+                            }
+                            (r % 400) as i64 - 200
+                        })
+                        .collect();
+                    (
+                        Column::from_i64_values_with_validity(data, vi),
+                        Scalar::Int64(-99),
+                    )
+                };
+                let vals = col.values().to_vec();
+                let got = col.where_cond(&cond, &other).unwrap();
+                let dt = if is_f64 { DType::Float64 } else { DType::Int64 };
+                let want = ref_where(&vals, &cb, &other, dt);
+                let gv = got.values();
+                let wv = want.values();
+                assert_eq!(gv.len(), wv.len(), "where len trial {trial}");
+                for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                    assert!(bit_eq(g, w), "where trial {trial} idx {k}: {g:?} != {w:?}");
                 }
             }
         }

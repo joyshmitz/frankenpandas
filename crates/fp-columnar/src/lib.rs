@@ -14050,6 +14050,36 @@ impl Column {
         if let Some(out) = self.typed_bool_unary(|value| !value) {
             return Ok(out);
         }
+        // Typed Int64/Float64 (all-valid + nullable ⇒ Bool out): logical_not of a
+        // numeric is `!(v != 0) == (v == 0)`. Build the Bool buffer straight over the
+        // raw slice + an explicit validity mask, skipping the Vec<Scalar> materialization
+        // + Column::new. Bit-identical to the Scalar loop: present ⇒ Bool(v == 0);
+        // missing (validity-unset, OR a valid-bit-set NaN for Float64 which the loop's
+        // is_missing() drops) ⇒ Null(Null) == missing_for_dtype(Bool). Int64 has no NaN
+        // so present == validity-set; Float64 present == validity-set AND non-NaN
+        // (matching the loop's `to_f64()` on a NON-missing scalar). ±inf ⇒ inf != 0 ⇒
+        // Bool(false), kept. No from_f64_values NaN-render trap (Bool out + explicit
+        // mask). Other dtypes / mixed keep the Scalar path.
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let bools: Vec<bool> = data.iter().map(|&x| x == 0).collect();
+            return Ok(Self::from_bool_values_with_validity(bools, validity.clone()));
+        }
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let mut bools = vec![false; data.len()];
+            let mut vmask = ValidityMask::all_valid(data.len());
+            for i in 0..data.len() {
+                if validity.get(i) && !data[i].is_nan() {
+                    bools[i] = data[i] == 0.0;
+                } else {
+                    vmask.set(i, false);
+                }
+            }
+            return Ok(Self::from_bool_values_with_validity(bools, vmask));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -33200,6 +33230,87 @@ mod tests {
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
                         );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn logical_not_numeric_nullable_typed_match_scalar_reference() {
+            // The typed Int64/Float64 arms for logical_not (Bool output) must be
+            // BIT-EXACT to the Scalar loop: present ⇒ Bool(v == 0); missing / valid-bit
+            // -set NaN ⇒ Null(Null). Covers 0, ±inf (⇒ Bool(false)), negatives, gaps.
+            let mut state: u64 = 0x106_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Bool(x), Scalar::Bool(y)) => x == y,
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            fn ref_lognot(vals: &[Scalar]) -> Column {
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            Scalar::Null(NullKind::Null)
+                        } else {
+                            let bv = match v {
+                                Scalar::Bool(x) => *x,
+                                _ => v.to_f64().map(|x| x != 0.0).unwrap_or(false),
+                            };
+                            Scalar::Bool(!bv)
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Bool, out).unwrap()
+            }
+            for trial in 0..300 {
+                let n = (next() % 250) as usize;
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 7 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN,
+                            2 => f64::INFINITY,
+                            3 => 0.0, // ⇒ Bool(true)
+                            _ => ((r % 400) as f64 - 200.0) * 0.5,
+                        }
+                    })
+                    .collect();
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 5) as i64 - 2 // -2..2 incl 0
+                    })
+                    .collect();
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                let i_all = Column::from_i64_values_owned((0..n).map(|i| (i % 3) as i64 - 1).collect());
+                for col in [&f_null, &i_null, &i_all] {
+                    let vals = col.values().to_vec();
+                    let got = col.logical_not().unwrap();
+                    let want = ref_lognot(&vals);
+                    let gv = got.values();
+                    let wv = want.values();
+                    assert_eq!(gv.len(), wv.len(), "lognot len trial {trial}");
+                    for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                        assert!(bit_eq(g, w), "lognot trial {trial} idx {k}: {g:?} != {w:?}");
                     }
                 }
             }

@@ -24846,6 +24846,95 @@ impl Column {
             return Ok((values, counts));
         }
 
+        // Nullable contiguous-Utf8 fast path (dropna=true, COLD cache): the all-valid arm
+        // above gates on `as_utf8_contiguous` (validity.all()), so a `LazyNullableUtf8`
+        // column — a string column WITH missing rows, the common CSV/parquet shape — fell
+        // to the generic `Vec<Scalar::Utf8>` + `set_member_key` tally below. Under the
+        // default `dropna=true`, missing rows are dropped, so tally ONLY the present byte
+        // spans (validity-set) via `FxHashMap<&[u8], usize>` and build a CONTIGUOUS
+        // distinct-values column — every distinct value is a present string, so the output
+        // is all-valid exactly like the generic path's (which drops missing before
+        // building values_out). Bit-identical: same present-only first-seen distinct set
+        // (byte-eq == set_member_key Utf8 eq), same counts, same stable count-sort
+        // tie-break, same normalize/Int64 counts.
+        //
+        // Gated on a COLD `values` cache: the whole win is skipping the ~30 B/row
+        // `Vec<Scalar::Utf8>` materialization the generic path pays on first touch (~5x on
+        // a fresh column, the usual `df[col].value_counts()` shape). If that cache is
+        // ALREADY populated (a prior op materialized it), the per-row `validity.get`
+        // typed tally is marginally slower than the generic tally over the warm Scalar
+        // Vec, so we defer to it — no regression. `dropna=false` (which would append a
+        // `Null(NaN)` count category, making the values column non-contiguous) also keeps
+        // the generic path.
+        if dropna
+            && let ScalarValues::LazyNullableUtf8 {
+                bytes,
+                offsets,
+                validity,
+                values,
+            } = &self.values
+            && values.get().is_none()
+        {
+            let mut index: rustc_hash::FxHashMap<&[u8], usize> = rustc_hash::FxHashMap::default();
+            let mut tally: Vec<(&[u8], usize)> = Vec::new();
+            for (i, w) in offsets.windows(2).enumerate() {
+                if !validity.get(i) {
+                    continue; // dropna: skip missing rows
+                }
+                let span = &bytes[w[0]..w[1]];
+                if let Some(&j) = index.get(span) {
+                    tally[j].1 += 1;
+                } else {
+                    index.insert(span, tally.len());
+                    tally.push((span, 1));
+                }
+            }
+
+            if sort {
+                if ascending {
+                    tally.sort_by_key(|(_, count)| *count);
+                } else {
+                    tally.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+                }
+            }
+
+            let total = if normalize {
+                tally.iter().map(|(_, count)| *count).sum::<usize>() as f64
+            } else {
+                1.0
+            };
+
+            let mut values_bytes: Vec<u8> = Vec::new();
+            let mut values_offsets: Vec<usize> = Vec::with_capacity(tally.len() + 1);
+            values_offsets.push(0);
+            let mut counts_out: Vec<Scalar> = Vec::with_capacity(tally.len());
+            for (span, count) in &tally {
+                values_bytes.extend_from_slice(span);
+                values_offsets.push(values_bytes.len());
+                if normalize {
+                    let normalized = if total == 0.0 {
+                        0.0
+                    } else {
+                        *count as f64 / total
+                    };
+                    counts_out.push(Scalar::Float64(normalized));
+                } else {
+                    counts_out.push(Scalar::Int64(i64::try_from(*count).unwrap_or(i64::MAX)));
+                }
+            }
+
+            let values = Self::from_utf8_contiguous(values_bytes, values_offsets);
+            let counts = Self::new(
+                if normalize {
+                    DType::Float64
+                } else {
+                    DType::Int64
+                },
+                counts_out,
+            )?;
+            return Ok((values, counts));
+        }
+
         // O(N) tally: a `set_member_key`-keyed hash map gives O(1) lookup
         // instead of the old O(distinct) linear `counts.iter().find(semantic_eq)`
         // per value (O(N·distinct), quadratic for high-cardinality data). The
@@ -40311,6 +40400,74 @@ mod tests {
                 counts.values(),
                 &[Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(1)]
             );
+        }
+
+        #[test]
+        fn value_counts_nullable_utf8_typed_matches_generic() {
+            // The typed nullable-Utf8 value_counts arm (dropna=true, cold cache) must be
+            // BIT-EXACT to the generic path. A/B on identical LazyNullableUtf8 data:
+            // `col_cold` (fresh, cold cache) exercises the typed arm; `col_warm` has its
+            // Scalar cache pre-materialized so the cold-cache gate defers it to the
+            // generic tally. Compare (values, counts) across normalize/sort/ascending.
+            // Seeded short strings over {a,b,c,d} (ties) with ~25% nulls.
+            let mut state: u64 = 0x77C0_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..80 {
+                let n = (next() % 300) as usize;
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for i in 0..n {
+                    if next() % 4 == 0 {
+                        validity.set(i, false);
+                    } else {
+                        let len = (next() % 5) as usize;
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                    }
+                    offsets.push(bytes.len());
+                }
+                let col_cold = Column::from_utf8_values_with_validity(
+                    bytes.clone(),
+                    offsets.clone(),
+                    validity.clone(),
+                );
+                let col_warm =
+                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                // Pre-materialize the Scalar cache so the cold-cache gate defers col_warm
+                // to the generic path (the oracle). col_cold is never touched ⇒ stays cold.
+                let _ = col_warm.values();
+                for (normalize, sort, ascending) in [
+                    (false, true, false),
+                    (false, true, true),
+                    (true, true, false),
+                    (false, false, false),
+                ] {
+                    let (cv, cc) = col_cold
+                        .value_counts_with_options(normalize, sort, ascending, true)
+                        .expect("cold value_counts");
+                    let (wv, wc) = col_warm
+                        .value_counts_with_options(normalize, sort, ascending, true)
+                        .expect("warm value_counts");
+                    assert_eq!(
+                        cv.values(),
+                        wv.values(),
+                        "values trial {trial} norm={normalize} sort={sort} asc={ascending}"
+                    );
+                    assert_eq!(
+                        cc.values(),
+                        wc.values(),
+                        "counts trial {trial} norm={normalize} sort={sort} asc={ascending}"
+                    );
+                }
+            }
         }
 
         #[test]

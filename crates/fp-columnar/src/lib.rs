@@ -6824,6 +6824,15 @@ fn value_counts_i64_typed(
             .collect();
         (first_seen, counts)
     } else {
+        // Wide path stays on FxHashMap. NEGATIVE LEDGER: converting this to the
+        // vein's growable+Fibonacci open-addressing (keys + a parallel `slot_at`
+        // into values/counts) is byte-identical but NOT a net win — measured
+        // low-card 0.76x, mid-100k 0.91x (regressions), high-card-2M 1.43x. Unlike
+        // the MEMBERSHIP-only tallies (count_distinct/duplicated, which the open-
+        // addressing beat at mid card too), value_counts bumps `counts[slot]` on
+        // every repeat, and that extra slot indirection erodes the open-addressing
+        // edge at low/mid cardinality — where FxHashMap's tuned get wins. So the
+        // vein's speedup does NOT extend to counting tallies. DON'T re-attempt.
         let mut index: FxHashMap<i64, usize> = FxHashMap::default();
         let mut values = Vec::new();
         let mut counts = Vec::new();
@@ -35299,6 +35308,71 @@ mod tests {
                 counts.values(),
                 &[Scalar::Int64(2), Scalar::Int64(2), Scalar::Int64(1)]
             );
+        }
+
+        #[test]
+        fn value_counts_wide_growable_open_addressing_matches_reference() {
+            // Regression for the value_counts_i64_typed wide-path conversion
+            // (FxHashMap → growable open-addressing): WIDE high-bit-only keys
+            // (k << 34) over enough rows (> 1024 distinct) to force rehashes, plus
+            // the i64::MIN value (the table's EMPTY sentinel, tracked separately).
+            // First-seen (value, count) pairs (sort=false) must be byte-identical to
+            // a first-seen HashMap reference.
+            use std::collections::HashMap;
+            let mut state: u64 = 0x1122_3344_5566_7788;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..30 {
+                let distinct = 2000 + (next() % 800) as i64;
+                let n = 12_000usize;
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        if i % 400 == 0 {
+                            i64::MIN
+                        } else {
+                            (((next() % distinct as u64) as i64) - distinct / 2) << 34
+                        }
+                    })
+                    .collect();
+                assert!(crate::i64_direct_address_range(&data).is_none());
+                // First-seen reference.
+                let mut order: Vec<i64> = Vec::new();
+                let mut cnt: HashMap<i64, usize> = HashMap::new();
+                for &v in &data {
+                    let e = cnt.entry(v).or_insert_with(|| {
+                        order.push(v);
+                        0
+                    });
+                    *e += 1;
+                }
+                let exp_vals = order.clone();
+                let exp_counts: Vec<i64> = order.iter().map(|v| cnt[v] as i64).collect();
+                let (vals, counts) = Column::from_i64_values_owned(data)
+                    .value_counts_with_options(false, false, false, false)
+                    .expect("value_counts");
+                let got_vals: Vec<i64> = vals
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Int64(x) => *x,
+                        o => panic!("not i64: {o:?}"),
+                    })
+                    .collect();
+                let got_counts: Vec<i64> = counts
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Int64(x) => *x,
+                        o => panic!("not i64: {o:?}"),
+                    })
+                    .collect();
+                assert_eq!(got_vals, exp_vals, "values trial {trial}");
+                assert_eq!(got_counts, exp_counts, "counts trial {trial}");
+            }
         }
 
         #[test]

@@ -13390,15 +13390,10 @@ impl Column {
                 right: other.len(),
             });
         }
-        fn compute_gcd(mut a: i64, mut b: i64) -> i64 {
-            a = a.abs();
-            b = b.abs();
-            while b != 0 {
-                let t = b;
-                b = a % b;
-                a = t;
-            }
-            a
+        // Typed Int64 fast path (both-present ⇒ Int64(gcd), else Null(Null)); same
+        // kernel + missing rule as the Scalar loop below, no Scalar materialization.
+        if let Some(out) = self.typed_i64_both_present_binary(other, Self::compute_gcd_i64) {
+            return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
@@ -13408,7 +13403,7 @@ impl Column {
             }
             match (a, b) {
                 (Scalar::Int64(x), Scalar::Int64(y)) => {
-                    out.push(Scalar::Int64(compute_gcd(*x, *y)));
+                    out.push(Scalar::Int64(Self::compute_gcd_i64(*x, *y)));
                 }
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
@@ -13431,15 +13426,10 @@ impl Column {
                 right: other.len(),
             });
         }
-        fn compute_gcd(mut a: i64, mut b: i64) -> i64 {
-            a = a.abs();
-            b = b.abs();
-            while b != 0 {
-                let t = b;
-                b = a % b;
-                a = t;
-            }
-            a
+        // Typed Int64 fast path (both-present ⇒ Int64(lcm), else Null(Null)); same
+        // kernel + missing rule as the Scalar loop below, no Scalar materialization.
+        if let Some(out) = self.typed_i64_both_present_binary(other, Self::compute_lcm_i64) {
+            return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
@@ -13449,9 +13439,7 @@ impl Column {
             }
             match (a, b) {
                 (Scalar::Int64(x), Scalar::Int64(y)) => {
-                    let g = compute_gcd(*x, *y);
-                    let result = if g == 0 { 0 } else { (x.abs() / g) * y.abs() };
-                    out.push(Scalar::Int64(result));
+                    out.push(Scalar::Int64(Self::compute_lcm_i64(*x, *y)));
                 }
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
@@ -13473,6 +13461,10 @@ impl Column {
             });
         }
         if let Some(out) = self.typed_bool_binary(other, |left, right| left && right) {
+            return Ok(out);
+        }
+        // Typed Int64 fast path (both-present ⇒ Int64(x & y), else Null(Null)).
+        if let Some(out) = self.typed_i64_both_present_binary(other, |x, y| x & y) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -13506,6 +13498,10 @@ impl Column {
         if let Some(out) = self.typed_bool_binary(other, |left, right| left || right) {
             return Ok(out);
         }
+        // Typed Int64 fast path (both-present ⇒ Int64(x | y), else Null(Null)).
+        if let Some(out) = self.typed_i64_both_present_binary(other, |x, y| x | y) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             if a.is_missing() || b.is_missing() {
@@ -13535,6 +13531,10 @@ impl Column {
             });
         }
         if let Some(out) = self.typed_bool_binary(other, |left, right| left ^ right) {
+            return Ok(out);
+        }
+        // Typed Int64 fast path (both-present ⇒ Int64(x ^ y), else Null(Null)).
+        if let Some(out) = self.typed_i64_both_present_binary(other, |x, y| x ^ y) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -13694,6 +13694,53 @@ impl Column {
     /// from_f64_values marks the either-missing NaN slots missing, exactly as
     /// Self::new(Float64, [Float64(NaN)]) does. Covers mixed i64×f64. `None` unless
     /// both columns expose a typed numeric view.
+    /// Euclid GCD of two i64 (non-negative). Shared by `gcd`/`lcm` typed + Scalar arms.
+    fn compute_gcd_i64(mut a: i64, mut b: i64) -> i64 {
+        a = a.abs();
+        b = b.abs();
+        while b != 0 {
+            let t = b;
+            b = a % b;
+            a = t;
+        }
+        a
+    }
+
+    /// Element-wise LCM of two i64. Shared by `lcm`'s typed + Scalar arms.
+    fn compute_lcm_i64(x: i64, y: i64) -> i64 {
+        let g = Self::compute_gcd_i64(x, y);
+        if g == 0 { 0 } else { (x.abs() / g) * y.abs() }
+    }
+
+    /// Typed fast path for Int64-preserving two-column ops whose result is
+    /// `Int64(f(x,y))` when BOTH slots are present and MISSING (`Null(Null)` ==
+    /// missing_for_dtype(Int64)) when either is absent — i.e. gcd/lcm/bitwise_&|^ on
+    /// Int64 inputs. Reads both raw &[i64] + validity and reuses the input-present
+    /// mask, instead of materializing BOTH columns' Vec<Scalar> + a trailing
+    /// Vec<Scalar> result + Column::new. Bit-identical to the Scalar loop: same `f`
+    /// over the same present pairs; a cleared bit in `from_i64_values_with_validity`
+    /// renders `Null(Null)`, exactly the `Scalar::Null(NullKind::Null)` those loops
+    /// push. `None` unless BOTH columns are typed Int64 (the loops' non-Int64 arm
+    /// errors or is a different dtype — kept on the Scalar path).
+    fn typed_i64_both_present_binary(&self, other: &Self, f: fn(i64, i64) -> i64) -> Option<Self> {
+        if self.dtype != DType::Int64 || other.dtype != DType::Int64 {
+            return None;
+        }
+        let (l, lv) = self.as_i64_slice_with_validity()?;
+        let (r, rv) = other.as_i64_slice_with_validity()?;
+        let n = l.len().min(r.len());
+        let mut out = vec![0_i64; n];
+        let mut vmask = ValidityMask::all_valid(n);
+        for i in 0..n {
+            if lv.get(i) && rv.get(i) {
+                out[i] = f(l[i], r[i]);
+            } else {
+                vmask.set(i, false);
+            }
+        }
+        Some(Self::from_i64_values_with_validity(out, vmask))
+    }
+
     fn typed_nan_propagate_binary(
         &self,
         other: &Self,
@@ -32997,6 +33044,81 @@ mod tests {
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
                         );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn i64_both_present_binary_nullable_match_scalar_reference() {
+            // gcd/lcm/bitwise_and/or/xor now route Int64 input through
+            // typed_i64_both_present_binary (both-present ⇒ Int64(f), either-missing ⇒
+            // Null(Null)). Must be BIT-EXACT to their generic Scalar loop. Covers
+            // negatives, zeros (gcd(0,0)=0, lcm×0), all-valid + nullable at DIFFERENT
+            // positions.
+            let mut state: u64 = 0x6CD1_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Int64(x), Scalar::Int64(y)) => x == y,
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            fn ref_binop(a: &[Scalar], b: &[Scalar], f: fn(i64, i64) -> i64) -> Column {
+                let out: Vec<Scalar> = a
+                    .iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| {
+                        if x.is_missing() || y.is_missing() {
+                            Scalar::Null(NullKind::Null)
+                        } else {
+                            match (x, y) {
+                                (Scalar::Int64(xi), Scalar::Int64(yi)) => Scalar::Int64(f(*xi, *yi)),
+                                _ => unreachable!(),
+                            }
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Int64, out).unwrap()
+            }
+            let mk_i64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 40) as i64 - 20 // negatives + zeros
+                    })
+                    .collect();
+                Column::from_i64_values_with_validity(data, vi)
+            };
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let a = mk_i64(n, &mut next);
+                let b = mk_i64(n, &mut next);
+                let av = a.values().to_vec();
+                let bv = b.values().to_vec();
+                let cases: [(&str, Column, Column); 5] = [
+                    ("gcd", a.gcd(&b).unwrap(), ref_binop(&av, &bv, Column::compute_gcd_i64)),
+                    ("lcm", a.lcm(&b).unwrap(), ref_binop(&av, &bv, Column::compute_lcm_i64)),
+                    ("and", a.bitwise_and(&b).unwrap(), ref_binop(&av, &bv, |x, y| x & y)),
+                    ("or", a.bitwise_or(&b).unwrap(), ref_binop(&av, &bv, |x, y| x | y)),
+                    ("xor", a.bitwise_xor(&b).unwrap(), ref_binop(&av, &bv, |x, y| x ^ y)),
+                ];
+                for (name, got, want) in cases {
+                    let gv = got.values();
+                    let wv = want.values();
+                    assert_eq!(gv.len(), wv.len(), "{name} len trial {trial}");
+                    for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                        assert!(bit_eq(g, w), "{name} trial {trial} idx {k}: {g:?} != {w:?}");
                     }
                 }
             }

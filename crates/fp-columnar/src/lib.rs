@@ -21149,6 +21149,56 @@ impl Column {
             let sorted: Vec<Scalar> = perm.iter().map(|&i| self.values[i].clone()).collect();
             return Self::new(self.dtype, sorted);
         }
+        // Nullable contiguous-Utf8 (`LazyNullableUtf8`): the all-valid Utf8 arm above
+        // bailed on the missing bit and `typed_radix_perm` is numeric-only, so a nullable
+        // string column fell to the O(n log n) na-last Scalar comparator below, which
+        // materializes a `Vec<Scalar::Utf8>` (one heap `String` per row) AND clones a
+        // `String` per output row. Sort the PRESENT rows with the stable MSD byte radix
+        // (`utf8_msd_argsort_bytes` — byte order == `String::cmp` == the Utf8 arm of
+        // `compare_scalars_na_last` for valid UTF-8), then gather the sorted present spans
+        // into ONE contiguous byte buffer followed by the missing rows (na-last). Zero
+        // per-row `String` alloc on either input or output. Bit-identical to the comparator
+        // fallback: present values sort ascending/descending exactly as
+        // `compare_scalars_na_last(.., ascending)` orders two Utf8 (byte-lexicographic),
+        // stable ties keep original order (radix is stable; missing kept in original order
+        // in the na-last suffix), and `from_utf8_values_with_validity` materializes a
+        // present slot as `Scalar::Utf8(span)` and a missing slot as
+        // `Null(Null) == missing_for_dtype(Utf8)` — exactly the comparator path's clone of
+        // a sorted present value / a na-last `Null(Null)`.
+        if let ScalarValues::LazyNullableUtf8 {
+            bytes,
+            offsets,
+            validity,
+            ..
+        } = &self.values
+        {
+            let n = offsets.len().saturating_sub(1);
+            let present_idx: Vec<usize> = (0..n).filter(|&i| validity.get(i)).collect();
+            let present_count = present_idx.len();
+            let present_spans: Vec<&[u8]> = present_idx
+                .iter()
+                .map(|&i| &bytes[offsets[i]..offsets[i + 1]])
+                .collect();
+            let sub = utf8_msd_argsort_bytes(&present_spans, ascending);
+            let mut out_bytes: Vec<u8> = Vec::with_capacity(bytes.len());
+            let mut out_offsets: Vec<usize> = Vec::with_capacity(n + 1);
+            out_offsets.push(0);
+            let mut out_valid = ValidityMask::all_valid(n);
+            for &p in &sub {
+                out_bytes.extend_from_slice(present_spans[p]);
+                out_offsets.push(out_bytes.len());
+            }
+            // na-last suffix: the missing rows — empty spans, validity cleared.
+            for j in present_count..n {
+                out_offsets.push(out_bytes.len());
+                out_valid.set(j, false);
+            }
+            return Ok(Self::from_utf8_values_with_validity(
+                out_bytes,
+                out_offsets,
+                out_valid,
+            ));
+        }
         // Nullable / NaN / NaT typed columns (Int64, Float64, Datetime64,
         // Timedelta64): the all-valid radix arms above bailed on the missing bit,
         // so these fell to the O(n log n) na-last Scalar comparator below.
@@ -31863,6 +31913,53 @@ mod tests {
                             "{tag} trial {trial} asc={ascending}"
                         );
                     }
+                }
+            }
+        }
+
+        #[test]
+        fn sort_values_nullable_utf8_matches_na_last_scalar_reference() {
+            // sort_values on a nullable contiguous-Utf8 column now routes through the MSD
+            // byte radix over present spans + a na-last contiguous gather instead of the
+            // O(n log n) na-last Scalar comparator. The RESULT VALUES must stay
+            // bit-identical to that comparator's stable sort for BOTH directions. Tiny
+            // alphabet {a,b,c,d} + short lengths ⇒ frequent ties (stability matters);
+            // ~25% nulls (na-last). Deterministic LCG.
+            let mut state: u64 = 0x5027_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let len = (next() % 300) as usize + 1;
+                let mut v = crate::ValidityMask::all_valid(len);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for i in 0..len {
+                    if next() % 4 == 0 {
+                        v.set(i, false);
+                    } else {
+                        let slen = (next() % 4) as usize;
+                        let s: String = (0..slen)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                    }
+                    offsets.push(bytes.len());
+                }
+                let col = Column::from_utf8_values_with_validity(bytes, offsets, v);
+                let vals = col.values().to_vec();
+                for ascending in [true, false] {
+                    let mut want: Vec<&Scalar> = vals.iter().collect();
+                    want.sort_by(|a, b| crate::compare_scalars_na_last(a, b, ascending));
+                    let want: Vec<Scalar> = want.into_iter().cloned().collect();
+                    assert_eq!(
+                        col.sort_values(ascending).expect("sort_values").values(),
+                        want.as_slice(),
+                        "utf8 trial {trial} asc={ascending}"
+                    );
                 }
             }
         }

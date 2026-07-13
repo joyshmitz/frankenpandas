@@ -13340,6 +13340,26 @@ impl Column {
     /// - h0 where x == 0
     /// - 1 where x > 0
     pub fn heaviside(&self, h0: f64) -> Result<Self, ColumnError> {
+        // Typed fast path (all-valid or nullable Float64/Int64 ⇒ Float64 out): present
+        // ⇒ x<0?0:x>0?1:h0. The `is_nan ⇒ NaN` guard is REQUIRED: typed_float_unary's
+        // nullable arm passes a valid-bit-set NaN datum through `f` (it drops only
+        // validity-unset slots), and heaviside's bare comparisons would fall to the
+        // `else` (⇒ h0, a finite VALUE) instead of NaN — so the kernel must propagate
+        // NaN itself, making it match the Scalar loop's is_missing(NaN)⇒NaN (from_f64
+        // _values then marks it missing). Int64 has no NaN so the guard is inert there.
+        if let Some(out) = self.typed_float_unary(|x| {
+            if x.is_nan() {
+                f64::NAN
+            } else if x < 0.0 {
+                0.0
+            } else if x > 0.0 {
+                1.0
+            } else {
+                h0
+            }
+        }) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -23047,6 +23067,11 @@ impl Column {
     /// Matches np.ldexp(x, exp). Computes x * 2^exp for each element.
     pub fn ldexp(&self, exp: i32) -> Result<Self, ColumnError> {
         let multiplier = 2.0_f64.powi(exp);
+        // Typed fast path (all-valid or nullable Float64/Int64 ⇒ Float64 out): present
+        // ⇒ x*multiplier, missing/NaN ⇒ NaN⇒missing. Bit-identical to the Scalar loop.
+        if let Some(out) = self.typed_float_unary(|x| x * multiplier) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -33058,6 +33083,135 @@ mod tests {
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
                         );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn heaviside_ldexp_nullable_typed_match_scalar_reference() {
+            // heaviside(h0)/ldexp(exp) now route through typed_float_unary. Must be
+            // BIT-EXACT to their generic Scalar loop (missing/NaN ⇒ NaN⇒missing; present
+            // ⇒ kernel). Covers x==0 (⇒ h0), ±inf, valid-bit-set NaN, negatives, gaps,
+            // and h0==NaN (heaviside(0) ⇒ NaN⇒missing).
+            let mut state: u64 = 0x4EA0_51DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            fn ref_heaviside(vals: &[Scalar], h0: f64) -> Column {
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            return Scalar::Float64(f64::NAN);
+                        }
+                        match v {
+                            Scalar::Int64(x) => Scalar::Float64(if *x < 0 {
+                                0.0
+                            } else if *x > 0 {
+                                1.0
+                            } else {
+                                h0
+                            }),
+                            Scalar::Float64(x) => Scalar::Float64(if x.is_nan() {
+                                f64::NAN
+                            } else if *x < 0.0 {
+                                0.0
+                            } else if *x > 0.0 {
+                                1.0
+                            } else {
+                                h0
+                            }),
+                            _ => unreachable!(),
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Float64, out).unwrap()
+            }
+            fn ref_ldexp(vals: &[Scalar], exp: i32) -> Column {
+                let m = 2.0_f64.powi(exp);
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            return Scalar::Float64(f64::NAN);
+                        }
+                        match v {
+                            Scalar::Int64(x) => Scalar::Float64(*x as f64 * m),
+                            Scalar::Float64(x) => Scalar::Float64(x * m),
+                            _ => unreachable!(),
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Float64, out).unwrap()
+            }
+            let mk_f64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let data: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 8 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN,
+                            2 => f64::INFINITY,
+                            3 => f64::NEG_INFINITY,
+                            4 => 0.0, // heaviside ⇒ h0
+                            _ => ((r % 400) as f64 - 200.0) * 0.25,
+                        }
+                    })
+                    .collect();
+                Column::from_f64_values_with_validity(data, vf)
+            };
+            let mk_i64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 5) as i64 - 2 // -2..2 incl 0
+                    })
+                    .collect();
+                Column::from_i64_values_with_validity(data, vi)
+            };
+            let h0s = [0.5f64, 0.0, 1.0, f64::NAN];
+            let exps = [0i32, 3, -2, 10];
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let col = if trial % 2 == 0 {
+                    mk_f64(n, &mut next)
+                } else {
+                    mk_i64(n, &mut next)
+                };
+                let vals = col.values().to_vec();
+                let h0 = h0s[trial % h0s.len()];
+                let exp = exps[trial % exps.len()];
+                let hv = col.heaviside(h0).unwrap();
+                let want_h = ref_heaviside(&vals, h0);
+                let lv = col.ldexp(exp).unwrap();
+                let want_l = ref_ldexp(&vals, exp);
+                for (name, got, want) in
+                    [("heaviside", &hv, &want_h), ("ldexp", &lv, &want_l)]
+                {
+                    let gv = got.values();
+                    let wv = want.values();
+                    assert_eq!(gv.len(), wv.len(), "{name} len trial {trial}");
+                    for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                        assert!(bit_eq(g, w), "{name} trial {trial} idx {k}: {g:?} != {w:?}");
                     }
                 }
             }

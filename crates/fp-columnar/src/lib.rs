@@ -14484,6 +14484,38 @@ impl Column {
             ));
         }
 
+        // Typed Utf8 fast path: an all-valid contiguous-Utf8 column compared against a
+        // Utf8 scalar. The generic loop below drives `self.values.iter()`, which
+        // materializes the WHOLE `Vec<Scalar::Utf8>` — one heap `String` per row (via
+        // the `get_or_init` OnceCell) — purely to feed `scalar_compare`, whose Utf8 arm
+        // is `a <op> b` on the two `String`s == byte-lexicographic `str::cmp`. Instead
+        // compare each row's raw `&[u8]` span (`bytes[offsets[i]..offsets[i+1]]`) against
+        // the needle bytes directly and build the Bool via `from_bool_values`.
+        // Bit-identical: `&[u8]` lexicographic order == `&str`/`String` order for valid
+        // UTF-8 (same lever as the typed Utf8 `searchsorted`), so `row <op> needle`
+        // matches `scalar_compare(row, needle, op)` for every op. `as_utf8_contiguous`
+        // gates on an all-valid backing, so the generic path's `is_missing ⇒ Null(Null)`
+        // branch never applies here; a nullable / Eager / non-contiguous Utf8 column
+        // declines the accessor and keeps the missing-aware generic path. Hoist `op` out
+        // of the per-row closure (mirror of the numeric arms) so each row runs one
+        // monomorphic slice compare.
+        if let Scalar::Utf8(needle) = scalar
+            && let Some((bytes, offsets)) = self.as_utf8_contiguous()
+        {
+            let needle = needle.as_bytes();
+            let n = offsets.len() - 1;
+            let row = |i: usize| &bytes[offsets[i]..offsets[i + 1]];
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => (0..n).map(|i| row(i) > needle).collect(),
+                ComparisonOp::Lt => (0..n).map(|i| row(i) < needle).collect(),
+                ComparisonOp::Eq => (0..n).map(|i| row(i) == needle).collect(),
+                ComparisonOp::Ne => (0..n).map(|i| row(i) != needle).collect(),
+                ComparisonOp::Ge => (0..n).map(|i| row(i) >= needle).collect(),
+                ComparisonOp::Le => (0..n).map(|i| row(i) <= needle).collect(),
+            };
+            return Ok(Self::from_bool_values(bools));
+        }
+
         let values = self
             .values
             .iter()
@@ -28498,6 +28530,83 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(got.values(), expected, "nullable Int64 op {op:?}");
+            }
+        }
+
+        #[test]
+        fn compare_scalar_utf8_contiguous_matches_scalar_reference() {
+            // The typed Utf8 arm in compare_scalar (all-valid contiguous-Utf8 vs a Utf8
+            // scalar, comparing raw &[u8] spans) must be BIT-EXACT to the generic
+            // scalar_compare path for every op. Uses seeded short strings over a tiny
+            // alphabet so prefixes / ties / varied lengths ("a" vs "ab", "" empty) all
+            // occur, and probes needles before-all / after-all / equal-to-a-row / prefix.
+            let mut state: u64 = 0x5712_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 200) as usize;
+                let strings: Vec<String> = (0..n)
+                    .map(|_| {
+                        let len = (next() % 6) as usize; // 0..5 chars incl empty
+                        (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char) // {a,b,c,d}
+                            .collect()
+                    })
+                    .collect();
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for s in &strings {
+                    bytes.extend_from_slice(s.as_bytes());
+                    offsets.push(bytes.len());
+                }
+                let column = Column::from_utf8_contiguous(bytes, offsets);
+                assert!(
+                    column.as_utf8_contiguous().is_some(),
+                    "fixture must exercise the typed contiguous-Utf8 backing"
+                );
+                let needles = [
+                    String::new(),          // empty ⇒ before-all non-empty
+                    "a".to_string(),        // prefix / short
+                    "abc".to_string(),      // mid
+                    "cc".to_string(),       // mid
+                    "dddddd".to_string(),   // after-all (len 6 > max 5)
+                    strings.first().cloned().unwrap_or_default(), // equal-to-a-row
+                ];
+                for needle_str in &needles {
+                    let needle = Scalar::Utf8(needle_str.clone());
+                    for op in [
+                        ComparisonOp::Gt,
+                        ComparisonOp::Lt,
+                        ComparisonOp::Eq,
+                        ComparisonOp::Ne,
+                        ComparisonOp::Ge,
+                        ComparisonOp::Le,
+                    ] {
+                        let got = column.compare_scalar(&needle, op).expect("utf8 compare");
+                        let expected: Vec<Scalar> = strings
+                            .iter()
+                            .map(|s| {
+                                Scalar::Bool(
+                                    scalar_compare(
+                                        &Scalar::Utf8(s.clone()),
+                                        &needle,
+                                        op,
+                                    )
+                                    .expect("reference"),
+                                )
+                            })
+                            .collect();
+                        assert_eq!(
+                            got.values(),
+                            expected,
+                            "trial {trial} needle {needle_str:?} op {op:?}"
+                        );
+                    }
+                }
             }
         }
 

@@ -4547,6 +4547,24 @@ impl Index {
     /// but still does a linear scan — we match that behavior).
     #[must_use]
     pub fn asof(&self, key: &IndexLabel) -> Option<IndexLabel> {
+        if let (Some(range), IndexLabel::Int64(needle)) = (self.labels.int64_affine_range(), key) {
+            if range.len == 0 {
+                return None;
+            }
+            if range.len == 1 {
+                return (range.start <= *needle).then_some(IndexLabel::Int64(range.start));
+            }
+            if range.step > 0 {
+                let delta = i128::from(*needle) - i128::from(range.start);
+                if delta < 0 {
+                    return None;
+                }
+                let position = usize::try_from(delta / i128::from(range.step))
+                    .unwrap_or(range.len - 1)
+                    .min(range.len - 1);
+                return Some(IndexLabel::Int64(range.value_at(position)));
+            }
+        }
         if self.labels.has_lazy_int64_backing()
             && let IndexLabel::Int64(needle) = key
             && let Some(values) = self.labels.int64_view()
@@ -22718,6 +22736,7 @@ mod tests {
 
         let affine = Index::new_known_unique_int64_affine_range(1, 2, 4).unwrap();
         assert!(affine.labels.materialized.get().is_none());
+        assert!(affine.cached_int64_label_values().is_none());
         assert_eq!(
             affine.asof(&IndexLabel::Int64(6)),
             Some(IndexLabel::Int64(5))
@@ -22730,6 +22749,29 @@ mod tests {
             affine.labels.materialized.get().is_none(),
             "asof should not materialize affine Int64 labels"
         );
+        assert!(
+            affine.cached_int64_label_values().is_none(),
+            "asof should not materialize the affine raw i64 view"
+        );
+
+        let extreme = Index::new_known_unique_int64_affine_range(i64::MIN, i64::MAX, 2).unwrap();
+        assert_eq!(
+            extreme.asof(&IndexLabel::Int64(i64::MAX)),
+            Some(IndexLabel::Int64(-1))
+        );
+        assert!(extreme.cached_int64_label_values().is_none());
+
+        let singleton = Index::new_known_unique_int64_affine_range(7, i64::MIN, 1).unwrap();
+        assert_eq!(singleton.asof(&IndexLabel::Int64(6)), None);
+        assert_eq!(
+            singleton.asof(&IndexLabel::Int64(7)),
+            Some(IndexLabel::Int64(7))
+        );
+        assert!(singleton.cached_int64_label_values().is_none());
+
+        let empty = Index::new_known_unique_int64_affine_range(0, 0, 0).unwrap();
+        assert_eq!(empty.asof(&IndexLabel::Int64(0)), None);
+        assert!(empty.cached_int64_label_values().is_none());
     }
 
     #[test]

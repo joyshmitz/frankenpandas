@@ -15051,3 +15051,42 @@ pre-existing unused `Scalar` imports in untouched test modules; focused `fp-colu
 unrelated existing drift in recently landed `fp-columnar` sections and was not applied. The mandatory static-only UBS scan
 completed with the broad existing test-panic inventory and emitted no finding on the new production arm; benchmark unwraps
 are deliberate fail-fast checks over fixed synthetic inputs.
+
+### 2026-07-12 MagentaOak — WIN: affine `Index::asof` closed-form predecessor — 44,164x FP-side
+
+Negative-ledger-first routing excluded the already-landed closed-form `RangeIndex::asof` and sorted-target
+`Index::asof_locs` families. The distinct scalar `Index::asof` path still called `int64_view()` for an affine Int64 index,
+allocating its million-label raw vector on first use and then linearly scanning it for every probe. The earlier `1851g`
+change avoided `IndexLabel` materialization but did not remove this raw-i64 allocation or scan.
+
+One lever (`br-frankenpandas-hx4oz`) dispatches ascending affine Int64 indexes through their existing
+`Int64AffineLabels` witness. Empty and singleton inputs are handled directly; positive-step ranges compute the predecessor
+position with widened `i128` subtraction and floor division, clamp it to the final label, and return `value_at(position)`.
+Descending, non-affine, and non-Int64 inputs retain the former path unchanged. For an ascending sequence
+`start + step * i`, this is exactly the greatest label not exceeding the needle; ordering and tie behavior are unchanged,
+and no floating-point operations are involved.
+
+Strict remote-only same-worker Criterion on `vmi1227854` used a 1,000,000-label affine Index (`0, 2, 4, ...`) and the
+existing 4,096 mixed below/in/above-range probes under `release-perf`:
+
+| arm | Criterion interval | estimate |
+| --- | ---: | ---: |
+| reference raw-i64 materialization + linear scan | 707.90–751.53 ms | 729.68 ms |
+| candidate affine closed form | 15.792–17.255 µs | 16.522 µs |
+
+Reference/candidate = **44,164x at the central estimate** (**99.9977% latency reduction**). Both runs used the exact same
+benchmark filter and worker; strict RCH selected `vmi1227854` for the baseline and honored the explicit candidate pin.
+
+Correctness: the focused strict-remote `asof` set is **12/12 green**. The affine guard now proves that neither cached
+`IndexLabel` values nor the intermediate raw-i64 view is initialized, and covers below-first, exact, gap, above-last,
+empty, singleton, and extreme-i64 subtraction. The existing 2,000-range deterministic affine-vs-materialized differential
+oracle remains green inside the full `fp-index` suite, which is **526 passed / 0 failed / 1 ignored**. Full
+`fp-conformance --lib` is **1596/1596 green**.
+
+Validation: strict-remote workspace `cargo check --workspace --all-targets` is green with only the two pre-existing unused
+`Scalar` warnings in untouched `fp-columnar` tests. Focused `fp-index --all-targets` clippy, pinned rustfmt, and
+`git diff --check` are green. Workspace clippy remains blocked by those existing `fp-columnar` imports plus two unrelated
+`fp-frame` `question_mark` lints; no peer-owned file was changed. The first parallel full-`fp-index` dispatch was refused
+under fail-closed RCH slot pressure, and the unchanged retry completed remotely; no local Cargo command ran. The mandatory
+static-only UBS scan completed with **0 critical** findings; its warnings are the broad existing whole-file inventory, with
+no focused finding on the affine predecessor arm or benchmark extension.

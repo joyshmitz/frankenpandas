@@ -17649,13 +17649,36 @@ impl Column {
         if bins == 0 {
             return Vec::new();
         }
-        let nums: Vec<f64> = self
-            .values
-            .iter()
-            .filter(|v| !v.is_missing())
-            .filter_map(|v| v.to_f64().ok())
-            .filter(|f| !f.is_nan())
-            .collect();
+        // Typed present-collect (Float64/Int64, all-valid or nullable): gather present
+        // values off the raw slice + validity, skipping the Vec<Scalar> materialization
+        // + per-Scalar to_f64 (the ONLY Scalar materialization in hist_counts). SAFE
+        // (missing-FILTERED, like describe's std, unlike trapz): the generic chain
+        // `!is_missing() → to_f64().ok() → !is_nan()` drops every missing/NaN, so
+        // present == validity-set AND non-NaN (Float64, ±inf kept) / validity-set
+        // (Int64) in the same 0..n order — identical nums ⇒ identical bucketing/counts.
+        // Timedelta64 + exotic backings fall to the generic collect.
+        let nums: Vec<f64> = if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            data.iter()
+                .enumerate()
+                .filter_map(|(i, &x)| (validity.get(i) && !x.is_nan()).then_some(x))
+                .collect()
+        } else if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            data.iter()
+                .enumerate()
+                .filter_map(|(i, &v)| validity.get(i).then_some(v as f64))
+                .collect()
+        } else {
+            self.values
+                .iter()
+                .filter(|v| !v.is_missing())
+                .filter_map(|v| v.to_f64().ok())
+                .filter(|f| !f.is_nan())
+                .collect()
+        };
         if nums.is_empty() {
             return vec![0; bins];
         }
@@ -32738,6 +32761,100 @@ mod tests {
                         assert!(
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn hist_counts_typed_collect_match_scalar_reference() {
+            // hist_counts now collects present values off the raw slice + validity
+            // instead of materializing Vec<Scalar>. The full Vec<usize> counts must be
+            // IDENTICAL to the old generic collect + bucketing over materialized
+            // values(). Float64 carries valid-bit-set NaN (dropped) + ±inf (kept),
+            // Int64 all-valid + nullable, across several bin counts incl. 0.
+            let mut state: u64 = 0x81A3_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            // Exact replica of the pre-typed generic hist_counts.
+            fn ref_hist(vals: &[Scalar], bins: usize) -> Vec<usize> {
+                if bins == 0 {
+                    return Vec::new();
+                }
+                let nums: Vec<f64> = vals
+                    .iter()
+                    .filter(|v| !v.is_missing())
+                    .filter_map(|v| v.to_f64().ok())
+                    .filter(|f| !f.is_nan())
+                    .collect();
+                if nums.is_empty() {
+                    return vec![0; bins];
+                }
+                let (min, max) = nums
+                    .iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &x| {
+                        (lo.min(x), hi.max(x))
+                    });
+                if (max - min).abs() < f64::EPSILON {
+                    let mut counts = vec![0; bins];
+                    counts[0] = nums.len();
+                    return counts;
+                }
+                let width = (max - min) / bins as f64;
+                let mut counts = vec![0usize; bins];
+                for x in &nums {
+                    let mut idx = ((x - min) / width) as usize;
+                    if idx >= bins {
+                        idx = bins - 1;
+                    }
+                    counts[idx] += 1;
+                }
+                counts
+            }
+            let bins_list = [0usize, 1, 4, 10, 37];
+            for trial in 0..300 {
+                let n = (next() % 250) as usize;
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 10 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN,
+                            2 => f64::INFINITY,
+                            _ => ((r % 400) as f64 - 200.0) * 0.25,
+                        }
+                    })
+                    .collect();
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 400) as i64 - 200
+                    })
+                    .collect();
+                let f_all = Column::from_f64_values_owned(fdata.clone());
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                for col in [&f_all, &f_null, &i_all, &i_null] {
+                    let vals = col.values().to_vec();
+                    for &bins in &bins_list {
+                        assert_eq!(
+                            col.hist_counts(bins),
+                            ref_hist(&vals, bins),
+                            "hist_counts trial {trial} n {n} bins {bins}"
                         );
                     }
                 }

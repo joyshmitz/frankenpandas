@@ -21597,6 +21597,43 @@ impl Column {
             return Ok(Self::from_bool_values(flags));
         }
 
+        // Nullable contiguous-Utf8 fast path (COLD cache): the all-valid arm above gates
+        // on `as_utf8_contiguous` (validity.all()), so a `LazyNullableUtf8` column — a
+        // string column WITH missing rows — fell to the generic `Key`-keyed loops below,
+        // which materialize a `Vec<Scalar::Utf8>` (one heap `String` per row). Unlike
+        // value_counts/nunique, `duplicated` does NOT drop nulls: `key_of` maps every
+        // missing value to a shared `Key::Null`, so all missing rows are equal to each
+        // other (a NaN row duplicates an earlier NaN row). Build a `Vec<Option<&[u8]>>`
+        // key vector — `Some(span)` for a present row, `None` (shared) for a missing row —
+        // exactly mirroring `Key::Utf8(str)` / `Key::Null`, and reuse the same tested
+        // `duplicated_flags_typed` helper the numeric arms use. Bit-identical for every
+        // policy (byte-eq == `&str`-eq; the None bucket == Key::Null bucket). Output is
+        // all-valid Bool (duplicated never yields a null). Gated on a COLD `values` cache:
+        // the win is skipping the materialization on a fresh column (the usual
+        // `df[col].duplicated()` / `drop_duplicates()` shape); a warm/already-materialized
+        // column defers to the generic `Key` loops over the cached Scalar Vec — no
+        // regression from the per-row `validity.get` + key-vector build.
+        if let ScalarValues::LazyNullableUtf8 {
+            bytes,
+            offsets,
+            validity,
+            values,
+        } = &self.values
+            && values.get().is_none()
+        {
+            let n = offsets.len().saturating_sub(1);
+            let keys: Vec<Option<&[u8]>> = (0..n)
+                .map(|idx| {
+                    if validity.get(idx) {
+                        Some(&bytes[offsets[idx]..offsets[idx + 1]])
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            return Ok(Self::from_bool_values(duplicated_flags_typed(&keys, policy)));
+        }
+
         let mut flags = vec![false; self.values.len()];
         match policy {
             DupPolicy::First => {
@@ -32980,6 +33017,59 @@ mod tests {
             assert_eq!(d.values()[0], Scalar::Bool(false));
             assert_eq!(d.values()[1], Scalar::Bool(true));
             assert_eq!(d.values()[2], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn duplicated_nullable_utf8_typed_matches_generic() {
+            // The typed nullable-Utf8 duplicated arm (cold cache) must be BIT-EXACT to the
+            // generic Key path for every keep policy. Nulls are NOT dropped — all missing
+            // rows share one bucket (a NaN row duplicates an earlier NaN). A/B on identical
+            // LazyNullableUtf8 data: `col_cold` (fresh, cold cache) exercises the typed
+            // arm; `col_warm` has its Scalar cache pre-materialized so the cold-cache gate
+            // defers it to the generic path. Seeded short strings over {a,b,c,d} + ~25%
+            // nulls (ties + repeated nulls guaranteed).
+            let mut state: u64 = 0xD0B1_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 300) as usize;
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for i in 0..n {
+                    if next() % 4 == 0 {
+                        validity.set(i, false);
+                    } else {
+                        let len = (next() % 4) as usize; // small ⇒ many ties
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                    }
+                    offsets.push(bytes.len());
+                }
+                let col_cold = Column::from_utf8_values_with_validity(
+                    bytes.clone(),
+                    offsets.clone(),
+                    validity.clone(),
+                );
+                let col_warm =
+                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
+                for keep in ["first", "last", "false"] {
+                    let cold = col_cold.duplicated_keep(keep).expect("cold duplicated");
+                    let warm = col_warm.duplicated_keep(keep).expect("warm duplicated");
+                    assert_eq!(
+                        cold.values(),
+                        warm.values(),
+                        "trial {trial} keep={keep}"
+                    );
+                }
+            }
         }
 
         #[test]

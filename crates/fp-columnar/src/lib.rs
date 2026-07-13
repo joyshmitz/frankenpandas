@@ -14516,6 +14516,41 @@ impl Column {
             return Ok(Self::from_bool_values(bools));
         }
 
+        // Nullable sibling of the arm above: a NULLABLE contiguous-Utf8 column
+        // (`LazyNullableUtf8`, the shape a CSV/parquet load or `from_utf8_values_with
+        // _validity` produces for a string column WITH missing rows) declined
+        // `as_utf8_contiguous` (which gates on `validity.all()`), so it fell to the
+        // generic `Vec<Scalar::Utf8>` materialization. Read the raw `&[u8]` spans +
+        // validity directly: compare every present row's span against the needle (an
+        // invalid slot carries an empty span whose computed bool the carried validity
+        // then hides) and carry the source validity onto a nullable Bool result.
+        // Bit-identical to the generic path: present ⇒ `Bool(row <op> needle)` (the same
+        // `scalar_compare` Utf8 arm), missing ⇒ `from_bool_values_with_validity`'s
+        // invalid bit == `Null(NullKind::Null)` (= the generic `is_missing` arm).
+        // `LazyNullableUtf8Range` (join-output shape, no contiguous byte backing) and
+        // Eager nullable Utf8 keep the generic path.
+        if let Scalar::Utf8(needle) = scalar
+            && let ScalarValues::LazyNullableUtf8 {
+                bytes,
+                offsets,
+                validity,
+                ..
+            } = &self.values
+        {
+            let needle = needle.as_bytes();
+            let n = offsets.len() - 1;
+            let row = |i: usize| &bytes[offsets[i]..offsets[i + 1]];
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => (0..n).map(|i| row(i) > needle).collect(),
+                ComparisonOp::Lt => (0..n).map(|i| row(i) < needle).collect(),
+                ComparisonOp::Eq => (0..n).map(|i| row(i) == needle).collect(),
+                ComparisonOp::Ne => (0..n).map(|i| row(i) != needle).collect(),
+                ComparisonOp::Ge => (0..n).map(|i| row(i) >= needle).collect(),
+                ComparisonOp::Le => (0..n).map(|i| row(i) <= needle).collect(),
+            };
+            return Ok(Self::from_bool_values_with_validity(bools, validity.clone()));
+        }
+
         let values = self
             .values
             .iter()
@@ -28598,6 +28633,90 @@ mod tests {
                                     )
                                     .expect("reference"),
                                 )
+                            })
+                            .collect();
+                        assert_eq!(
+                            got.values(),
+                            expected,
+                            "trial {trial} needle {needle_str:?} op {op:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn compare_scalar_nullable_utf8_matches_scalar_reference() {
+            // The nullable Utf8 arm in compare_scalar (LazyNullableUtf8 vs a Utf8 scalar)
+            // must be BIT-EXACT to the generic path: present ⇒ Bool(row <op> needle),
+            // missing ⇒ Null(Null). Seeded short strings over {a,b,c,d} with ~25% nulls
+            // (empty spans); probes before-all / after-all / equal-to-a-row / prefix.
+            let mut state: u64 = 0x00F5_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 200) as usize;
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut opt_strings: Vec<Option<String>> = Vec::with_capacity(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for i in 0..n {
+                    if next() % 4 == 0 {
+                        validity.set(i, false); // missing ⇒ empty span
+                        opt_strings.push(None);
+                    } else {
+                        let len = (next() % 6) as usize;
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                        opt_strings.push(Some(s));
+                    }
+                    offsets.push(bytes.len());
+                }
+                let column = Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                // A column with ≥1 null must NOT expose an all-valid contiguous backing,
+                // proving the nullable arm (not the all-valid arm) is exercised.
+                if opt_strings.iter().any(|s| s.is_none()) {
+                    assert!(
+                        column.as_utf8_contiguous().is_none(),
+                        "nullable fixture must decline the all-valid accessor"
+                    );
+                }
+                let needles = [
+                    String::new(),
+                    "a".to_string(),
+                    "abc".to_string(),
+                    "cc".to_string(),
+                    "dddddd".to_string(),
+                    opt_strings
+                        .iter()
+                        .find_map(|s| s.clone())
+                        .unwrap_or_default(),
+                ];
+                for needle_str in &needles {
+                    let needle = Scalar::Utf8(needle_str.clone());
+                    for op in [
+                        ComparisonOp::Gt,
+                        ComparisonOp::Lt,
+                        ComparisonOp::Eq,
+                        ComparisonOp::Ne,
+                        ComparisonOp::Ge,
+                        ComparisonOp::Le,
+                    ] {
+                        let got = column.compare_scalar(&needle, op).expect("utf8 compare");
+                        let expected: Vec<Scalar> = opt_strings
+                            .iter()
+                            .map(|os| match os {
+                                None => Scalar::Null(NullKind::Null),
+                                Some(s) => Scalar::Bool(
+                                    scalar_compare(&Scalar::Utf8(s.clone()), &needle, op)
+                                        .expect("reference"),
+                                ),
                             })
                             .collect();
                         assert_eq!(

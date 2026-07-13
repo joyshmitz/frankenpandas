@@ -19103,6 +19103,60 @@ impl Column {
             let sorted: Vec<Scalar> = perm.iter().map(|&i| self.values[i].clone()).collect();
             return Self::new(self.dtype, sorted);
         }
+        // Nullable / NaN / NaT typed columns (Int64, Float64, Datetime64,
+        // Timedelta64): the all-valid radix arms above bailed on the missing bit,
+        // so these fell to the O(n log n) na-last Scalar comparator below.
+        // `typed_radix_perm` already reproduces that EXACT na-last order in O(n) —
+        // it is the permutation behind the nullable `argsort`, proven bit-identical
+        // to the stable `compare_scalars_na_last` sort (its per-dtype na-last splits
+        // are asserted against that comparator in the nullable-sort tests). `Some`
+        // here implies a nullable/NaN/NaT typed column (the all-valid variants
+        // returned earlier), so no all-valid column is rerouted.
+        if let Some(perm) = self.typed_radix_perm(ascending) {
+            // Typed gather for the two hot lazy-nullable numeric backings: rebuild
+            // the sorted column straight from the raw (datum, validity) pairs
+            // permuted by `perm`, skipping the source's Vec<Scalar> materialize and
+            // the n 32-byte Scalar clones the fallthrough pays. `from_*_with_validity`
+            // rebuilds the SAME variant with the SAME per-slot materialization rule
+            // (LazyNullableInt64: valid⇒Int64 else Null(Null); LazyNullableFloat64:
+            // valid|NaN⇒Float64 else Null(NaN)), and I copy (datum, validity)
+            // verbatim, so slot j materializes exactly as source slot perm[j] — i.e.
+            // bit-identical to cloning self.values[perm[j]] (incl. every NaN/±0/Null
+            // edge). Gated on the concrete variant so any other nullable
+            // representation keeps the still-bit-identical scalar gather below.
+            match &self.values {
+                ScalarValues::LazyNullableInt64 { data, validity, .. } => {
+                    let mut out = Vec::with_capacity(perm.len());
+                    let mut out_valid = ValidityMask::all_valid(perm.len());
+                    for (j, &i) in perm.iter().enumerate() {
+                        out.push(data[i]);
+                        if !validity.get(i) {
+                            out_valid.set(j, false);
+                        }
+                    }
+                    return Ok(Self::from_i64_values_with_validity(out, out_valid));
+                }
+                ScalarValues::LazyNullableFloat64 { data, validity, .. } => {
+                    let mut out = Vec::with_capacity(perm.len());
+                    let mut out_valid = ValidityMask::all_valid(perm.len());
+                    for (j, &i) in perm.iter().enumerate() {
+                        out.push(data[i]);
+                        if !validity.get(i) {
+                            out_valid.set(j, false);
+                        }
+                    }
+                    return Ok(Self::from_f64_values_with_validity(out, out_valid));
+                }
+                _ => {
+                    // Temporal (Datetime64/Timedelta64) & any other nullable backing:
+                    // clone the source's own scalars in permutation order — identical
+                    // gather to the fallthrough, only the comparison sort is replaced.
+                    let src = self.values.as_slice();
+                    let sorted: Vec<Scalar> = perm.iter().map(|&i| src[i].clone()).collect();
+                    return Self::new(self.dtype, sorted);
+                }
+            }
+        }
         let mut indexed: Vec<(usize, &Scalar)> = self.values.iter().enumerate().collect();
         indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, ascending));
         let sorted: Vec<Scalar> = indexed.into_iter().map(|(_, v)| v.clone()).collect();
@@ -28730,6 +28784,65 @@ mod tests {
                         scalar_sort_reference(vals, true),
                         "{label} trial {trial} argsort mismatch"
                     );
+                }
+            }
+        }
+
+        #[test]
+        fn sort_values_nullable_i64_f64_matches_na_last_scalar_reference() {
+            // sort_values on a nullable Int64/Float64 column now routes through the
+            // O(n) typed_radix_perm + scalar gather instead of the O(n log n) na-last
+            // Scalar comparator. The RESULT VALUES must stay bit-identical to that
+            // comparator's stable sort. Null-missing only (no present-NaN) so the
+            // gathered scalars compare with structural eq. Deterministic LCG.
+            let mut state: u64 = 0x7EED_1234_ABCD_5678;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let len = (next() % 300) as usize + 1;
+                let mut vi = crate::ValidityMask::all_valid(len);
+                let mut vf = crate::ValidityMask::all_valid(len);
+                let idata: Vec<i64> = (0..len)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 11) as i64 - 5
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..len)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else {
+                            ((r % 11) as f64 - 5.0) / 2.0
+                        }
+                    })
+                    .collect();
+                let icol = Column::from_i64_values_with_validity(idata, vi);
+                let fcol = Column::from_f64_values_with_validity(fdata, vf);
+                for (col, tag) in [(&icol, "i64"), (&fcol, "f64")] {
+                    let vals = col.values().to_vec();
+                    for ascending in [true, false] {
+                        // Reference == the pre-change generic fallthrough.
+                        let mut want: Vec<&Scalar> = vals.iter().collect();
+                        want.sort_by(|a, b| {
+                            crate::compare_scalars_na_last(a, b, ascending)
+                        });
+                        let want: Vec<Scalar> = want.into_iter().cloned().collect();
+                        assert_eq!(
+                            col.sort_values(ascending).expect("sort_values").values(),
+                            want.as_slice(),
+                            "{tag} trial {trial} asc={ascending}"
+                        );
+                    }
                 }
             }
         }

@@ -6290,12 +6290,18 @@ fn build_single_key_ordered_unique_outer_merge_output(
     let all_present_right_positions = all_present_take_positions
         .as_ref()
         .map(|(_, positions)| positions.as_slice());
-    let left_utf8_plan = all_present_left_positions
-        .is_none()
+    let left_has_utf8 = left
+        .columns()
+        .values()
+        .any(|column| column.dtype() == DType::Utf8);
+    let right_has_utf8 = right
+        .columns()
+        .values()
+        .any(|column| column.dtype() == DType::Utf8);
+    let left_utf8_plan = (left_has_utf8 && all_present_left_positions.is_none())
         .then(|| shared_optional_utf8_gather_plan(left_positions, left.len()))
         .flatten();
-    let right_utf8_plan = all_present_right_positions
-        .is_none()
+    let right_utf8_plan = (right_has_utf8 && all_present_right_positions.is_none())
         .then(|| shared_optional_utf8_gather_plan(right_positions, right.len()))
         .flatten();
 

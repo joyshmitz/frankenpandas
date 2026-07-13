@@ -15127,3 +15127,43 @@ refused under fail-closed RCH slot pressure and completed remotely with `-j 1`; 
 manifest commit mid-sync and was invalid, while the converged retry passed. No local Cargo command ran. The mandatory
 static-only UBS scan completed with **0 critical** findings; its warnings are the broad existing whole-file inventory, with
 no focused finding on the affine insertion arm or benchmark extension.
+
+### 2026-07-12 MagentaOak — WIN: numeric ordered-outer merge skips unusable Utf8 gather plans — 1.371x FP-side
+
+This closes the positive hold at `br-frankenpandas-nzqj6`. Negative-ledger-first routing did not retry the rejected dense
+groupby Var/Std mean hoist or wide-rolling indexed heaps: the exact `fp-join` source blob
+`91eacacab259fc22c3e68af1a45db9214772797c` still matched the earlier one-binary A/B base, whose only blocker was strict-RCH
+full-gate admission. The ordered-unique numeric outer-merge path still scanned both output-position tapes to construct
+optional-Utf8 gather plans even though neither input frame had a Utf8 column that could consume them.
+
+One lever adds a conservative dtype-presence gate before those two plan constructions. If an input has any `DType::Utf8`
+column, eager, contiguous, nullable, and future Utf8 representations retain the old plan and fallback behavior unchanged.
+If it has none, every column would make `reindex_eager_utf8_with_plan` return `None`, so skipping the unused plan leaves the
+same typed or generic reindex call. Position tapes, index labels, column order, suffixes, dtypes, null/scalar variants, and
+Float64 payload bits are unchanged.
+
+The ancestry-valid strict-remote one-binary gate on `vmi1264463` remains the ship evidence: 25 alternating
+reference/candidate pairs, 13 adjacent candidate A/A pairs, and exact full-output comparison:
+
+| arm | median |
+| --- | ---: |
+| reference, both unused Utf8 plans forced | 5.272840 ms |
+| candidate, no-Utf8 plans skipped | 3.847150 ms |
+| candidate A/A controls | 3.826531 / 4.428218 ms |
+
+Reference/candidate = **1.370583x** (**27.03% latency reduction**), clearing the **1.157241x** adjacent-control floor by
+about **2.36x**. A fresh strict-remote same-worker Criterion pair on `vmi1152480` was directionally consistent but noisy:
+reference **8.0733 ms** (`6.9888–9.2854 ms`) versus candidate **7.5554 ms** (`6.6696–8.5285 ms`), **1.0686x** at the point
+estimates with `p=0.50`; it is recorded as confirmation, not substituted for the controlled one-binary ratio.
+
+Correctness: the focused ordered-outer fast-vs-generic proof is **1/1 green**. Full `fp-join` is **144/144 green** across
+139 lib tests plus five integration tests, including Utf8 outer-merge coverage, and full `fp-conformance --lib` is
+**1596/1596 green**.
+
+Validation: strict-remote workspace `cargo check -j 1 --workspace --all-targets` is green with only the two pre-existing
+unused `Scalar` imports in untouched `fp-columnar` tests. Join-only `cargo clippy --all-targets --no-deps -D warnings`, pinned
+rustfmt, and `git diff --check` are green. The first dependency-linting clippy run surfaced three unrelated peer-owned
+`fp-frame` documentation lints; one join-only retry was fail-closed by an untracked peer benchmark disappearing during RCH
+preflight, and the unchanged converged retry passed. No local Cargo command ran. The mandatory static-only UBS scan reported
+three pre-existing whole-file false positives in distant code—two Datetime dtype comparisons labeled secret comparisons and
+the internal integer `decode` helper labeled JWT decode—with no finding on the changed dtype-presence gate.

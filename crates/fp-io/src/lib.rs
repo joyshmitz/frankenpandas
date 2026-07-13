@@ -7067,6 +7067,8 @@ enum JCol<'a> {
     FN(&'a [f64], &'a fp_columnar::ValidityMask),
     /// NULLABLE Int64: `(data, validity)`. Present → decimal; missing → `null`.
     IN(&'a [i64], &'a fp_columnar::ValidityMask),
+    /// NULLABLE Bool: `(data, validity)`. Present → `true`/`false`; missing → `null`.
+    BN(&'a [bool], &'a fp_columnar::ValidityMask),
 }
 
 /// Append `s` as a JSON string literal, byte-identical to `serde_json` (which
@@ -7138,6 +7140,9 @@ fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<
         } else if let Some((s, validity)) = column.as_i64_slice_with_validity() {
             // Nullable Int64: present → integer, missing → null.
             (s.len() == n).then_some(JCol::IN(s, validity))?
+        } else if let Some((s, validity)) = column.as_nullable_bool_slice() {
+            // Nullable Bool: present → true/false, missing → null.
+            (s.len() == n).then_some(JCol::BN(s, validity))?
         } else {
             return None;
         };
@@ -7212,6 +7217,14 @@ fn append_typed_json_value(out: &mut String, col: &JCol<'_>, r: usize, fbytes: &
         JCol::IN(s, validity) => {
             if validity.get(r) {
                 append_i64_decimal(out, s[r]);
+            } else {
+                out.push_str("null");
+            }
+        }
+        // Nullable Bool: present ⇒ true/false (== JCol::B); missing ⇒ `null`.
+        JCol::BN(s, validity) => {
+            if validity.get(r) {
+                out.push_str(if s[r] { "true" } else { "false" });
             } else {
                 out.push_str("null");
             }
@@ -18222,6 +18235,12 @@ mod tests {
         iv.set(0, false);
         iv.set(5, false);
 
+        // nullable Bool (JCol::BN): present ⇒ true/false, missing ⇒ null.
+        let bdata: Vec<bool> = vec![true, false, true, false, true, false, true, false, true];
+        let mut bv = fp_columnar::ValidityMask::all_valid(n);
+        bv.set(2, false);
+        bv.set(6, false);
+
         let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h", "z"];
         let mut nb: Vec<u8> = Vec::new();
         let mut no: Vec<usize> = vec![0];
@@ -18242,11 +18261,20 @@ mod tests {
                 "i".to_string(),
                 Column::from_i64_values_with_validity(idata.clone(), iv.clone()),
             );
+            cols.insert(
+                "b".to_string(),
+                Column::from_bool_values_with_validity(bdata.clone(), bv.clone()),
+            );
             cols.insert("name".to_string(), name_col);
             DataFrame::new_with_column_order(
                 Index::new_known_unique_int64_unit_range(0, n),
                 cols,
-                vec!["f".to_string(), "i".to_string(), "name".to_string()],
+                vec![
+                    "f".to_string(),
+                    "i".to_string(),
+                    "b".to_string(),
+                    "name".to_string(),
+                ],
             )
             .unwrap()
         };

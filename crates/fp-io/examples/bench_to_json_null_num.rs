@@ -22,6 +22,8 @@ fn main() {
     let mut price_v = ValidityMask::all_valid(n);
     let qty: Vec<i64> = (0..n as i64).map(|i| i % 1000).collect();
     let mut qty_v = ValidityMask::all_valid(n);
+    let active: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+    let mut active_v = ValidityMask::all_valid(n);
     let mut nb: Vec<u8> = Vec::with_capacity(n * 8);
     let mut no: Vec<usize> = Vec::with_capacity(n + 1);
     no.push(0);
@@ -32,6 +34,9 @@ fn main() {
         }
         if i % 5 == 0 {
             qty_v.set(i, false);
+        }
+        if i % 3 == 0 {
+            active_v.set(i, false);
         }
         let s = format!("item_{}", i % 5000);
         nb.extend_from_slice(s.as_bytes());
@@ -49,6 +54,10 @@ fn main() {
         cols.insert(
             "qty".to_string(),
             Column::from_i64_values_with_validity(qty.clone(), qty_v.clone()),
+        );
+        cols.insert(
+            "active".to_string(),
+            Column::from_bool_values_with_validity(active.clone(), active_v.clone()),
         );
         cols.insert("name".to_string(), name_col);
         DataFrame::new(Index::new_known_unique_int64_unit_range(0, n), cols).unwrap()

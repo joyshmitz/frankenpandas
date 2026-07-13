@@ -2125,6 +2125,8 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         // NULLABLE Int64: (data, validity). Present → decimal; missing → na_rep.
         // Int64 has no NaN, so missingness is the validity bit alone.
         IN(&'a [i64], &'a fp_columnar::ValidityMask),
+        // NULLABLE Bool: (data, validity). Present → True/False; missing → na_rep.
+        BN(&'a [bool], &'a fp_columnar::ValidityMask),
         // All-valid (no validity-mask null) Datetime64 ns + the column-uniform
         // to_csv format; NaT sentinels render as na_rep inline.
         Dt(&'a [i64], DatetimeCsvFormat),
@@ -2177,6 +2179,12 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 return None;
             }
             cols.push(FastCol::IN(s, validity));
+        } else if let Some((s, validity)) = column.as_nullable_bool_slice() {
+            // Nullable Bool sibling: present ⇒ True/False, missing ⇒ na_rep.
+            if s.len() != n {
+                return None;
+            }
+            cols.push(FastCol::BN(s, validity));
         } else if column.dtype() == DType::Datetime64 {
             // A validity-mask null (data slot ≠ NaT) would diverge from the
             // general path's `Scalar::Null` → na_rep; require no mask-nulls. NaT
@@ -2311,6 +2319,17 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                     FastCol::IN(s, validity) => {
                         if validity.get(r) {
                             append_i64_decimal(dst, s[r]);
+                        } else if single_field && options.na_rep.is_empty() {
+                            dst.push_str("\"\"");
+                        } else {
+                            dst.push_str(&options.na_rep);
+                        }
+                    }
+                    // Nullable Bool: present ⇒ True/False (== FastCol::B / scalar_to_csv);
+                    // missing (validity-clear) ⇒ na_rep.
+                    FastCol::BN(s, validity) => {
+                        if validity.get(r) {
+                            dst.push_str(if s[r] { "True" } else { "False" });
                         } else if single_field && options.na_rep.is_empty() {
                             dst.push_str("\"\"");
                         } else {
@@ -18143,10 +18162,11 @@ mod tests {
     }
 
     #[test]
-    fn test_write_csv_nullable_numeric_fast_matches_general() {
-        // Nullable Float64 (FastCol::FN) and Int64 (FastCol::IN) columns now take the fast
-        // CSV writer. Output must be BYTE-IDENTICAL to the general (Scalar) writer, which
-        // the same frame falls to when an EAGER Utf8 column forces it off the fast path.
+    fn test_write_csv_nullable_typed_fast_matches_general() {
+        // Nullable Float64 (FastCol::FN), Int64 (FastCol::IN), and Bool (FastCol::BN)
+        // columns take the fast CSV writer. Output must be BYTE-IDENTICAL to the general
+        // (Scalar) writer, which the same frame falls to when an EAGER Utf8 column forces
+        // it off the fast path.
         // Covers: validity-clear missing, a valid-bit NaN (still → na_rep), whole numbers
         // ("1.0"), negatives, large magnitude (sci notation), i64::MIN/MAX; default +
         // na_rep configs.
@@ -18161,6 +18181,12 @@ mod tests {
         let mut iv = fp_columnar::ValidityMask::all_valid(n);
         iv.set(0, false); // validity-clear (data 0 → na_rep, not "0")
         iv.set(5, false);
+
+        // nullable Bool: present ⇒ True/False, missing ⇒ na_rep.
+        let bdata = vec![true, false, true, false, true, false, true, false, true];
+        let mut bv = fp_columnar::ValidityMask::all_valid(n);
+        bv.set(1, false); // validity-clear (data false → na_rep, not "False")
+        bv.set(8, false); // validity-clear (data true → na_rep, not "True")
 
         let names: Vec<&str> = vec![
             "a", "b,c", "d", "e", "", "f\"g", "h", "plain", "z",
@@ -18184,11 +18210,20 @@ mod tests {
                 "i".to_string(),
                 Column::from_i64_values_with_validity(idata.clone(), iv.clone()),
             );
+            cols.insert(
+                "b".to_string(),
+                Column::from_bool_values_with_validity(bdata.clone(), bv.clone()),
+            );
             cols.insert("name".to_string(), name_col);
             DataFrame::new_with_column_order(
                 Index::new_known_unique_int64_unit_range(0, n),
                 cols,
-                vec!["f".to_string(), "i".to_string(), "name".to_string()],
+                vec![
+                    "f".to_string(),
+                    "i".to_string(),
+                    "b".to_string(),
+                    "name".to_string(),
+                ],
             )
             .unwrap()
         };
@@ -18209,6 +18244,10 @@ mod tests {
                 ..CsvWriteOptions::default()
             },
         ] {
+            assert!(
+                super::try_write_csv_typed(&frame_fast, &options).is_some(),
+                "nullable typed frame must stay on the fast CSV writer"
+            );
             let fast = write_csv_string_with_options(&frame_fast, &options).expect("fast");
             let general = write_csv_string_with_options(&frame_general, &options).expect("general");
             assert_eq!(

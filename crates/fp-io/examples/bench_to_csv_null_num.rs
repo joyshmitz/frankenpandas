@@ -1,8 +1,8 @@
-//! to_csv over a DataFrame with NULLABLE numeric columns (Float64 + Int64) + a string column.
-//! Before FastCol::FN/IN, a null-bearing numeric column forced the WHOLE frame onto the slow
-//! general writer. NEW builds every column typed (nullable numerics → FN/IN, all-valid name →
-//! U) so the fast writer fires; CONTROL builds the name column eagerly (→ general writer) with
-//! identical data, isolating the whole-frame fast-vs-general delta the FN/IN arms unlock.
+//! to_csv over a DataFrame with NULLABLE numeric and Bool columns + a string column.
+//! Before the nullable-Bool fast arm, that column forces the WHOLE frame onto the slow general
+//! writer. NEW builds every column typed (nullable numerics, nullable Bool, all-valid name) so
+//! the fast writer fires; CONTROL builds the name column eagerly (→ general writer) with
+//! identical data, isolating the whole-frame fast-vs-general delta the Bool arm unlocks.
 //!
 //! Run: cargo run -p fp-io --release --example bench_to_csv_null_num -- 1000000 6
 use std::collections::BTreeMap;
@@ -25,6 +25,9 @@ fn main() {
     // nullable Int64 "qty": every 5th row missing.
     let qty: Vec<i64> = (0..n as i64).map(|i| i % 1000).collect();
     let mut qty_v = ValidityMask::all_valid(n);
+    // nullable Bool "active": every 3rd row missing.
+    let active: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+    let mut active_v = ValidityMask::all_valid(n);
     // all-valid string names (both frames share the same data).
     let mut nb: Vec<u8> = Vec::with_capacity(n * 8);
     let mut no: Vec<usize> = Vec::with_capacity(n + 1);
@@ -36,6 +39,9 @@ fn main() {
         }
         if i % 5 == 0 {
             qty_v.set(i, false);
+        }
+        if i % 3 == 0 {
+            active_v.set(i, false);
         }
         let s = format!("item_{}", i % 5000);
         nb.extend_from_slice(s.as_bytes());
@@ -53,6 +59,10 @@ fn main() {
         cols.insert(
             "qty".to_string(),
             Column::from_i64_values_with_validity(qty.clone(), qty_v.clone()),
+        );
+        cols.insert(
+            "active".to_string(),
+            Column::from_bool_values_with_validity(active.clone(), active_v.clone()),
         );
         cols.insert("name".to_string(), name_col);
         DataFrame::new(Index::new_known_unique_int64_unit_range(0, n), cols).unwrap()
@@ -83,9 +93,9 @@ fn main() {
     }
     let sf = fp_io::write_csv_string(&frame_fast).unwrap();
     let sg = fp_io::write_csv_string(&frame_general).unwrap();
-    assert_eq!(sf, sg, "fast (FN/IN) CSV must byte-match the general writer");
+    assert_eq!(sf, sg, "fast nullable CSV must byte-match the general writer");
     println!(
-        "to_csv nullable-numeric n={n} NEW(fast)={:>7.2}ms CONTROL(general)={:>7.2}ms speedup={:.3}x",
+        "to_csv nullable-bool n={n} NEW(fast)={:>7.2}ms CONTROL(general)={:>7.2}ms speedup={:.3}x",
         best_t as f64 / 1e6,
         best_c as f64 / 1e6,
         best_c as f64 / best_t as f64,

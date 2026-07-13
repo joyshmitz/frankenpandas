@@ -9980,6 +9980,22 @@ impl Column {
         }
     }
 
+    /// Raw packed `&[bool]` backing + validity of a NULLABLE Bool column
+    /// (`LazyNullableBool` — a boolean column WITH missing rows). A present row
+    /// `r` (`validity.get(r)`) is `data[r]`; a missing row's datum is arbitrary
+    /// (masked). `None` for any other backing (all-valid Bool uses
+    /// [`Self::as_bool_slice`]; eager/other dtypes are excluded). Sibling of
+    /// `as_nullable_utf8_contiguous` for consumers that render a nullable bool
+    /// column by raw bit (e.g. the typed CSV/JSON writers).
+    #[must_use]
+    pub fn as_nullable_bool_slice(&self) -> Option<(&[bool], &ValidityMask)> {
+        if let ScalarValues::LazyNullableBool { data, validity, .. } = &self.values {
+            Some((data.as_slice(), validity))
+        } else {
+            None
+        }
+    }
+
     /// Share the column's contiguous Utf8 backing as immutable `Arc`s.
     ///
     /// This is the ownership-preserving counterpart to

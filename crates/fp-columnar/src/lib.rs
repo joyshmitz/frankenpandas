@@ -5740,6 +5740,57 @@ fn nkeep_typed_f64_nullable(
     top.iter().map(|&(v, _)| v).collect()
 }
 
+/// Assign `rank` values over the PRESENT prefix of a na-last permutation of a
+/// typed nullable column. `perm` is `[present-sorted…, missing…]` (as produced
+/// by [`Column::typed_radix_perm`]); `perm[..present_count]` are the present
+/// original indices in value-then-original-index order — bit-identical to the
+/// generic path's `non_missing.sort_by(compare_scalars_na_last)`. Tie groups are
+/// detected by typed `==` over `data` (present Float64 are non-NaN ⇒ `==` matches
+/// `partial_cmp` `Equal`; Int64 `==` is exact). Returns the rank buffer (missing
+/// slots left `0.0`, marked invalid in the returned mask) — a Float64 column
+/// built from it with `from_f64_values_with_validity` materializes each missing
+/// slot as `Null(NullKind::NaN)`, exactly like the generic path's
+/// `Scalar::Null(NullKind::NaN)`; present ranks are finite, so they stay
+/// `Float64(rank)`.
+fn nullable_rank_values<T: PartialEq>(
+    data: &[T],
+    perm: &[usize],
+    present_count: usize,
+    len: usize,
+    method: &str,
+) -> (Vec<f64>, ValidityMask) {
+    let mut ranks = vec![0.0_f64; len];
+    let mut validity = ValidityMask::all_valid(len);
+    for &orig in &perm[present_count..] {
+        validity.set(orig, false);
+    }
+    let mut cursor = 0usize;
+    let mut dense_rank = 0.0_f64;
+    while cursor < present_count {
+        let mut end = cursor + 1;
+        while end < present_count && data[perm[end]] == data[perm[cursor]] {
+            end += 1;
+        }
+        let start_rank = cursor as f64 + 1.0;
+        let end_rank = end as f64;
+        dense_rank += 1.0;
+        #[allow(clippy::needless_range_loop)] // group_idx is also the "first" rank
+        for group_idx in cursor..end {
+            let original = perm[group_idx];
+            ranks[original] = match method {
+                "average" => (start_rank + end_rank) / 2.0,
+                "min" => start_rank,
+                "max" => end_rank,
+                "first" => group_idx as f64 + 1.0,
+                "dense" => dense_rank,
+                _ => unreachable!(),
+            };
+        }
+        cursor = end;
+    }
+    (ranks, validity)
+}
+
 fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Column, ColumnError> {
     if !matches!(keep, "first" | "last" | "all") {
         return Err(ColumnError::Type(TypeError::NonNumericValue {
@@ -17828,6 +17879,38 @@ impl Column {
                 cursor = end;
             }
             return Ok(Self::from_f64_values(ranks));
+        }
+
+        // Nullable/NaN typed Int64/Float64 (and wide-range all-valid Int64 that
+        // the bounded counting path above declined): the generic na-last Scalar
+        // comparator sort below is O(n log n) over boxed Scalars. typed_radix_perm
+        // reproduces that exact na-last order in O(n) (it backs the nullable
+        // argsort, proven bit-identical to compare_scalars_na_last), and its
+        // PRESENT prefix equals `non_missing` sorted (same stable value+index
+        // order). Walk that prefix typed and build the Float64 output directly with
+        // its validity, skipping the Scalar box on both the sort keys and the
+        // result. `Some(perm)` for these dtypes ⇒ nothing all-valid-and-fast is
+        // rerouted (those arms returned earlier). present_count uses the SAME
+        // present definition as typed_radix_perm so the prefix/suffix split aligns.
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+            && let Some(perm) = self.typed_radix_perm(ascending)
+        {
+            let present_count = validity.count_valid();
+            let (ranks, out_valid) =
+                nullable_rank_values(data, &perm, present_count, len, method);
+            return Ok(Self::from_f64_values_with_validity(ranks, out_valid));
+        }
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+            && let Some(perm) = self.typed_radix_perm(ascending)
+        {
+            let present_count = (0..len)
+                .filter(|&i| validity.get(i) && !data[i].is_nan())
+                .count();
+            let (ranks, out_valid) =
+                nullable_rank_values(data, &perm, present_count, len, method);
+            return Ok(Self::from_f64_values_with_validity(ranks, out_valid));
         }
 
         let mut non_missing: Vec<(usize, &Scalar)> = Vec::with_capacity(len);
@@ -33974,6 +34057,100 @@ mod tests {
             let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
             let err = col.rank("bogus", true).unwrap_err();
             assert!(matches!(err, crate::ColumnError::Type(_)));
+        }
+
+        // Inline replica of the generic na-last comparator rank (the pre-change
+        // path the typed Int64/Float64 fast paths must reproduce).
+        fn rank_reference(vals: &[Scalar], method: &str, ascending: bool) -> Vec<Scalar> {
+            let len = vals.len();
+            let mut nm: Vec<(usize, &Scalar)> = vals
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| !v.is_missing())
+                .collect();
+            nm.sort_by(|a, b| crate::compare_scalars_na_last(a.1, b.1, ascending));
+            let mut ranks = vec![Scalar::Null(NullKind::NaN); len];
+            let n = nm.len();
+            let mut cursor = 0usize;
+            let mut dense = 0.0_f64;
+            while cursor < n {
+                let mut end = cursor + 1;
+                while end < n
+                    && crate::compare_scalars_na_last(nm[cursor].1, nm[end].1, ascending).is_eq()
+                {
+                    end += 1;
+                }
+                let (start_rank, end_rank) = (cursor as f64 + 1.0, end as f64);
+                dense += 1.0;
+                for (gi, entry) in nm.iter().enumerate().take(end).skip(cursor) {
+                    ranks[entry.0] = Scalar::Float64(match method {
+                        "average" => (start_rank + end_rank) / 2.0,
+                        "min" => start_rank,
+                        "max" => end_rank,
+                        "first" => gi as f64 + 1.0,
+                        "dense" => dense,
+                        _ => unreachable!(),
+                    });
+                }
+                cursor = end;
+            }
+            ranks
+        }
+
+        #[test]
+        fn rank_nullable_i64_f64_matches_generic_reference() {
+            // rank on a nullable Int64/Float64 column now routes through
+            // typed_radix_perm + a typed tie-walk. Results (present ranks + Null
+            // tail) must stay bit-identical to the generic comparator path across
+            // every method and direction. Null-missing only (no present-NaN) so the
+            // output Scalars compare with structural eq. Deterministic LCG.
+            let methods = ["average", "min", "max", "first", "dense"];
+            let mut state: u64 = 0x3C3C_A5A5_1234_9999;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..160 {
+                let len = (next() % 280) as usize + 1;
+                let mut vi = crate::ValidityMask::all_valid(len);
+                let mut vf = crate::ValidityMask::all_valid(len);
+                let idata: Vec<i64> = (0..len)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 9) as i64 - 4 // narrow range ⇒ ties
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..len)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else {
+                            ((r % 9) as f64 - 4.0) / 2.0
+                        }
+                    })
+                    .collect();
+                let icol = Column::from_i64_values_with_validity(idata, vi);
+                let fcol = Column::from_f64_values_with_validity(fdata, vf);
+                for (col, tag) in [(&icol, "i64"), (&fcol, "f64")] {
+                    let vals = col.values().to_vec();
+                    for method in methods {
+                        for ascending in [true, false] {
+                            assert_eq!(
+                                col.rank(method, ascending).expect("rank").values(),
+                                rank_reference(&vals, method, ascending).as_slice(),
+                                "{tag} trial {trial} method={method} asc={ascending}"
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         #[test]

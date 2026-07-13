@@ -5925,6 +5925,62 @@ fn cum_accum_nullable_i64(
     (out, out_valid)
 }
 
+/// Typed nan-argmin/argmax over an f64 slice (+ optional validity), reproducing
+/// `nanargmin`/`nanargmax` WITHOUT materializing the `Vec<Scalar>`. A slot is
+/// present iff (validity-set, if given) AND non-NaN — exactly `nanargmin`'s
+/// `is_missing` + `to_f64` + `if x.is_nan() { continue }` gates. Tracks the extreme
+/// by STRICT `<`/`>` so the FIRST original position wins on a tie, and the index is
+/// the original 0..n position (the enumerate index of the contiguous slice), byte-
+/// identical to the generic path. Empty / all-missing ⇒ `None`.
+fn argextreme_nullable_f64(data: &[f64], validity: Option<&ValidityMask>, want_max: bool) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, &x) in data.iter().enumerate() {
+        let present = validity.map_or(true, |v| v.get(i)) && !x.is_nan();
+        if present {
+            let better = match best {
+                None => true,
+                Some((_, cur)) => {
+                    if want_max {
+                        x > cur
+                    } else {
+                        x < cur
+                    }
+                }
+            };
+            if better {
+                best = Some((i, x));
+            }
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Int64 sibling of [`argextreme_nullable_f64`]: present iff validity-set (Int64
+/// has no NaN); comparison is on `v as f64` — EXACTLY nanargmin's `to_f64` compare
+/// (same >2^53 precision behaviour), so bit-identical.
+fn argextreme_nullable_i64(data: &[i64], validity: Option<&ValidityMask>, want_max: bool) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, &v) in data.iter().enumerate() {
+        if validity.map_or(true, |vm| vm.get(i)) {
+            let x = v as f64;
+            let better = match best {
+                None => true,
+                Some((_, cur)) => {
+                    if want_max {
+                        x > cur
+                    } else {
+                        x < cur
+                    }
+                }
+            };
+            if better {
+                best = Some((i, x));
+            }
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Column, ColumnError> {
     if !matches!(keep, "first" | "last" | "all") {
         return Err(ColumnError::Type(TypeError::NonNumericValue {
@@ -17060,6 +17116,25 @@ impl Column {
             }
             return best.map(|(i, _)| i);
         }
+        // Typed Float64/Int64 (all-valid + nullable): scan the raw slice + validity
+        // instead of nanargmin materializing the Vec<Scalar>. Bit-identical (f64
+        // compare, strict `<` first-on-tie, skip missing/NaN).
+        if let Some(data) = self.as_f64_slice() {
+            return argextreme_nullable_f64(data, None, false);
+        }
+        if let Some(data) = self.as_i64_slice() {
+            return argextreme_nullable_i64(data, None, false);
+        }
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            return argextreme_nullable_f64(data, Some(validity), false);
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            return argextreme_nullable_i64(data, Some(validity), false);
+        }
         nanargmin(&self.values)
     }
 
@@ -17093,6 +17168,24 @@ impl Column {
                 }
             }
             return best.map(|(i, _)| i);
+        }
+        // Typed Float64/Int64 (all-valid + nullable), symmetric to argmin: strict
+        // `>` keeps the FIRST position on a tie, exactly as nanargmax.
+        if let Some(data) = self.as_f64_slice() {
+            return argextreme_nullable_f64(data, None, true);
+        }
+        if let Some(data) = self.as_i64_slice() {
+            return argextreme_nullable_i64(data, None, true);
+        }
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            return argextreme_nullable_f64(data, Some(validity), true);
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            return argextreme_nullable_i64(data, Some(validity), true);
         }
         nanargmax(&self.values)
     }
@@ -32512,6 +32605,62 @@ mod tests {
             assert!(col.argmax().is_none());
             assert!(col.idxmin().is_none());
             assert!(col.idxmax().is_none());
+        }
+
+        #[test]
+        fn argmin_argmax_typed_int64_and_nullable_match_nan_reference() {
+            // The typed Float64/Int64 (all-valid + nullable) argmin/argmax paths must
+            // be BIT-IDENTICAL to nanargmin/nanargmax — same first-on-tie (strict
+            // </>), same skip-missing, same f64 compare. NARROW value range forces
+            // TIES so tie-breaking (first position) is exercised. Null-missing only.
+            let mut state: u64 = 0xA6E1_1234_9876_5432;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..250 {
+                let n = (next() % 250) as usize; // include n=0
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 7) as i64 - 3 // narrow ⇒ ties
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else {
+                            (r % 7) as f64 - 3.0
+                        }
+                    })
+                    .collect();
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                for col in [&i_all, &i_null, &f_null] {
+                    let vals = col.values().to_vec();
+                    assert_eq!(
+                        col.argmin(),
+                        fp_types::nanargmin(&vals),
+                        "argmin trial {trial}"
+                    );
+                    assert_eq!(
+                        col.argmax(),
+                        fp_types::nanargmax(&vals),
+                        "argmax trial {trial}"
+                    );
+                }
+            }
         }
 
         #[test]

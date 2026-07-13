@@ -13059,6 +13059,12 @@ impl Column {
         if let Some(out) = self.typed_float_binary_par(right, |b, e| b.powf(e)) {
             return Ok(out);
         }
+        // Nullable/mixed: both-present ⇒ b.powf(e), either-missing ⇒ NaN⇒missing. A
+        // powf-produced NaN (e.g. (-1).powf(0.5)) is marked missing by from_f64_values,
+        // exactly as the Scalar loop's Float64(NaN) ⇒ Self::new does. Bit-identical.
+        if let Some(out) = self.typed_nan_propagate_binary(right, |b, e| b.powf(e)) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (base, exp) in self.values.iter().zip(&right.values) {
             if base.is_missing() || exp.is_missing() {
@@ -23122,12 +23128,75 @@ impl Column {
     ///
     /// Matches np.nextafter(x, y). For each pair of elements, returns the
     /// next representable float after x in the direction of y.
+    /// Per-element kernel for `nextafter` (next representable f64 after `x` toward
+    /// `y`). Shared by the typed fast path and the Scalar fallback so both compute
+    /// the identical result.
+    fn nextafter_kernel(x: f64, y: f64) -> f64 {
+        if x.is_nan() || y.is_nan() {
+            f64::NAN
+        } else if x == y {
+            x
+        } else if x == 0.0 {
+            // Smallest positive/negative denormal, not MIN_POSITIVE (normalized)
+            if y > 0.0 {
+                f64::from_bits(1) // smallest positive denormal ≈ 5e-324
+            } else {
+                -f64::from_bits(1) // smallest negative denormal ≈ -5e-324
+            }
+        } else {
+            let bits = x.to_bits() as i64;
+            let next_bits = if (x > 0.0) == (y > x) { bits + 1 } else { bits - 1 };
+            f64::from_bits(next_bits as u64)
+        }
+    }
+
+    /// Per-element kernel for `logaddexp` (log(e^x + e^y), numerically stable).
+    fn logaddexp_kernel(x: f64, y: f64) -> f64 {
+        if x.is_nan() || y.is_nan() {
+            f64::NAN
+        } else if x == f64::NEG_INFINITY {
+            y
+        } else if y == f64::NEG_INFINITY {
+            x
+        } else if x == f64::INFINITY || y == f64::INFINITY {
+            f64::INFINITY
+        } else if x >= y {
+            x + (y - x).exp().ln_1p()
+        } else {
+            y + (x - y).exp().ln_1p()
+        }
+    }
+
+    /// Per-element kernel for `logaddexp2` (log2(2^x + 2^y), numerically stable).
+    fn logaddexp2_kernel(x: f64, y: f64) -> f64 {
+        let ln2 = std::f64::consts::LN_2;
+        if x.is_nan() || y.is_nan() {
+            f64::NAN
+        } else if x == f64::NEG_INFINITY {
+            y
+        } else if y == f64::NEG_INFINITY {
+            x
+        } else if x == f64::INFINITY || y == f64::INFINITY {
+            f64::INFINITY
+        } else if x >= y {
+            x + ((y - x) * ln2).exp().ln_1p() / ln2
+        } else {
+            y + ((x - y) * ln2).exp().ln_1p() / ln2
+        }
+    }
+
     pub fn nextafter(&self, other: &Self) -> Result<Self, ColumnError> {
         if self.len() != other.len() {
             return Err(ColumnError::LengthMismatch {
                 left: self.len(),
                 right: other.len(),
             });
+        }
+        // Typed fast path (all-valid or nullable Float64/Int64): both-present ⇒
+        // nextafter_kernel, either-missing ⇒ NaN⇒missing. Bit-identical to the Scalar
+        // loop below — SAME kernel, and get_present drops exactly the is_missing slots.
+        if let Some(out) = self.typed_nan_propagate_binary(other, Self::nextafter_kernel) {
+            return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
         for (v1, v2) in self.values.iter().zip(other.values.iter()) {
@@ -23137,27 +23206,7 @@ impl Column {
             }
             let x = v1.to_f64().map_err(ColumnError::Type)?;
             let y = v2.to_f64().map_err(ColumnError::Type)?;
-            let result = if x.is_nan() || y.is_nan() {
-                f64::NAN
-            } else if x == y {
-                x
-            } else if x == 0.0 {
-                // Smallest positive/negative denormal, not MIN_POSITIVE (normalized)
-                if y > 0.0 {
-                    f64::from_bits(1) // smallest positive denormal ≈ 5e-324
-                } else {
-                    -f64::from_bits(1) // smallest negative denormal ≈ -5e-324
-                }
-            } else {
-                let bits = x.to_bits() as i64;
-                let next_bits = if (x > 0.0) == (y > x) {
-                    bits + 1
-                } else {
-                    bits - 1
-                };
-                f64::from_bits(next_bits as u64)
-            };
-            out.push(Scalar::Float64(result));
+            out.push(Scalar::Float64(Self::nextafter_kernel(x, y)));
         }
         Self::new(DType::Float64, out)
     }
@@ -23302,6 +23351,11 @@ impl Column {
                 right: other.len(),
             });
         }
+        // Typed fast path (all-valid or nullable): both-present ⇒ logaddexp_kernel,
+        // either-missing ⇒ NaN⇒missing. Bit-identical to the Scalar loop — SAME kernel.
+        if let Some(out) = self.typed_nan_propagate_binary(other, Self::logaddexp_kernel) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (v1, v2) in self.values.iter().zip(other.values.iter()) {
             if v1.is_missing() || v2.is_missing() {
@@ -23310,20 +23364,7 @@ impl Column {
             }
             let x = v1.to_f64().map_err(ColumnError::Type)?;
             let y = v2.to_f64().map_err(ColumnError::Type)?;
-            let result = if x.is_nan() || y.is_nan() {
-                f64::NAN
-            } else if x == f64::NEG_INFINITY {
-                y
-            } else if y == f64::NEG_INFINITY {
-                x
-            } else if x == f64::INFINITY || y == f64::INFINITY {
-                f64::INFINITY
-            } else if x >= y {
-                x + (y - x).exp().ln_1p()
-            } else {
-                y + (x - y).exp().ln_1p()
-            };
-            out.push(Scalar::Float64(result));
+            out.push(Scalar::Float64(Self::logaddexp_kernel(x, y)));
         }
         Self::new(DType::Float64, out)
     }
@@ -23338,7 +23379,11 @@ impl Column {
                 right: other.len(),
             });
         }
-        let ln2 = std::f64::consts::LN_2;
+        // Typed fast path (all-valid or nullable): both-present ⇒ logaddexp2_kernel,
+        // either-missing ⇒ NaN⇒missing. Bit-identical to the Scalar loop — SAME kernel.
+        if let Some(out) = self.typed_nan_propagate_binary(other, Self::logaddexp2_kernel) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (v1, v2) in self.values.iter().zip(other.values.iter()) {
             if v1.is_missing() || v2.is_missing() {
@@ -23347,20 +23392,7 @@ impl Column {
             }
             let x = v1.to_f64().map_err(ColumnError::Type)?;
             let y = v2.to_f64().map_err(ColumnError::Type)?;
-            let result = if x.is_nan() || y.is_nan() {
-                f64::NAN
-            } else if x == f64::NEG_INFINITY {
-                y
-            } else if y == f64::NEG_INFINITY {
-                x
-            } else if x == f64::INFINITY || y == f64::INFINITY {
-                f64::INFINITY
-            } else if x >= y {
-                x + ((y - x) * ln2).exp().ln_1p() / ln2
-            } else {
-                y + ((x - y) * ln2).exp().ln_1p() / ln2
-            };
-            out.push(Scalar::Float64(result));
+            out.push(Scalar::Float64(Self::logaddexp2_kernel(x, y)));
         }
         Self::new(DType::Float64, out)
     }
@@ -32965,6 +32997,102 @@ mod tests {
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
                         );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn twocol_nan_propagate_batch2_nullable_match_scalar_reference() {
+            // float_power/logaddexp/logaddexp2/nextafter now route through
+            // typed_nan_propagate_binary. Must be BIT-EXACT to their generic Scalar
+            // loop (both-present ⇒ kernel, else NaN⇒missing). float_power exercises a
+            // negative base + fractional exp ⇒ NaN ⇒ missing; logaddexp* exercise
+            // ±inf special cases; nextafter exercises x==0 / x==y. Mixed dtypes,
+            // nullable, valid-bit-set NaN.
+            let mut state: u64 = 0x77E5_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            fn ref_binop(a: &[Scalar], b: &[Scalar], f: fn(f64, f64) -> f64) -> Column {
+                let out: Vec<Scalar> = a
+                    .iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| {
+                        if x.is_missing() || y.is_missing() {
+                            Scalar::Float64(f64::NAN)
+                        } else {
+                            Scalar::Float64(f(x.to_f64().unwrap(), y.to_f64().unwrap()))
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Float64, out).unwrap()
+            }
+            let mk_f64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let data: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 9 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN,
+                            2 => f64::INFINITY,
+                            3 => f64::NEG_INFINITY,
+                            4 => 0.0, // nextafter x==0
+                            _ => ((r % 400) as f64 - 200.0) * 0.25, // includes negatives (float_power ⇒ NaN)
+                        }
+                    })
+                    .collect();
+                Column::from_f64_values_with_validity(data, vf)
+            };
+            let mk_i64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 20) as i64 - 8
+                    })
+                    .collect();
+                Column::from_i64_values_with_validity(data, vi)
+            };
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let (a, b) = match trial % 4 {
+                    0 => (mk_i64(n, &mut next), mk_f64(n, &mut next)),
+                    1 => (mk_f64(n, &mut next), mk_i64(n, &mut next)),
+                    2 => (mk_f64(n, &mut next), mk_f64(n, &mut next)),
+                    _ => (mk_i64(n, &mut next), mk_i64(n, &mut next)),
+                };
+                let av = a.values().to_vec();
+                let bv = b.values().to_vec();
+                let cases: [(&str, Column, Column); 4] = [
+                    ("float_power", a.float_power(&b).unwrap(), ref_binop(&av, &bv, |x, y| x.powf(y))),
+                    ("logaddexp", a.logaddexp(&b).unwrap(), ref_binop(&av, &bv, Column::logaddexp_kernel)),
+                    ("logaddexp2", a.logaddexp2(&b).unwrap(), ref_binop(&av, &bv, Column::logaddexp2_kernel)),
+                    ("nextafter", a.nextafter(&b).unwrap(), ref_binop(&av, &bv, Column::nextafter_kernel)),
+                ];
+                for (name, got, want) in cases {
+                    let gv = got.values();
+                    let wv = want.values();
+                    assert_eq!(gv.len(), wv.len(), "{name} len trial {trial}");
+                    for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                        assert!(bit_eq(g, w), "{name} trial {trial} idx {k}: {g:?} != {w:?}");
                     }
                 }
             }

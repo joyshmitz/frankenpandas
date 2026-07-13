@@ -5995,40 +5995,56 @@ fn i64_direct_address_range(data: &[i64]) -> Option<(i64, usize)> {
 /// very-high cardinality (where this table exceeds the LLC and thrashes).
 fn count_distinct_i64_singletable(data: &[i64]) -> i64 {
     const EMPTY: i64 = i64::MIN;
+    const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
     if data.is_empty() {
         return 0;
     }
-    // Load factor ~0.5: capacity = next power of two ≥ 2·n. Distinct ≤ n, so the
-    // table never exceeds ~0.5 occupancy and linear-probe runs stay short.
-    let cap = data
-        .len()
-        .saturating_mul(2)
-        .checked_next_power_of_two()
-        .unwrap_or(0);
-    // Fall back to the caller's generic path if the table would be implausibly
-    // large (cap == 0 only on overflow of usize::MAX/2).
-    if cap == 0 {
-        let mut set: FxHashSet<i64> = FxHashSet::default();
-        for &v in data {
-            set.insert(v);
-        }
-        return set.len() as i64;
-    }
-    let mask = cap - 1;
+    // GROWABLE open-addressing + FIBONACCI hashing (wide open-addr vein fix). This
+    // is the LOW/MID-cardinality distinct-count path (the dispatcher routes truly
+    // high-card data to the radix variant), which is exactly where the old fixed
+    // cap ≈ 2·n was a huge SPARSE table — a cache miss per probe — and where the
+    // low-bit `& mask` hash clustered high-bit-only keys. Grow from small (double
+    // at load 0.7 ⇒ sizes to the distinct count) and Fibonacci `>> (64 - log2 cap)`
+    // (HIGH bits). Bit-identical count (table layout doesn't change membership).
+    // >= 2 so `shift = 64 - log2(cap)` <= 63.
+    let n = data.len();
+    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut count = 0i64;
     let mut has_sentinel = false;
+    let mut filled = 0usize;
     for &v in data {
         if v == EMPTY {
             has_sentinel = true;
             continue;
         }
-        let mut idx = ((v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        if filled * 10 >= cap * 7 {
+            let ncap = cap * 2;
+            let nshift = 64 - ncap.trailing_zeros();
+            let nmask = ncap - 1;
+            let mut nkeys = vec![EMPTY; ncap];
+            for p in 0..cap {
+                if keys[p] != EMPTY {
+                    let mut q = ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+                    while nkeys[q] != EMPTY {
+                        q = (q + 1) & nmask;
+                    }
+                    nkeys[q] = keys[p];
+                }
+            }
+            keys = nkeys;
+            cap = ncap;
+            shift = nshift;
+        }
+        let mask = cap - 1;
+        let mut idx = ((v as u64).wrapping_mul(GOLDEN) >> shift) as usize;
         loop {
             let k = keys[idx];
             if k == EMPTY {
                 keys[idx] = v;
                 count += 1;
+                filled += 1;
                 break;
             }
             if k == v {
@@ -6414,33 +6430,55 @@ fn mode_f64_wide(data: &[f64]) -> Vec<f64> {
 /// sentinel, its duplicate-state tracked via a flag.
 fn duplicated_first_i64_wide(data: &[i64]) -> Vec<bool> {
     const EMPTY: i64 = i64::MIN;
+    const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
     let n = data.len();
     let mut flags = vec![false; n];
-    let cap = n
-        .saturating_add(n / 2)
-        .checked_next_power_of_two()
-        .unwrap_or(0);
-    if cap == 0 {
-        let mut seen: FxHashSet<i64> = FxHashSet::with_capacity_and_hasher(n, Default::default());
-        for (idx, &v) in data.iter().enumerate() {
-            flags[idx] = !seen.insert(v);
-        }
+    if n == 0 {
         return flags;
     }
-    let mask = cap - 1;
+    // GROWABLE open-addressing + FIBONACCI hashing (wide open-addr vein fix): the
+    // old fixed cap ≈ 1.5·n is a huge SPARSE membership table (cache miss per probe)
+    // for few-distinct data, and `(v·GOLDEN) & mask` (LOW product bits) clusters
+    // keys that vary only in HIGH bits. Grow from small (double at load 0.7) and
+    // Fibonacci `>> (64 - log2 cap)` (HIGH bits). Byte-identical: `flags` is a
+    // per-row first-seen membership test (independent of table layout).
+    // >= 2 so `shift = 64 - log2(cap)` <= 63.
+    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut seen_sentinel = false;
+    let mut filled = 0usize;
     for (idx, &v) in data.iter().enumerate() {
         if v == EMPTY {
             flags[idx] = seen_sentinel;
             seen_sentinel = true;
             continue;
         }
-        let mut p = ((v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        if filled * 10 >= cap * 7 {
+            let ncap = cap * 2;
+            let nshift = 64 - ncap.trailing_zeros();
+            let nmask = ncap - 1;
+            let mut nkeys = vec![EMPTY; ncap];
+            for p in 0..cap {
+                if keys[p] != EMPTY {
+                    let mut q = ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+                    while nkeys[q] != EMPTY {
+                        q = (q + 1) & nmask;
+                    }
+                    nkeys[q] = keys[p];
+                }
+            }
+            keys = nkeys;
+            cap = ncap;
+            shift = nshift;
+        }
+        let mask = cap - 1;
+        let mut p = ((v as u64).wrapping_mul(GOLDEN) >> shift) as usize;
         loop {
             let k = keys[p];
             if k == EMPTY {
                 keys[p] = v;
+                filled += 1;
                 break; // first occurrence → flag stays false
             }
             if k == v {
@@ -30529,6 +30567,53 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(got, expected, "trial {trial}");
+            }
+        }
+
+        #[test]
+        fn duplicated_and_nunique_wide_growable_fibonacci_rehash_matches_reference() {
+            // Regression for the duplicated_first_i64_wide + count_distinct_i64_
+            // singletable fixes: many distinct WIDE keys varying only in HIGH bits
+            // (k << 34) over enough rows (> 1024 distinct) to force growable-table
+            // rehashes, plus i64::MIN. `duplicated()` flags and `nunique()` count
+            // must match HashSet references.
+            use std::collections::HashSet;
+            let mut state: u64 = 0x9E37_79B9_1234_5678;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..40 {
+                let distinct = 2000 + (next() % 800) as i64;
+                let n = 12_000usize;
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        if i % 500 == 0 {
+                            i64::MIN
+                        } else {
+                            (((next() % distinct as u64) as i64) - distinct / 2) << 34
+                        }
+                    })
+                    .collect();
+                assert!(crate::i64_direct_address_range(&data).is_none());
+                let mut seen = HashSet::new();
+                let exp_flags: Vec<bool> = data.iter().map(|&v| !seen.insert(v)).collect();
+                let exp_nunique = seen.len() as i64;
+                let col = Column::from_i64_values_owned(data);
+                let got_flags: Vec<bool> = col
+                    .duplicated()
+                    .expect("duplicated")
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Bool(b) => *b,
+                        o => panic!("not bool: {o:?}"),
+                    })
+                    .collect();
+                assert_eq!(got_flags, exp_flags, "duplicated trial {trial}");
+                assert_eq!(col.nunique(), Scalar::Int64(exp_nunique), "nunique trial {trial}");
             }
         }
 

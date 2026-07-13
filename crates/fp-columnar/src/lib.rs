@@ -13636,6 +13636,9 @@ impl Column {
         if let Some(out) = self.typed_float_binary(other, f64::max) {
             return Ok(out);
         }
+        if let Some(out) = self.typed_nan_propagate_binary(other, f64::max) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             if a.is_missing() || b.is_missing() {
@@ -13653,6 +13656,32 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Typed nullable pairwise fast path for the NaN-PROPAGATING element-wise binaries
+    /// (`maximum`/`minimum`): both columns Float64/Int64 (all-valid or nullable). The
+    /// result is `f(x, y)` only when BOTH slots are present, else `Float64(NaN)` — bit-
+    /// identical to the Scalar loop (`a.is_missing() || b.is_missing() ⇒ NaN`, and the
+    /// redundant `af.is_nan() || bf.is_nan()` check drops nothing for present values,
+    /// which are non-NaN by is_missing). get_present == !is_missing (validity-set AND
+    /// non-NaN for Float64, KEEPING ±inf; validity-set for Int64). Output is Float64:
+    /// from_f64_values marks the either-missing NaN slots missing, exactly as
+    /// Self::new(Float64, [Float64(NaN)]) does. Covers mixed i64×f64. `None` unless
+    /// both columns expose a typed numeric view.
+    fn typed_nan_propagate_binary(
+        &self,
+        other: &Self,
+        f: fn(f64, f64) -> f64,
+    ) -> Option<Self> {
+        let (sa, sb) = (self.typed_numeric_values()?, other.typed_numeric_values()?);
+        let n = sa.len().min(sb.len());
+        let out: Vec<f64> = (0..n)
+            .map(|i| match (sa.get_present(i), sb.get_present(i)) {
+                (Some(x), Some(y)) => f(x, y),
+                _ => f64::NAN,
+            })
+            .collect();
+        Some(Self::from_f64_values(out))
+    }
+
     /// Element-wise minimum, NaN propagates.
     pub fn minimum(&self, other: &Self) -> Result<Self, ColumnError> {
         if self.len() != other.len() {
@@ -13662,6 +13691,9 @@ impl Column {
             });
         }
         if let Some(out) = self.typed_float_binary(other, f64::min) {
+            return Ok(out);
+        }
+        if let Some(out) = self.typed_nan_propagate_binary(other, f64::min) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -32877,6 +32909,102 @@ mod tests {
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
                         );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn maximum_minimum_nullable_typed_match_scalar_reference() {
+            // The typed nullable pairwise arm for maximum/minimum must be BIT-EXACT to
+            // the generic Scalar loop (either-missing ⇒ NaN⇒missing; else f(af,bf)).
+            // Reference off the MATERIALIZED values(). MIXED dtypes (i64×f64 + swaps),
+            // nullable at DIFFERENT positions, ±inf (kept), valid-bit-set NaN (⇒ missing).
+            let mut state: u64 = 0x9AC0_51DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            // Exact replica of the generic maximum/minimum Scalar loop + Self::new.
+            fn ref_binop(a: &[Scalar], b: &[Scalar], f: fn(f64, f64) -> f64) -> Column {
+                let out: Vec<Scalar> = a
+                    .iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| {
+                        if x.is_missing() || y.is_missing() {
+                            return Scalar::Float64(f64::NAN);
+                        }
+                        let xf = x.to_f64().unwrap();
+                        let yf = y.to_f64().unwrap();
+                        if xf.is_nan() || yf.is_nan() {
+                            Scalar::Float64(f64::NAN)
+                        } else {
+                            Scalar::Float64(f(xf, yf))
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Float64, out).unwrap()
+            }
+            let mk_f64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let data: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 8 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN,
+                            2 => f64::INFINITY,
+                            3 => f64::NEG_INFINITY,
+                            _ => ((r % 400) as f64 - 200.0) * 0.25,
+                        }
+                    })
+                    .collect();
+                Column::from_f64_values_with_validity(data, vf)
+            };
+            let mk_i64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 400) as i64 - 200
+                    })
+                    .collect();
+                Column::from_i64_values_with_validity(data, vi)
+            };
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let (a, b) = match trial % 4 {
+                    0 => (mk_i64(n, &mut next), mk_f64(n, &mut next)),
+                    1 => (mk_f64(n, &mut next), mk_i64(n, &mut next)),
+                    2 => (mk_f64(n, &mut next), mk_f64(n, &mut next)),
+                    _ => (mk_i64(n, &mut next), mk_i64(n, &mut next)),
+                };
+                let av = a.values().to_vec();
+                let bv = b.values().to_vec();
+                for (name, got, want) in [
+                    ("max", a.maximum(&b).unwrap(), ref_binop(&av, &bv, f64::max)),
+                    ("min", a.minimum(&b).unwrap(), ref_binop(&av, &bv, f64::min)),
+                ] {
+                    let gv = got.values();
+                    let wv = want.values();
+                    assert_eq!(gv.len(), wv.len(), "{name} len trial {trial}");
+                    for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                        assert!(bit_eq(g, w), "{name} trial {trial} idx {k}: {g:?} != {w:?}");
                     }
                 }
             }

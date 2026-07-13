@@ -15237,3 +15237,37 @@ Workspace `cargo check --workspace --all-targets` is green. Full workspace Clipp
 families are allowed. Fail-closed RCH refused remote `cargo fmt --check` as non-compilation command `RCH-E301`, so no local
 fallback ran; `git diff --check` is green. The bounded static-only UBS run reproduced the known broad whole-file inventory;
 its one focused benchmark indexing warning was removed before the final scan, with no production-hunk finding.
+
+### 2026-07-13 IvoryGlacier — WIN: `SeriesGroupBy::ohlc` dense typed one-pass — 6.395x p50
+
+Negative-ledger-first routing excluded the rejected dense-groupby mean-hoist family and found no prior
+`SeriesGroupBy::ohlc` keep or rejection. The historical path built hashed groups, materialized the value column as
+Scalars, allocated one `Vec<f64>` per group, and then scanned each group separately for open, high, low, and close.
+
+One lever (`br-frankenpandas-1o6vv`) reuses the cached dense group ids and first-seen labels for all-valid Float64 values
+without NaN and all-valid Int64 values. One row-order scan records the first and last value and applies the same ordered
+`f64::max` / `f64::min` folds per gid. Nullable, NaN-bearing, non-numeric, or non-dense inputs retain the historical path.
+
+An untouched strict-remote A/A control on `vmi1227854` measured **62.965 / 68.871 ms** candidate p50/p95 versus
+**63.362 / 73.857 ms** control p50/p95 (**1.006x** at p50), establishing a sub-1% routing floor. The ship gate was then a
+same-binary, alternating-order A/B on `vmi1152480`: one million rows, 1,000 scrambled Int64 groups, nine measured samples,
+and exact candidate/reference output equality before timing. The reference key is nullable only at its final row; that row
+duplicates its predecessor exactly, so dropping it forces the historical path without changing any OHLC result.
+
+| arm | p50 | p95 |
+| --- | ---: | ---: |
+| historical group-Vec reference | 67.501 ms | 69.162 ms |
+| dense typed one-pass | 10.555 ms | 12.338 ms |
+
+Reference/candidate = **6.395x p50**. Correctness: the focused strict-remote release-perf proof is **1/1 green** and checks
+full DataFrame equality plus bitwise Float64 output equality against the fallback for both Float64 and Int64 values,
+including shuffled negative group labels, signed zero, and both infinities. Group-label order, column order, index name,
+open/close position, and ordered high/low folds therefore remain unchanged on the admitted path.
+
+Validation: strict-remote workspace `cargo check --workspace --all-targets` is green with five pre-existing warnings in
+untouched `fp-columnar`. Full workspace Clippy remains blocked by the existing `fp-columnar` backlog (23 lib and 45 test
+errors); `fp-frame --all-targets --no-deps -D warnings` is clean when the two pre-existing untouched
+`clippy::question_mark` findings are allowed exactly. Fail-closed RCH refused remote `cargo fmt --check` as non-compilation
+command `RCH-E301`, so no local fallback ran. `git diff --check` is green. The bounded static-only UBS source scan
+reproduced the documented whole-file timeout; the benchmark-only rerun confirmed both new direct-index warnings were
+removed, leaving only its pre-existing operation-dispatch `panic!()` inventory finding. No local Cargo command ran.

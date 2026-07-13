@@ -6597,16 +6597,12 @@ fn unique_i64_wide(data: &[i64]) -> Vec<i64> {
 /// correctly.
 fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<i64>) {
     const EMPTY: i64 = i64::MIN;
-    let mut codes: Vec<i64> = Vec::with_capacity(data.len());
+    const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+    let n = data.len();
+    let mut codes: Vec<i64> = Vec::with_capacity(n);
     let mut uniques: Vec<i64> = Vec::new();
-    // ~0.67 load: capacity = next power of two ≥ 1.5·n.
-    let cap = data
-        .len()
-        .saturating_add(data.len() / 2)
-        .checked_next_power_of_two()
-        .unwrap_or(0);
     // `code_at` stores codes as u32; only valid when distinct (≤ n) fits u32.
-    if cap == 0 || data.len() > u32::MAX as usize {
+    if n > u32::MAX as usize {
         let mut map: FxHashMap<i64, i64> = FxHashMap::default();
         for &v in data {
             match map.get(&v) {
@@ -6621,10 +6617,22 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<i64>) {
         }
         return (codes, uniques);
     }
-    let mask = cap - 1;
+    // GROWABLE open-addressing + FIBONACCI hashing (same vein fix as
+    // `mode_*_wide` / `unique_*_wide`): the old fixed cap ≈ 1.5·n is a huge SPARSE
+    // (keys, code_at) table (cache miss per probe) for few-distinct data, and
+    // `(v·GOLDEN) & mask` keeps the LOW product bits, which vanish when keys vary in
+    // high bits (wide / high-bit-only i64) → clustering. Grow from small (double at
+    // load 0.7, rehashing BOTH parallel arrays) to size the table to the distinct
+    // count, and Fibonacci `>> (64 - log2 cap)` uses the HIGH bits. Byte-identical:
+    // codes/uniques are the first-seen assignment (code = uniques.len() at insert),
+    // which depends only on order, not table layout. `i64::MIN` sentinel via min_code.
+    // >= 2 so `shift = 64 - log2(cap)` <= 63 (a 64-bit `>>` is invalid).
+    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut code_at = vec![0u32; cap];
     let mut min_code: i64 = -1; // code of the i64::MIN sentinel value; -1 = unseen
+    let mut filled = 0usize;
     for &v in data {
         if v == EMPTY {
             if min_code < 0 {
@@ -6637,7 +6645,29 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<i64>) {
             }
             continue;
         }
-        let mut idx = ((v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        if filled * 10 >= cap * 7 {
+            let ncap = cap * 2;
+            let nshift = 64 - ncap.trailing_zeros();
+            let nmask = ncap - 1;
+            let mut nkeys = vec![EMPTY; ncap];
+            let mut ncode = vec![0u32; ncap];
+            for p in 0..cap {
+                if keys[p] != EMPTY {
+                    let mut q = ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+                    while nkeys[q] != EMPTY {
+                        q = (q + 1) & nmask;
+                    }
+                    nkeys[q] = keys[p];
+                    ncode[q] = code_at[p];
+                }
+            }
+            keys = nkeys;
+            code_at = ncode;
+            cap = ncap;
+            shift = nshift;
+        }
+        let mask = cap - 1;
+        let mut idx = ((v as u64).wrapping_mul(GOLDEN) >> shift) as usize;
         loop {
             let k = keys[idx];
             if k == EMPTY {
@@ -6646,6 +6676,7 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<i64>) {
                 code_at[idx] = c as u32;
                 uniques.push(v);
                 codes.push(c);
+                filled += 1;
                 break;
             }
             if k == v {
@@ -30044,6 +30075,69 @@ mod tests {
                     assert_eq!(got_codes, codes, "trial {trial} sort={sort} codes");
                     assert_eq!(got_uniques, uniques, "trial {trial} sort={sort} uniques");
                 }
+            }
+        }
+
+        #[test]
+        fn factorize_wide_i64_growable_fibonacci_rehash_matches_reference() {
+            // Regression for the factorize_i64_wide fix: many distinct WIDE keys
+            // varying only in HIGH bits (k << 34, the case the old low-bit `& mask`
+            // hash clustered) over enough rows (> 1024 distinct) to force growable-
+            // table rehashes, plus the i64::MIN sentinel. (codes, uniques) must stay
+            // byte-identical (first-seen, unsorted) to a first-seen reference.
+            let mut state: u64 = 0x0BAD_F00D_C0FF_EE11;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..40 {
+                let distinct = 2000 + (next() % 800) as i64;
+                let n = 12_000usize;
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        if i % 500 == 0 {
+                            i64::MIN
+                        } else {
+                            (((next() % distinct as u64) as i64) - distinct / 2) << 34
+                        }
+                    })
+                    .collect();
+                assert!(crate::i64_direct_address_range(&data).is_none());
+                let mut uniques: Vec<i64> = Vec::new();
+                let mut pos: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+                let codes: Vec<i64> = data
+                    .iter()
+                    .map(|&v| {
+                        *pos.entry(v).or_insert_with(|| {
+                            let c = uniques.len() as i64;
+                            uniques.push(v);
+                            c
+                        })
+                    })
+                    .collect();
+                let (code_col, uniq_col) = Column::from_i64_values_owned(data)
+                    .factorize_with_options(false, true)
+                    .expect("factorize");
+                let got_codes: Vec<i64> = code_col
+                    .values()
+                    .iter()
+                    .filter_map(|v| match v {
+                        Scalar::Int64(c) => Some(*c),
+                        _ => None,
+                    })
+                    .collect();
+                let got_uniques: Vec<i64> = uniq_col
+                    .values()
+                    .iter()
+                    .filter_map(|v| match v {
+                        Scalar::Int64(c) => Some(*c),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(got_codes, codes, "trial {trial} codes");
+                assert_eq!(got_uniques, uniques, "trial {trial} uniques");
             }
         }
 

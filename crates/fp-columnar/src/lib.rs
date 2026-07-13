@@ -6188,6 +6188,33 @@ impl TypedNumericValues<'_> {
             }
         }
     }
+
+    /// Present-value view (== `!Scalar::is_missing() && to_f64().is_ok()` for a
+    /// Float64/Int64 backing): validity-set AND non-NaN for Float64 (KEEPING ±inf —
+    /// `is_missing` only drops NaN/null, and `to_f64` accepts ±inf), validity-set for
+    /// Int64. Unlike `get_finite`, this does NOT drop ±inf, matching reductions
+    /// (weighted_mean) whose reference filters on `is_missing` + `to_f64`, not
+    /// `is_finite`.
+    #[inline]
+    fn get_present(&self, i: usize) -> Option<f64> {
+        match self {
+            Self::F64(d, v) => {
+                let x = d[i];
+                if v.get(i) && !x.is_nan() {
+                    Some(x)
+                } else {
+                    None
+                }
+            }
+            Self::I64(d, v) => {
+                if v.get(i) {
+                    Some(d[i] as f64)
+                } else {
+                    None
+                }
+            }
+        }
+    }
 }
 
 fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Column, ColumnError> {
@@ -15529,6 +15556,29 @@ impl Column {
     pub fn weighted_mean(&self, weights: &Self) -> Scalar {
         if self.len() != weights.len() {
             return Scalar::Null(NullKind::NaN);
+        }
+        // Typed pairwise fast path (sibling of cov/corr): when BOTH columns are
+        // Float64/Int64 (all-valid or nullable) fold straight off the raw slices via
+        // get_present, skipping the Vec<Scalar> materialization of BOTH columns +
+        // per-Scalar is_missing/to_f64. Bit-identical: get_present == the reference's
+        // `!v.is_missing() && v.to_f64().is_ok()` gate (validity-set AND non-NaN for
+        // Float64, KEEPING ±inf; validity-set for Int64), so the same pairwise-present
+        // (v,w) pairs accumulate sum += vf*wf / weight_sum += wf in the same 0..n
+        // order, and the `weight_sum == 0.0 ⇒ Null(NaN)` guard is unchanged.
+        if let (Some(sv), Some(sw)) = (self.typed_numeric_values(), weights.typed_numeric_values()) {
+            let n = sv.len().min(sw.len());
+            let mut sum = 0.0_f64;
+            let mut weight_sum = 0.0_f64;
+            for i in 0..n {
+                if let (Some(vf), Some(wf)) = (sv.get_present(i), sw.get_present(i)) {
+                    sum += vf * wf;
+                    weight_sum += wf;
+                }
+            }
+            if weight_sum == 0.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            return Scalar::Float64(sum / weight_sum);
         }
         let mut sum = 0.0;
         let mut weight_sum = 0.0;
@@ -32647,6 +32697,102 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+
+        #[test]
+        fn weighted_mean_typed_pairwise_match_scalar_reference() {
+            // The typed pairwise weighted_mean fast path must be BIT-EXACT to the
+            // Scalar loop it replaces (!is_missing && to_f64 Ok, same 0..n order,
+            // same weight_sum==0 ⇒ Null(NaN) guard). Reference computed off the
+            // MATERIALIZED values() = the exact old code. MIXED dtypes (i64 val x f64
+            // weights + swap), all-valid + nullable at DIFFERENT positions, with ±inf
+            // (kept — is_missing drops only NaN) and NaN (dropped) in both.
+            let mut state: u64 = 0xA5A5_7EED_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            // Exact replica of the pre-typed generic loop.
+            fn ref_wmean(v: &[Scalar], w: &[Scalar]) -> Scalar {
+                let mut sum = 0.0;
+                let mut weight_sum = 0.0;
+                for (a, b) in v.iter().zip(w.iter()) {
+                    if a.is_missing() || b.is_missing() {
+                        continue;
+                    }
+                    let vf = match a.to_f64() {
+                        Ok(x) => x,
+                        Err(_) => continue,
+                    };
+                    let wf = match b.to_f64() {
+                        Ok(x) => x,
+                        Err(_) => continue,
+                    };
+                    sum += vf * wf;
+                    weight_sum += wf;
+                }
+                if weight_sum == 0.0 {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                Scalar::Float64(sum / weight_sum)
+            }
+            let mk_f64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let data: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 8 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN,
+                            2 => f64::INFINITY,
+                            3 => f64::NEG_INFINITY,
+                            _ => ((r % 400) as f64 - 200.0) * 0.25,
+                        }
+                    })
+                    .collect();
+                Column::from_f64_values_with_validity(data, vf)
+            };
+            let mk_i64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 6 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 400) as i64 - 200
+                    })
+                    .collect();
+                Column::from_i64_values_with_validity(data, vi)
+            };
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                // Cover i64xf64, f64xi64, f64xf64, i64xi64.
+                let (vcol, wcol) = match trial % 4 {
+                    0 => (mk_i64(n, &mut next), mk_f64(n, &mut next)),
+                    1 => (mk_f64(n, &mut next), mk_i64(n, &mut next)),
+                    2 => (mk_f64(n, &mut next), mk_f64(n, &mut next)),
+                    _ => (mk_i64(n, &mut next), mk_i64(n, &mut next)),
+                };
+                let vv = vcol.values().to_vec();
+                let wv = wcol.values().to_vec();
+                assert!(
+                    bit_eq(&vcol.weighted_mean(&wcol), &ref_wmean(&vv, &wv)),
+                    "weighted_mean trial {trial} n {n}"
+                );
             }
         }
 

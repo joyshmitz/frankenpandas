@@ -21875,6 +21875,60 @@ impl Column {
             return Ok(cached);
         }
 
+        // Nullable contiguous-Utf8 default factorize (sort=false, use_na_sentinel=true,
+        // COLD cache): the `utf8_default_factorize_columns` witness above gates on
+        // `validity.all()` + `LazyContiguousUtf8`, so a `LazyNullableUtf8` column — a
+        // string column WITH missing rows — fell to the generic `LocalKey` loop below,
+        // which materializes a `Vec<Scalar::Utf8>` (one heap `String` per row). Assign
+        // codes over the raw `&[u8]` present spans via `FxHashMap<&[u8], i64>` (byte-eq ==
+        // `&str`-eq for valid UTF-8): a MISSING row ⇒ code -1 (use_na_sentinel), a present
+        // row ⇒ its first-seen code, and the uniques are the first-seen distinct present
+        // spans built into ONE contiguous all-valid Utf8 column. Bit-identical to the
+        // generic default arm: same first-seen codes (0,1,2,…), same -1 for missing, same
+        // distinct-present uniques sequence; `from_i64_values_owned`/`from_utf8_contiguous`
+        // build the same logical columns as `from_i64_values` / `Self::new(Utf8, uniques)`.
+        // Only the DEFAULT config (sort remaps codes; use_na_sentinel=false makes missing a
+        // bucket — both keep the generic path). Gated on a COLD `values` cache: the win is
+        // skipping the materialization on a fresh column (the usual `factorize()` /
+        // categorical-encode shape); a warm column defers to the generic `LocalKey` loop
+        // over the cached Scalar Vec — no regression from the per-row `validity.get`.
+        if !sort
+            && use_na_sentinel
+            && let ScalarValues::LazyNullableUtf8 {
+                bytes,
+                offsets,
+                validity,
+                values,
+            } = &self.values
+            && values.get().is_none()
+        {
+            let n = offsets.len().saturating_sub(1);
+            let mut idx_map: FxHashMap<&[u8], i64> = FxHashMap::default();
+            let mut codes: Vec<i64> = Vec::with_capacity(n);
+            let mut uniq_bytes: Vec<u8> = Vec::new();
+            let mut uniq_offsets: Vec<usize> = vec![0];
+            for (i, w) in offsets.windows(2).enumerate() {
+                if !validity.get(i) {
+                    codes.push(-1);
+                    continue;
+                }
+                let span = &bytes[w[0]..w[1]];
+                if let Some(&c) = idx_map.get(span) {
+                    codes.push(c);
+                } else {
+                    let c = (uniq_offsets.len() - 1) as i64; // # uniques so far
+                    idx_map.insert(span, c);
+                    uniq_bytes.extend_from_slice(span);
+                    uniq_offsets.push(uniq_bytes.len());
+                    codes.push(c);
+                }
+            }
+            return Ok((
+                Self::from_i64_values_owned(codes),
+                Self::from_utf8_contiguous(uniq_bytes, uniq_offsets),
+            ));
+        }
+
         // Per br-frankenpandas-9433f: HashMap-based code lookup mirrors
         // fp-frame's Series::factorize fix (br-78d0c). fp-columnar can't
         // import fp-frame's ScalarKey (cycle), so define a local
@@ -33613,6 +33667,60 @@ mod tests {
                     Scalar::Utf8("c".into()),
                 ]
             );
+        }
+
+        #[test]
+        fn factorize_nullable_utf8_typed_matches_generic() {
+            // The typed nullable-Utf8 default factorize arm (cold cache) must be BIT-EXACT
+            // to the generic LocalKey path: first-seen codes over present values, -1 for
+            // missing, uniques = distinct present in first-seen order. A/B on identical
+            // LazyNullableUtf8 data: `col_cold` (fresh, cold cache) exercises the typed
+            // arm; `col_warm` has its Scalar cache pre-materialized so the cold-cache gate
+            // defers it to the generic path. Seeded short strings over {a,b,c,d} + varied
+            // null densities (incl. all-null ⇒ all codes -1, empty uniques).
+            let mut state: u64 = 0xFAC7_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 300) as usize;
+                let null_mode = next() % 3; // 0=none, 2=all-null, else ~25%
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for i in 0..n {
+                    let is_null = match null_mode {
+                        0 => false,
+                        2 => true,
+                        _ => next() % 4 == 0,
+                    };
+                    if is_null {
+                        validity.set(i, false);
+                    } else {
+                        let len = (next() % 4) as usize;
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                    }
+                    offsets.push(bytes.len());
+                }
+                let col_cold = Column::from_utf8_values_with_validity(
+                    bytes.clone(),
+                    offsets.clone(),
+                    validity.clone(),
+                );
+                let col_warm =
+                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
+                let (cc, cu) = col_cold.factorize().expect("cold factorize");
+                let (wc, wu) = col_warm.factorize().expect("warm factorize");
+                assert_eq!(cc.values(), wc.values(), "codes trial {trial} null_mode={null_mode}");
+                assert_eq!(cu.values(), wu.values(), "uniques trial {trial} null_mode={null_mode}");
+            }
         }
 
         #[test]

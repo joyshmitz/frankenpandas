@@ -9962,6 +9962,24 @@ impl Column {
         }
     }
 
+    /// Raw contiguous byte backing of a NULLABLE Utf8 column (`LazyNullableUtf8` —
+    /// a string column WITH missing rows). Returns `(bytes, offsets)` where a
+    /// present row `r` is `bytes[offsets[r]..offsets[r+1]]` and a missing row's
+    /// span is empty; pair with [`Self::validity`] (`validity.get(r)` is false at
+    /// missing rows) to distinguish present from missing without materializing the
+    /// `Vec<Scalar::Utf8>`. `None` for any other backing (all-valid Utf8 uses
+    /// [`Self::as_utf8_contiguous`]; eager/other dtypes have no contiguous span
+    /// view). Sibling of `as_utf8_contiguous` for consumers that render/scan a
+    /// nullable string column by span (e.g. the typed CSV/JSON writers).
+    #[must_use]
+    pub fn as_nullable_utf8_contiguous(&self) -> Option<(&[u8], &[usize])> {
+        if let ScalarValues::LazyNullableUtf8 { bytes, offsets, .. } = &self.values {
+            Some((bytes.as_ref(), offsets.as_ref()))
+        } else {
+            None
+        }
+    }
+
     /// Share the column's contiguous Utf8 backing as immutable `Arc`s.
     ///
     /// This is the ownership-preserving counterpart to

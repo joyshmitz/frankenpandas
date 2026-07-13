@@ -2114,6 +2114,10 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         // All-valid contiguous Utf8: (bytes, offsets) with row r =
         // bytes[offsets[r]..offsets[r+1]].
         U(&'a [u8], &'a [usize]),
+        // NULLABLE contiguous Utf8: (bytes, offsets, validity). A present row
+        // (validity.get(r)) renders its span; a missing row renders na_rep — so a
+        // string column WITH nulls no longer forces the WHOLE frame off the fast path.
+        UN(&'a [u8], &'a [usize], &'a fp_columnar::ValidityMask),
         // All-valid (no validity-mask null) Datetime64 ns + the column-uniform
         // to_csv format; NaT sentinels render as na_rep inline.
         Dt(&'a [i64], DatetimeCsvFormat),
@@ -2144,6 +2148,14 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 return None;
             }
             cols.push(FastCol::U(bytes, offsets));
+        } else if let Some((bytes, offsets)) = column.as_nullable_utf8_contiguous() {
+            // Nullable contiguous Utf8: present rows render their span, missing rows
+            // (validity-clear) render na_rep — so one null-bearing string column no
+            // longer disables the fast writer for the whole frame.
+            if offsets.len() != n + 1 {
+                return None;
+            }
+            cols.push(FastCol::UN(bytes, offsets, column.validity()));
         } else if column.dtype() == DType::Datetime64 {
             // A validity-mask null (data slot ≠ NaT) would diverge from the
             // general path's `Scalar::Null` → na_rep; require no mask-nulls. NaT
@@ -2243,6 +2255,21 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                         // SAFETY-FREE: contiguous Utf8 backing is valid UTF-8.
                         let field = std::str::from_utf8(field).unwrap_or("");
                         append_csv_minimal_field(dst, field, delim, single_field);
+                    }
+                    // Nullable Utf8 cell: a present row (validity-set) renders its span
+                    // exactly like `FastCol::U`; a missing row renders na_rep with the same
+                    // sole-empty-field quoting as the Dt NaT / F NaN arms (isomorphic with
+                    // the general path's `Scalar::Null` → na_rep).
+                    FastCol::UN(bytes, offsets, validity) => {
+                        if validity.get(r) {
+                            let field = &bytes[offsets[r]..offsets[r + 1]];
+                            let field = std::str::from_utf8(field).unwrap_or("");
+                            append_csv_minimal_field(dst, field, delim, single_field);
+                        } else if single_field && options.na_rep.is_empty() {
+                            dst.push_str("\"\"");
+                        } else {
+                            dst.push_str(&options.na_rep);
+                        }
                     }
                     // Datetime64: NaT → na_rep (isomorphic with the F NaN arm's sole
                     // empty-na quoting); else the column-uniform format string, routed
@@ -17860,6 +17887,128 @@ mod tests {
         // Second data row's name should render as NA, not empty.
         assert!(output.contains("2,NA\n"));
         assert!(!output.contains("2,\n"));
+    }
+
+    #[test]
+    fn test_write_csv_nullable_utf8_fast_matches_general() {
+        // A nullable contiguous-Utf8 column (LazyNullableUtf8) now takes the fast typed
+        // writer (FastCol::UN). It must produce BYTE-IDENTICAL output to the general
+        // (Scalar + csv-record) writer, which an EAGER Utf8 column with the same data
+        // falls to. Covers present/missing rows, empty strings, and QUOTE_MINIMAL
+        // triggers (comma / quote / CR / LF), across default + na_rep + no-header +
+        // single-column (empty-na quoting) configs.
+        let rows: Vec<Option<&str>> = vec![
+            Some("Alice"),
+            None,
+            Some("a,b"),        // comma ⇒ quoted
+            Some("he\"llo"),    // embedded quote ⇒ quoted + doubled
+            Some(""),           // present empty string
+            None,
+            Some("line\nbrk"),  // LF ⇒ quoted
+            Some("tab\tok"),    // tab (not a QUOTE_MINIMAL trigger) ⇒ unquoted
+            Some("plain"),
+        ];
+        let n = rows.len();
+
+        // Build the nullable Utf8 column two ways.
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = vec![0];
+        let mut validity = fp_columnar::ValidityMask::all_valid(n);
+        let mut eager: Vec<Scalar> = Vec::with_capacity(n);
+        for (i, r) in rows.iter().enumerate() {
+            match r {
+                Some(s) => {
+                    bytes.extend_from_slice(s.as_bytes());
+                    eager.push(Scalar::Utf8((*s).to_string()));
+                }
+                None => {
+                    validity.set(i, false);
+                    eager.push(Scalar::Null(fp_types::NullKind::Null));
+                }
+            }
+            offsets.push(bytes.len());
+        }
+
+        let mk = |name_col: Column| -> DataFrame {
+            let mut cols = std::collections::BTreeMap::new();
+            cols.insert(
+                "id".to_string(),
+                Column::from_i64_values_owned((0..n as i64).collect()),
+            );
+            cols.insert("name".to_string(), name_col);
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, n),
+                cols,
+                vec!["id".to_string(), "name".to_string()],
+            )
+            .unwrap()
+        };
+        let frame_fast = mk(Column::from_utf8_values_with_validity(
+            bytes,
+            offsets,
+            validity,
+        ));
+        let frame_general = mk(Column::from_values(eager).unwrap());
+
+        // The general frame's name column must be OFF the fast Utf8 path.
+        let ctl = frame_general.column("name").unwrap();
+        assert!(
+            ctl.as_utf8_contiguous().is_none() && ctl.as_nullable_utf8_contiguous().is_none(),
+            "control name column must be on the general writer"
+        );
+
+        for options in [
+            CsvWriteOptions::default(),
+            CsvWriteOptions {
+                na_rep: "NA".to_string(),
+                ..CsvWriteOptions::default()
+            },
+            CsvWriteOptions {
+                header: false,
+                ..CsvWriteOptions::default()
+            },
+        ] {
+            let fast = write_csv_string_with_options(&frame_fast, &options).expect("fast");
+            let general = write_csv_string_with_options(&frame_general, &options).expect("general");
+            assert_eq!(fast, general, "fast nullable-Utf8 CSV must byte-match the general writer");
+        }
+
+        // Single-column nullable Utf8 frame: exercises the empty-na `""` quoting on a
+        // missing sole field.
+        let single_fast = {
+            let mut c = std::collections::BTreeMap::new();
+            let mut b: Vec<u8> = Vec::new();
+            let mut o: Vec<usize> = vec![0];
+            let mut v = fp_columnar::ValidityMask::all_valid(n);
+            for (i, r) in rows.iter().enumerate() {
+                if let Some(s) = r {
+                    b.extend_from_slice(s.as_bytes());
+                } else {
+                    v.set(i, false);
+                }
+                o.push(b.len());
+            }
+            c.insert("name".to_string(), Column::from_utf8_values_with_validity(b, o, v));
+            DataFrame::new(Index::new_known_unique_int64_unit_range(0, n), c).unwrap()
+        };
+        let single_general = {
+            let mut c = std::collections::BTreeMap::new();
+            c.insert("name".to_string(), Column::from_values(eager_clone(&rows)).unwrap());
+            DataFrame::new(Index::new_known_unique_int64_unit_range(0, n), c).unwrap()
+        };
+        let f = write_csv_string(&single_fast).expect("fast single");
+        let g = write_csv_string(&single_general).expect("general single");
+        assert_eq!(f, g, "single-column nullable-Utf8 CSV must byte-match the general writer");
+    }
+
+    #[cfg(test)]
+    fn eager_clone(rows: &[Option<&str>]) -> Vec<Scalar> {
+        rows.iter()
+            .map(|r| match r {
+                Some(s) => Scalar::Utf8((*s).to_string()),
+                None => Scalar::Null(fp_types::NullKind::Null),
+            })
+            .collect()
     }
 
     #[test]

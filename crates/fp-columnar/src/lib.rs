@@ -6121,12 +6121,20 @@ fn count_distinct_i64_radix(data: &[i64]) -> i64 {
             continue;
         }
         let mask = cap - 1;
+        let cap_bits = cap.trailing_zeros();
         let mut keys = vec![EMPTY; cap];
         for &v in part {
             // No `i64::MIN` in `part` (sentinels excluded), so `EMPTY` is a safe
-            // empty marker. Top hash bits are constant within a partition, but the
-            // LOW bits `mask` selects still vary, so probing stays well spread.
-            let mut idx = (hashv(v) as usize) & mask;
+            // empty marker. The per-partition index takes the `cap_bits` hash bits
+            // JUST BELOW the top `LOG_P` partition bits (shift the partition bits
+            // out, then Fibonacci-select the next `cap_bits` from the top). The old
+            // `hashv(v) & mask` (LOW bits) collapsed to ONE bucket for high-bit-only
+            // keys — e.g. `v = k<<34`, whose `hashv = k·(golden<<34)` has zero low
+            // bits — turning a whole partition into an O(part.len()²) probe scan
+            // (measured 17s at 5M/2M-distinct). The below-partition bits vary within
+            // a partition for such keys, so probing stays well spread; the count is
+            // probe-order-independent, so this is bit-identical.
+            let mut idx = ((hashv(v) << LOG_P) >> (64 - cap_bits)) as usize;
             loop {
                 let k = keys[idx];
                 if k == EMPTY {
@@ -32251,6 +32259,50 @@ mod tests {
             );
             assert_eq!(col.nunique(), Scalar::Int64(expected));
             assert_eq!(col.nunique_with_dropna(false), Scalar::Int64(expected));
+        }
+
+        #[test]
+        fn count_distinct_radix_high_bit_shifted_keys_matches_reference() {
+            // Regression for the count_distinct_i64_radix per-partition hash fix:
+            // HIGH-bit-only-varying keys (k << 34) whose hashv has ZERO low bits —
+            // the old `hashv & mask` collapsed each partition to one bucket. The
+            // radix count must equal a HashSet reference AND the single-table count,
+            // across shifts that (do/don't) zero the low bits, plus i64::MIN.
+            use std::collections::HashSet;
+            let mut state: u64 = 0xF00D_CAFE_1357_2468;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for &sh in &[34u32, 40, 20, 0] {
+                for trial in 0..15 {
+                    let n = 6000 + (next() % 4000) as usize;
+                    let distinct = 800 + (next() % 3000) as i64;
+                    let mut data: Vec<i64> = (0..n)
+                        .map(|i| {
+                            if i % 700 == 0 {
+                                i64::MIN
+                            } else {
+                                (((next() % distinct as u64) as i64) - distinct / 2) << sh
+                            }
+                        })
+                        .collect();
+                    data.push(i64::MIN);
+                    let want = data.iter().copied().collect::<HashSet<i64>>().len() as i64;
+                    assert_eq!(
+                        crate::count_distinct_i64_radix(&data),
+                        want,
+                        "radix sh={sh} trial {trial}"
+                    );
+                    assert_eq!(
+                        crate::count_distinct_i64_singletable(&data),
+                        want,
+                        "singletable sh={sh} trial {trial}"
+                    );
+                }
+            }
         }
 
         #[test]

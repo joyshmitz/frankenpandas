@@ -16703,33 +16703,13 @@ impl Column {
     /// Matches `pd.Series.sem(ddof=1)`.
     #[must_use]
     pub fn sem(&self, ddof: usize) -> Scalar {
-        // Typed fast path (mirror of skew/kurt): sem == std / sqrt(n) over the
-        // finite values, computed straight off the raw Float64/Int64 buffer via
-        // typed_collect_finite_f64, skipping nansem's Vec<Scalar> materialization
-        // AND its DOUBLE collect_finite (nansem collects once for `n`, then again
-        // inside nanstd->nanvar). Bit-identical to nansem's numeric arm:
-        // collect_finite == typed_collect_finite_f64 for all-valid Float64/Int64
-        // (same filtered `nums`, same order), so the same n, the same two-pass var
-        // `sum_sq/(n-ddof)`, the same `std = var.sqrt()`, and the same `std/sqrt(n)`
-        // — including the `n <= ddof -> Null(NaN)` guard. Computed entirely off
-        // `nums` (not self.std) so a NaN-carrying all-valid Float64 column filters
-        // NaN consistently for BOTH the count and the moments. Timedelta64
-        // (typed_collect_finite_f64 -> None) keeps nansem's dtype-preserving arm;
-        // nullable Float64/Int64 (validity not all) also fall through.
-        if let Some(nums) = self.typed_collect_finite_f64() {
-            let n = nums.len();
-            if n <= ddof {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let nf = n as f64;
-            let mean = nums.iter().sum::<f64>() / nf;
-            let sum_sq: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
-            let std = (sum_sq / (n - ddof) as f64).sqrt();
-            return Scalar::Float64(std / nf.sqrt());
-        }
-        // Nullable Float64/Int64: sem = std / sqrt(n) over the PRESENT subset (n =
-        // present count), via the same two-pass moments — skipping nansem's
-        // Vec<Scalar> materialization + its DOUBLE collect_finite. Bit-identical.
+        // sem = std / sqrt(n) over the PRESENT subset (n = present count). The
+        // as_*_with_validity two-pass handles all-valid AND nullable Float64/Int64
+        // (for all-valid, validity.get is always true, so present == non-NaN,
+        // exactly collect_finite's finite filter) — a SINGLE two-pass, vs nansem's
+        // DOUBLE collect_finite (once for `n`, again in nanstd->nanvar) AND its
+        // Vec<Scalar> materialization. Bit-identical: same present values, same
+        // order ⇒ same n/mean/sum_sq, same `n <= ddof -> Null(NaN)` guard.
         if self.dtype == DType::Float64
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
         {
@@ -16749,6 +16729,20 @@ impl Column {
             }
             let std = (sum_sq / (n - ddof) as f64).sqrt();
             return Scalar::Float64(std / (n as f64).sqrt());
+        }
+        // Fallback for all-valid Float64/Int64 backings the two accessors above do
+        // NOT expose (chunked / transposed / strided variants that as_f64_slice
+        // reaches but as_f64_slice_with_validity does not). Bit-identical Vec path.
+        if let Some(nums) = self.typed_collect_finite_f64() {
+            let n = nums.len();
+            if n <= ddof {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let nf = n as f64;
+            let mean = nums.iter().sum::<f64>() / nf;
+            let sum_sq: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+            let std = (sum_sq / (n - ddof) as f64).sqrt();
+            return Scalar::Float64(std / nf.sqrt());
         }
         nansem(&self.values, ddof)
     }
@@ -16884,26 +16878,12 @@ impl Column {
     }
 
     pub fn skew(&self) -> Scalar {
-        // Typed fast path: same `nums` (collect_finite) + verbatim nanskew math,
-        // off the raw buffer (no Scalar materialization). Bit-identical.
-        if let Some(nums) = self.typed_collect_finite_f64() {
-            let n = nums.len() as f64;
-            if n < 3.0 {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let mean = nums.iter().sum::<f64>() / n;
-            let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
-            let m3: f64 = nums.iter().map(|x| (x - mean).powi(3)).sum();
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Scalar::Float64(0.0);
-            }
-            let s3 = s2.powf(1.5);
-            return Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3));
-        }
-        // Nullable Float64/Int64: same math over the PRESENT central moments,
-        // skipping nanskew's Vec<Scalar> materialization + collect_finite.
-        // Bit-identical (same present values/order ⇒ same n/m2/m3).
+        // Present central moments via a no-alloc two-pass over the raw slice +
+        // validity — handles ALL-VALID and nullable Float64/Int64 (for all-valid,
+        // validity.get is always true ⇒ present == non-NaN, exactly collect_finite's
+        // filter). Verbatim nanskew math. Bit-identical (same present values/order ⇒
+        // same n/m2/m3). This runs BEFORE the Vec-collecting fallback so the common
+        // all-valid case skips the Vec<f64> alloc + separate .map().sum() passes.
         let moments = if self.dtype == DType::Float64 {
             self.as_f64_slice_with_validity()
                 .map(|(d, v)| present_central_moments_f64(d, Some(v)))
@@ -16925,6 +16905,23 @@ impl Column {
             let s3 = s2.powf(1.5);
             return Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3));
         }
+        // Fallback for all-valid backings the accessors above don't expose (chunked/
+        // transposed/strided variants as_f64_slice reaches). Bit-identical Vec path.
+        if let Some(nums) = self.typed_collect_finite_f64() {
+            let n = nums.len() as f64;
+            if n < 3.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = nums.iter().sum::<f64>() / n;
+            let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+            let m3: f64 = nums.iter().map(|x| (x - mean).powi(3)).sum();
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            let s3 = s2.powf(1.5);
+            return Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3));
+        }
         nanskew(&self.values)
     }
 
@@ -16934,25 +16931,9 @@ impl Column {
     /// values; returns `Null(NaN)` otherwise.
     #[must_use]
     pub fn kurt(&self) -> Scalar {
-        // Typed fast path (see skew): verbatim nankurt math over the raw buffer.
-        if let Some(nums) = self.typed_collect_finite_f64() {
-            let n = nums.len() as f64;
-            if n < 4.0 {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let mean = nums.iter().sum::<f64>() / n;
-            let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
-            let m4: f64 = nums.iter().map(|x| (x - mean).powi(4)).sum();
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Scalar::Float64(0.0);
-            }
-            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
-            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
-            return Scalar::Float64(adj * (m4 / (s2 * s2)) - sub);
-        }
-        // Nullable Float64/Int64: same math over the PRESENT central moments.
-        // Bit-identical (same present values/order ⇒ same n/m2/m4).
+        // Present central moments via a no-alloc two-pass (handles ALL-VALID and
+        // nullable Float64/Int64), BEFORE the Vec-collecting fallback. Verbatim
+        // nankurt math, bit-identical (same present values/order ⇒ same n/m2/m4).
         let moments = if self.dtype == DType::Float64 {
             self.as_f64_slice_with_validity()
                 .map(|(d, v)| present_central_moments_f64(d, Some(v)))
@@ -16967,6 +16948,23 @@ impl Column {
             if n < 4.0 {
                 return Scalar::Null(NullKind::NaN);
             }
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+            return Scalar::Float64(adj * (m4 / (s2 * s2)) - sub);
+        }
+        // Fallback for all-valid backings the accessors above don't expose. Vec path.
+        if let Some(nums) = self.typed_collect_finite_f64() {
+            let n = nums.len() as f64;
+            if n < 4.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = nums.iter().sum::<f64>() / n;
+            let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+            let m4: f64 = nums.iter().map(|x| (x - mean).powi(4)).sum();
             let s2 = m2 / (n - 1.0);
             if s2 == 0.0 {
                 return Scalar::Float64(0.0);

@@ -17976,6 +17976,34 @@ impl Column {
         if let Some(data) = self.as_i64_slice() {
             return Self::quantile_from_f64_vec(data.iter().map(|&v| v as f64).collect(), q);
         }
+        // Nullable Float64/Int64 (sibling of nullable `median`): collect the PRESENT
+        // values (validity-set AND non-NaN for Float64 — exactly collect_finite's
+        // drop-missing; validity bit for Int64) into an f64 Vec and run the SAME
+        // quantile_from_f64_vec, skipping nanquantile's Vec<Scalar> materialization +
+        // per-Scalar to_f64. Bit-identical: quantile is order-independent (select_nth),
+        // so the present multiset alone determines it; empty present ⇒
+        // quantile_from_f64_vec's empty ⇒ Null(NaN), matching nanquantile. The
+        // dtype gates leave Timedelta64's dtype-preserving nanquantile arm untouched.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let present: Vec<f64> = data
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &x)| (validity.get(i) && !x.is_nan()).then_some(x))
+                .collect();
+            return Self::quantile_from_f64_vec(present, q);
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let present: Vec<f64> = data
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &v)| validity.get(i).then_some(v as f64))
+                .collect();
+            return Self::quantile_from_f64_vec(present, q);
+        }
         nanquantile(&self.values, q)
     }
 
@@ -32493,6 +32521,71 @@ mod tests {
                         bit_eq(&col.median(), &fp_types::nanmedian(&vals)),
                         "median trial {trial}"
                     );
+                }
+            }
+        }
+
+        #[test]
+        fn quantile_nullable_typed_match_nan_reference() {
+            // Typed nullable Int64/Float64 quantile (collect present ⇒ quantile_from_
+            // f64_vec) must be BIT-EXACT to nanquantile across q values. Float64 also
+            // carries valid-bit-set NaN (dropped by the `!x.is_nan()` filter, exactly
+            // collect_finite's is_missing-drops-NaN). all-missing/empty ⇒ Null(NaN);
+            // out-of-range q ⇒ Null(NaN). Interpolation exercised via non-boundary q.
+            let mut state: u64 = 0x5EED_9A1C_0FF1_3357;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            let qs = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, 0.333, -0.1, 1.5];
+            for trial in 0..250 {
+                let n = (next() % 250) as usize;
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 500) as i64 - 250
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else if r % 5 == 1 {
+                            // valid-bit-set NaN: present per validity, dropped as
+                            // non-finite by both collect_finite and the typed filter.
+                            f64::NAN
+                        } else {
+                            (r % 500) as f64 - 250.0
+                        }
+                    })
+                    .collect();
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                for col in [&i_all, &i_null, &f_null] {
+                    let vals = col.values().to_vec();
+                    for &q in &qs {
+                        assert!(
+                            bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
+                            "quantile trial {trial} q {q}"
+                        );
+                    }
                 }
             }
         }

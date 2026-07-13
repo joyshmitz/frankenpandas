@@ -15167,3 +15167,42 @@ rustfmt, and `git diff --check` are green. The first dependency-linting clippy r
 preflight, and the unchanged converged retry passed. No local Cargo command ran. The mandatory static-only UBS scan reported
 three pre-existing whole-file false positives in distant code—two Datetime dtype comparisons labeled secret comparisons and
 the internal integer `decode` helper labeled JWT decode—with no finding on the changed dtype-presence gate.
+
+### 2026-07-13 MagentaOak — WIN: `date_range` retains validated Datetime64 affine backing — 225.6x p50
+
+Negative-ledger-first routing excluded the already-landed affine lookup families and found no prior `date_range` keep or
+rejection. The constructor still expanded every validated range into a `Vec<i64>` and then converted that into a second
+`Vec<IndexLabel>`, even though `fp-index` already has a lazy `Int64AffineLabels` representation for Datetime64 indexes. An
+untouched strict-remote baseline for one million one-second timestamps took 2,278,204 ns and confirmed construction itself
+was the hot path.
+
+One lever (`br-frankenpandas-p2k7c`) sends the already validated `(start, frequency, count)` triple directly to
+`Index::from_datetime64_affine_range`. Parameter-count validation, timestamp parsing, start/end backfill, endpoint
+rounding, checked final-offset arithmetic, overflow errors, empty-range behavior, and name assignment all remain before or
+after the same materialization boundary. Label ordering and equality are unchanged; the path has no floating-point or RNG
+behavior, and it does not alter null/NaN semantics.
+
+Strict remote-only same-worker, same-binary A/B on `vmi1227854` used one million timestamps, 25 measured samples after
+three warmups, and alternating arm order. The reference arm conservatively recreates the old eager `Vec<i64>` plus
+`Index::from_datetime64` construction; the candidate arm runs the full public `date_range` parser and validator. Both arms
+black-box the complete returned Index.
+
+| percentile | eager reference | affine candidate | reference/candidate |
+| --- | ---: | ---: | ---: |
+| p50 | 2,191,855 ns | 9,715 ns | **225.6155x** |
+| p95 | 3,078,562 ns | 11,177 ns | **275.4372x** |
+| p99 | 4,232,201 ns | 11,518 ns | **367.4424x** |
+
+The p50 reduction is **99.5568%**. Exact eager-label parity covers start+end with an unaligned multi-day frequency,
+end+periods, zero periods, name retention, and the lazy-to-materialized transition. The full strict-remote `fp-index`
+library suite is **529 passed / 0 failed / 1 ignored**. Six targeted `fp-conformance` date-range test functions executed,
+but every live pandas comparison was skipped because the remote legacy-oracle root was absent. A fail-closed system-pandas
+attempt first surfaced a peer manifest race and then showed that the wrapper did not propagate the requested oracle env
+flags, so this is explicitly not claimed as a differential-oracle pass.
+
+Validation: strict-remote workspace `cargo check -j 1 --workspace --all-targets` is green with only two known unused
+`Scalar` warnings in peer-owned `fp-columnar`; focused `fp-index --all-targets --no-deps -D warnings` clippy is clean on
+`vmi1152480`. Pinned rustfmt and `git diff --check` are green. Every Cargo invocation used fail-closed RCH remote execution;
+no local Cargo command ran. The mandatory static-only UBS scan reports **0 critical** findings. Its first pass exposed and
+prompted a fix for a benchmark-only zero-sample percentile panic; the clean rerun contains only the broad existing
+whole-file inventory and no focused finding on the production affine-construction arm.

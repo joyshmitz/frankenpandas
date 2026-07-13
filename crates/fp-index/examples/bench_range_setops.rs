@@ -26,10 +26,12 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_diff
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_join
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_isin
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 25 date_range
 
 use std::{hint::black_box, time::Instant};
 
-use fp_index::{Index, IndexLabel, RangeIndex};
+use fp_index::{Index, IndexLabel, RangeIndex, date_range};
+use fp_types::Timedelta;
 use rustc_hash::FxHashMap;
 
 fn best_ns(iters: usize, mut f: impl FnMut() -> usize) -> (u128, usize) {
@@ -45,6 +47,52 @@ fn best_ns(iters: usize, mut f: impl FnMut() -> usize) -> (u128, usize) {
         best = best.min(elapsed);
     }
     (best, sink)
+}
+
+fn paired_percentiles_ns(
+    iters: usize,
+    mut reference: impl FnMut() -> usize,
+    mut candidate: impl FnMut() -> usize,
+) -> ((u128, u128, u128), (u128, u128, u128), usize) {
+    let mut sink = 0usize;
+    for _ in 0..3 {
+        sink ^= black_box(reference());
+        sink ^= black_box(candidate());
+    }
+    let mut reference_samples = Vec::with_capacity(iters);
+    let mut candidate_samples = Vec::with_capacity(iters);
+    for iteration in 0..iters {
+        let mut measure = |f: &mut dyn FnMut() -> usize, samples: &mut Vec<u128>| {
+            let started = Instant::now();
+            sink ^= black_box(f());
+            samples.push(started.elapsed().as_nanos());
+        };
+        if iteration % 2 == 0 {
+            measure(&mut reference, &mut reference_samples);
+            measure(&mut candidate, &mut candidate_samples);
+        } else {
+            measure(&mut candidate, &mut candidate_samples);
+            measure(&mut reference, &mut reference_samples);
+        }
+    }
+    reference_samples.sort_unstable();
+    candidate_samples.sort_unstable();
+    let percentiles = |samples: &[u128]| {
+        let Some(&maximum) = samples.last() else {
+            return (0, 0, 0);
+        };
+        let last = samples.len() - 1;
+        (
+            samples.get(last / 2).copied().unwrap_or(maximum),
+            samples.get(last * 95 / 100).copied().unwrap_or(maximum),
+            maximum,
+        )
+    };
+    (
+        percentiles(&reference_samples),
+        percentiles(&candidate_samples),
+        sink,
+    )
 }
 
 fn ranges(n: usize, scenario: &str) -> (RangeIndex, RangeIndex) {
@@ -454,6 +502,44 @@ fn main() {
         .get(4)
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
+    if scenario == "date_range" {
+        let reference = || {
+            let nanos = (0..n)
+                .map(|offset| {
+                    i64::try_from(offset)
+                        .expect("offset fits i64")
+                        .checked_mul(Timedelta::NANOS_PER_SEC)
+                        .expect("benchmark timestamp fits i64")
+                })
+                .collect();
+            let index = Index::from_datetime64(nanos).set_name("timestamp");
+            black_box(&index);
+            index.len() ^ index.name().map_or(0, str::len)
+        };
+        let candidate = || {
+            let index = date_range(
+                Some("1970-01-01"),
+                None,
+                Some(n),
+                Timedelta::NANOS_PER_SEC,
+                Some("timestamp"),
+            )
+            .expect("valid benchmark date range");
+            black_box(&index);
+            index.len() ^ index.name().map_or(0, str::len)
+        };
+        let (reference_ns, candidate_ns, sink) = paired_percentiles_ns(iters, reference, candidate);
+        println!(
+            "date_range n={n} reference_p50_ns={} reference_p95_ns={} reference_p99_ns={} candidate_p50_ns={} candidate_p95_ns={} candidate_p99_ns={} sink={sink}",
+            reference_ns.0,
+            reference_ns.1,
+            reference_ns.2,
+            candidate_ns.0,
+            candidate_ns.1,
+            candidate_ns.2,
+        );
+        return;
+    }
     if scenario == "searchsorted" {
         let n_i64 = i64::try_from(n).expect("n fits i64");
         let index = RangeIndex::new(0, n_i64 * 2, 2).expect("valid search range");

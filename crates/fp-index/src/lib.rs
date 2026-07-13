@@ -16169,15 +16169,8 @@ pub fn date_range(
         .checked_add(last_offset)
         .ok_or(DateRangeError::InvalidRange)?;
 
-    let nanos: Vec<i64> = (0..count)
-        .map(|i| {
-            let offset = checked_date_range_offset(i, freq)?;
-            start_val
-                .checked_add(offset)
-                .ok_or(DateRangeError::InvalidRange)
-        })
-        .collect::<Result<_, _>>()?;
-    let mut idx = Index::from_datetime64(nanos);
+    let mut idx = Index::from_datetime64_affine_range(start_val, freq, count)
+        .ok_or(DateRangeError::InvalidRange)?;
     if let Some(n) = name {
         idx = idx.set_name(n);
     }
@@ -19235,6 +19228,87 @@ mod tests {
         )
         .expect_err("start + end + periods with explicit freq must fail closed");
         assert!(matches!(err, DateRangeError::TooManyParams));
+    }
+
+    #[test]
+    fn date_range_keeps_validated_labels_lazy_until_observed() {
+        let index = date_range(
+            Some("2024-01-01"),
+            None,
+            Some(3),
+            Timedelta::NANOS_PER_DAY,
+            Some("timestamp"),
+        )
+        .unwrap();
+        assert_eq!(
+            index.labels.datetime64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 1_704_067_200_000_000_000,
+                step: Timedelta::NANOS_PER_DAY,
+                len: 3,
+            })
+        );
+        assert!(index.labels.materialized.get().is_none());
+        assert_eq!(index.name(), Some("timestamp"));
+        assert_eq!(
+            index.labels(),
+            &[
+                IndexLabel::Datetime64(1_704_067_200_000_000_000),
+                IndexLabel::Datetime64(1_704_153_600_000_000_000),
+                IndexLabel::Datetime64(1_704_240_000_000_000_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn date_range_affine_matches_eager_labels_for_each_parameter_form() {
+        let expected = |start: i64, step: i64, len: usize| {
+            (0..len)
+                .map(|offset| {
+                    IndexLabel::Datetime64(
+                        start + i64::try_from(offset).expect("small test offset fits i64") * step,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let start = 1_704_067_200_000_000_000;
+
+        let start_end = date_range(
+            Some("2024-01-01"),
+            Some("2024-01-06"),
+            None,
+            2 * Timedelta::NANOS_PER_DAY,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            start_end.labels(),
+            expected(start, 2 * Timedelta::NANOS_PER_DAY, 3)
+        );
+
+        let end_periods = date_range(
+            None,
+            Some("2024-01-01 02:00:00"),
+            Some(3),
+            Timedelta::NANOS_PER_HOUR,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            end_periods.labels(),
+            expected(start, Timedelta::NANOS_PER_HOUR, 3)
+        );
+
+        let empty = date_range(
+            Some("2024-01-01"),
+            None,
+            Some(0),
+            Timedelta::NANOS_PER_DAY,
+            Some("empty"),
+        )
+        .unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.name(), Some("empty"));
     }
 
     #[test]

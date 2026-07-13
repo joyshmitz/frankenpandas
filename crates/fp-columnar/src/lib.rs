@@ -15027,6 +15027,42 @@ impl Column {
             return Ok(Self::from_bool_values(out));
         }
 
+        // Typed nullable Utf8 fast path: a `LazyNullableUtf8` column (a string column
+        // WITH missing rows — the common `df[col].fillna("x")` shape) with a Utf8 fill.
+        // The generic loop below materializes a `Vec<Scalar::Utf8>` and clones a heap
+        // `String` per PRESENT row plus the fill per MISSING row. Build the filled output
+        // as ONE contiguous byte buffer from the raw spans (present) / fill bytes
+        // (missing) — no per-row `String` alloc. Every output slot is filled, so the
+        // result is all-valid contiguous Utf8. Bit-identical to the loop: present ⇒
+        // `Scalar::Utf8(span)`, missing ⇒ `Scalar::Utf8(fill)`. No cold-cache gate — the
+        // contiguous build beats the per-row `String` clones even on a warm column (like
+        // take_positions / sort_values), not just materialization avoidance. A missing
+        // fill keeps nulls, so its post-cast scalar is not `Scalar::Utf8` and it falls to
+        // the generic path.
+        if let Scalar::Utf8(fill) = &cast_fill
+            && let ScalarValues::LazyNullableUtf8 {
+                bytes,
+                offsets,
+                validity,
+                ..
+            } = &self.values
+        {
+            let fill_bytes = fill.as_bytes();
+            let n = offsets.len().saturating_sub(1);
+            let mut out_bytes: Vec<u8> = Vec::with_capacity(bytes.len() + fill_bytes.len() * n);
+            let mut out_offsets: Vec<usize> = Vec::with_capacity(n + 1);
+            out_offsets.push(0);
+            for (i, w) in offsets.windows(2).enumerate() {
+                if validity.get(i) {
+                    out_bytes.extend_from_slice(&bytes[w[0]..w[1]]);
+                } else {
+                    out_bytes.extend_from_slice(fill_bytes);
+                }
+                out_offsets.push(out_bytes.len());
+            }
+            return Ok(Self::from_utf8_contiguous(out_bytes, out_offsets));
+        }
+
         let values = self
             .values
             .iter()
@@ -29699,6 +29735,61 @@ mod tests {
             assert_eq!(result.values()[2], Scalar::Int64(3));
             assert_eq!(result.values()[3], Scalar::Int64(0));
             assert_eq!(result.validity().count_valid(), 4);
+        }
+
+        #[test]
+        fn fillna_nullable_utf8_typed_matches_generic() {
+            // The typed nullable-Utf8 fillna arm (LazyNullableUtf8 + Utf8 fill) must be
+            // BIT-EXACT to the generic clone-fill path. A/B on identical data: col_typed
+            // (LazyNullableUtf8) exercises the typed arm; col_eager (from_values, Eager)
+            // falls to the generic path. Seeded short strings over {a,b,c,d} + ~25% nulls;
+            // fill values incl. empty string; also a missing fill (keeps nulls, generic).
+            let mut state: u64 = 0xF117_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 250) as usize;
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                let mut eager: Vec<Scalar> = Vec::with_capacity(n);
+                for i in 0..n {
+                    if next() % 4 == 0 {
+                        validity.set(i, false);
+                        eager.push(Scalar::Null(NullKind::Null));
+                    } else {
+                        let len = (next() % 5) as usize;
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                        eager.push(Scalar::Utf8(s));
+                    }
+                    offsets.push(bytes.len());
+                }
+                let col_typed = Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let col_eager = Column::new(DType::Utf8, eager).expect("eager utf8");
+                // Confirm the eager column is OFF the typed path (generic oracle).
+                if col_typed.as_nullable_utf8_contiguous().is_some() {
+                    assert!(
+                        col_eager.as_nullable_utf8_contiguous().is_none(),
+                        "eager fixture must be on the generic fillna path"
+                    );
+                }
+                for fill in [
+                    Scalar::Utf8("Unknown".to_string()),
+                    Scalar::Utf8(String::new()),
+                    Scalar::Null(NullKind::Null), // keeps nulls; both paths generic
+                ] {
+                    let a = col_typed.fillna(&fill).expect("typed fillna");
+                    let b = col_eager.fillna(&fill).expect("eager fillna");
+                    assert_eq!(a.values(), b.values(), "trial {trial} fill {fill:?}");
+                }
+            }
         }
 
         #[test]

@@ -6466,34 +6466,55 @@ fn duplicated_first_i64_wide(data: &[i64]) -> Vec<bool> {
 /// bit-identical to the generic `unique`. The empty sentinel `i64::MIN` is the
 /// `-0.0` bit pattern, which no normalized key can equal (−0.0 normalizes to
 /// +0.0), so it never collides.
+// GROWABLE open-addressing + FIBONACCI hashing (same fix as `mode_f64_wide`): the
+// old fixed cap ≈ 1.5·n is a huge SPARSE membership table (cache miss per probe)
+// for few-distinct data, and `(kb·GOLDEN) & mask` keeps the LOW product bits,
+// which vanish for float-of-integer keys (their variation is in the HIGH to_bits()
+// bits) → one bucket → long probe chains. Grow from small (double at load 0.7) so
+// the table sizes to the distinct count, and Fibonacci `>> (64 - log2 cap)` uses
+// the HIGH bits. Byte-identical output: `out` is the first-seen dedup order, which
+// depends only on membership (unaffected by table size), so growth never reorders.
 fn unique_f64_wide(data: &[f64]) -> Vec<f64> {
     const EMPTY: i64 = i64::MIN;
+    const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+    let n = data.len();
     let mut out: Vec<f64> = Vec::new();
-    let cap = data
-        .len()
-        .saturating_add(data.len() / 2)
-        .checked_next_power_of_two()
-        .unwrap_or(0);
-    if cap == 0 {
-        let mut seen: FxHashSet<u64> = FxHashSet::default();
-        for &f in data {
-            let kb = (if f == 0.0 { 0.0 } else { f }).to_bits();
-            if seen.insert(kb) {
-                out.push(f);
-            }
-        }
+    if n == 0 {
         return out;
     }
-    let mask = cap - 1;
+    // >= 2 so `shift = 64 - log2(cap)` <= 63 (a 64-bit `>>` is invalid).
+    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
+    let mut filled = 0usize;
     for &f in data {
+        if filled * 10 >= cap * 7 {
+            let ncap = cap * 2;
+            let nshift = 64 - ncap.trailing_zeros();
+            let nmask = ncap - 1;
+            let mut nkeys = vec![EMPTY; ncap];
+            for p in 0..cap {
+                if keys[p] != EMPTY {
+                    let mut q = ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+                    while nkeys[q] != EMPTY {
+                        q = (q + 1) & nmask;
+                    }
+                    nkeys[q] = keys[p];
+                }
+            }
+            keys = nkeys;
+            cap = ncap;
+            shift = nshift;
+        }
+        let mask = cap - 1;
         let kb = (if f == 0.0 { 0.0 } else { f }).to_bits() as i64;
-        let mut p = ((kb as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        let mut p = ((kb as u64).wrapping_mul(GOLDEN) >> shift) as usize;
         loop {
             let k = keys[p];
             if k == EMPTY {
                 keys[p] = kb;
                 out.push(f);
+                filled += 1;
                 break;
             }
             if k == kb {
@@ -6505,26 +6526,21 @@ fn unique_f64_wide(data: &[f64]) -> Vec<f64> {
     out
 }
 
+/// Int64 sibling of [`unique_f64_wide`]. `i64::MIN` is the empty sentinel, tracked
+/// separately so a real `i64::MIN` dedups correctly (and keeps its first-seen slot).
 fn unique_i64_wide(data: &[i64]) -> Vec<i64> {
     const EMPTY: i64 = i64::MIN;
+    const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+    let n = data.len();
     let mut out: Vec<i64> = Vec::new();
-    let cap = data
-        .len()
-        .saturating_add(data.len() / 2)
-        .checked_next_power_of_two()
-        .unwrap_or(0);
-    if cap == 0 {
-        let mut set: FxHashSet<i64> = FxHashSet::default();
-        for &v in data {
-            if set.insert(v) {
-                out.push(v);
-            }
-        }
+    if n == 0 {
         return out;
     }
-    let mask = cap - 1;
+    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut seen_sentinel = false;
+    let mut filled = 0usize;
     for &v in data {
         if v == EMPTY {
             if !seen_sentinel {
@@ -6533,12 +6549,32 @@ fn unique_i64_wide(data: &[i64]) -> Vec<i64> {
             }
             continue;
         }
-        let mut idx = ((v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        if filled * 10 >= cap * 7 {
+            let ncap = cap * 2;
+            let nshift = 64 - ncap.trailing_zeros();
+            let nmask = ncap - 1;
+            let mut nkeys = vec![EMPTY; ncap];
+            for p in 0..cap {
+                if keys[p] != EMPTY {
+                    let mut q = ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+                    while nkeys[q] != EMPTY {
+                        q = (q + 1) & nmask;
+                    }
+                    nkeys[q] = keys[p];
+                }
+            }
+            keys = nkeys;
+            cap = ncap;
+            shift = nshift;
+        }
+        let mask = cap - 1;
+        let mut idx = ((v as u64).wrapping_mul(GOLDEN) >> shift) as usize;
         loop {
             let k = keys[idx];
             if k == EMPTY {
                 keys[idx] = v;
                 out.push(v);
+                filled += 1;
                 break;
             }
             if k == v {
@@ -28018,6 +28054,78 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(got, expected);
+            }
+        }
+
+        #[test]
+        fn unique_wide_growable_fibonacci_rehash_matches_first_seen_reference() {
+            // Regression for the unique_{f64,i64}_wide fix: many distinct WIDE /
+            // high-bit-varying keys (> 1024 ⇒ multiple growable-table rehashes) — the
+            // case the old low-bit `& mask` hash clustered — must keep BYTE-IDENTICAL
+            // first-seen dedup order vs a HashSet reference. i64 also mixes i64::MIN.
+            use std::collections::HashSet;
+            let mut state: u64 = 0x2468_ACE0_1357_9BDF;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..40 {
+                let distinct = 2000 + (next() % 800) as i64;
+                let n = 12_000usize;
+                // i64: high-bit-only variation (k << 34), plus i64::MIN sentinel.
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        if i % 500 == 0 {
+                            i64::MIN
+                        } else {
+                            (((next() % distinct as u64) as i64) - distinct / 2) << 34
+                        }
+                    })
+                    .collect();
+                // f64: float-of-integer (variation in the HIGH to_bits() bits).
+                let fdata: Vec<f64> = (0..n)
+                    .map(|_| (next() % distinct as u64) as f64)
+                    .collect();
+                assert!(crate::i64_direct_address_range(&idata).is_none());
+
+                let mut iseen: HashSet<i64> = HashSet::new();
+                let iexp: Vec<i64> = idata
+                    .iter()
+                    .filter_map(|&v| iseen.insert(v).then_some(v))
+                    .collect();
+                let mut fseen: HashSet<u64> = HashSet::new();
+                let fexp: Vec<u64> = fdata
+                    .iter()
+                    .filter_map(|&f| {
+                        let kb = (if f == 0.0 { 0.0 } else { f }).to_bits();
+                        fseen.insert(kb).then_some(f.to_bits())
+                    })
+                    .collect();
+
+                let igot: Vec<i64> = Column::from_i64_values_owned(idata)
+                    .unique()
+                    .expect("unique")
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Int64(x) => *x,
+                        o => panic!("not i64: {o:?}"),
+                    })
+                    .collect();
+                let fgot: Vec<u64> = Column::from_f64_values(fdata)
+                    .unique()
+                    .expect("unique")
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Float64(x) => x.to_bits(),
+                        o => panic!("not f64: {o:?}"),
+                    })
+                    .collect();
+                assert_eq!(igot, iexp, "i64 trial {trial}");
+                assert_eq!(fgot, fexp, "f64 trial {trial}");
             }
         }
 

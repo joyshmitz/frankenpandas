@@ -15,6 +15,7 @@ fn main() {
     let g: i64 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
     let op = a.get(3).map(String::as_str).unwrap_or("idxmax");
     let it: usize = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(6);
+    let dtype = a.get(5).map(String::as_str).unwrap_or("f64");
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
     let keys = Series::new(
         "k".to_string(),
@@ -22,12 +23,12 @@ fn main() {
         Column::from_i64_values((0..n).map(|i| (sm(i, 0) as u64 as i64) % g).collect()),
     )
     .unwrap();
-    let vs = Series::new(
-        "a".to_string(),
-        Index::new(labels),
-        Column::from_f64_values((0..n).map(|i| sm(i, 1)).collect()),
-    )
-    .unwrap();
+    let values = if dtype == "i64" {
+        Column::from_i64_values((0..n).map(|i| sm(i, 1) as i64).collect())
+    } else {
+        Column::from_f64_values((0..n).map(|i| sm(i, 1)).collect())
+    };
+    let vs = Series::new("a".to_string(), Index::new(labels), values).unwrap();
     let mut best = u128::MAX;
     for _ in 0..it {
         let t = Instant::now();
@@ -51,5 +52,5 @@ fn main() {
             best = e;
         }
     }
-    println!("{op} n={n} g={g}: best={best}ns");
+    println!("{op} dtype={dtype} n={n} g={g}: best={best}ns");
 }

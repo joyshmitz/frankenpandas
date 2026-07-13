@@ -14901,3 +14901,39 @@ its sole failure was an RCH-shared-workspace artifact claiming the remote `Cargo
 lockfile does not. The exact supply-chain policy rerun on a clean `vmi1167313` workspace passed **1/1**, completing the 1596-test
 proof. Package fmt and `git diff --check` are green. The mandatory bounded UBS scan hit the documented 180-second
 `fp-frame/src/lib.rs` timeout without emitting a focused finding.
+
+### 2026-07-12 MagentaOak — WIN: all-valid Int64 `SeriesGroupBy::{idxmin,idxmax}` dense scan — 14.39x FP-side
+
+Negative-ledger-first routing started from the existing Float64-only dense extrema row and its explicit note that non-f64
+values still used `agg_scalar`. The older exact-i64 extrema experiment was not retried: the established generic contract casts
+`Scalar::Int64` through `to_f64()` before comparing. This lever preserves that contract, including rounded ties above 2^53,
+while widening the existing sequential dense-group scan to all-valid Int64 value storage.
+
+The old path built scalar values and revisited the million-row value column through each group's scattered row positions. The
+candidate reads the raw i64 slice once in row order, casts each value to f64 at the comparison point, and reuses the existing
+first-row-wins accumulator and output construction. Nullable values, non-numeric values, and non-dense Int64 keys continue to
+fall back unchanged. The durable `bench_gb_misc2` example now accepts an `i64` dtype argument.
+
+Strict remote-only same-binary A/B on `vmi1227854` used 1,000,000 rows, 1,000 dense Int64 groups, and 15 alternating-order
+iterations under `release-perf`. A scratch-only series-name gate selected the former generic path and was removed before
+validation:
+
+| arm | p50 | p95/p99 | best |
+| --- | ---: | ---: | ---: |
+| reference generic scalar path | 65.485 ms | 87.747 ms | 55.159 ms |
+| candidate typed sequential scan | 4.551 ms | 5.182 ms | 3.692 ms |
+
+Reference/candidate = **14.389x at p50** (93.05% latency reduction), **16.935x at p95/p99**, and **14.942x best-to-best**.
+The p95 and p99 select the same sample at this quick-run size. An earlier strict-remote baseline/candidate pair on different
+workers measured 64.235 ms and 4.516 ms; it was treated only as routing evidence, not ship proof.
+
+Correctness: the focused strict-remote parity test is **1/1 green** on `vmi1293453`. It compares dense typed results against
+the forced generic route for both `idxmin` and `idxmax`, with positive and negative adjacent Int64 values above 2^53, locking
+the existing f64 rounding, tie, group-order, and original-index-label behavior. The first test dispatch found no admissible RCH
+worker and refused local fallback; the successful retry remained remote-only.
+
+Validation: strict-remote workspace `cargo check --workspace --all-targets` is green on `vmi1149989`; focused `fp-frame` lib
+clippy is green there with only the two pre-existing `question_mark` findings allowed; full `fp-conformance --lib` is
+**1596/1596 green** on `vmi1153651`; package formatting and `git diff --check` are green. The mandatory 180-second UBS scan
+used static-only mode because compile gates were already remote-only, hit the documented `fp-frame/src/lib.rs` timeout, and
+emitted no focused finding before timing out.

@@ -5791,6 +5791,79 @@ fn nullable_rank_values<T: PartialEq>(
     (ranks, validity)
 }
 
+/// Typed nullable cumulative extrema (cummax/cummin) over an f64 slice + validity,
+/// reproducing `nancummax`/`nancummin` WITHOUT materializing the `Vec<Scalar>`.
+/// A slot is present iff validity-set AND non-NaN (a valid-bit NaN is missing per
+/// `Scalar::is_missing`, exactly `nancummax`'s `Ok(x) if !x.is_nan()` gate): a
+/// present slot advances `running` (max/min) and emits it; a missing slot emits
+/// `Null(NaN)` and leaves `running` unchanged. Output is Float64 with the missing
+/// slots invalid — byte-identical to the generic path.
+fn cum_extrema_nullable_f64(
+    data: &[f64],
+    validity: &ValidityMask,
+    is_max: bool,
+) -> (Vec<f64>, ValidityMask) {
+    let n = data.len();
+    let mut out = vec![0.0_f64; n];
+    let mut out_valid = ValidityMask::all_valid(n);
+    let mut running: Option<f64> = None;
+    for i in 0..n {
+        let x = data[i];
+        if validity.get(i) && !x.is_nan() {
+            let nv = match running {
+                Some(p) => {
+                    if is_max {
+                        p.max(x)
+                    } else {
+                        p.min(x)
+                    }
+                }
+                None => x,
+            };
+            running = Some(nv);
+            out[i] = nv;
+        } else {
+            out_valid.set(i, false);
+        }
+    }
+    (out, out_valid)
+}
+
+/// Int64 sibling of [`cum_extrema_nullable_f64`]: present iff validity-set (Int64
+/// has no NaN sentinel), running folds `data[i] as f64` (matching `nancummax`'s
+/// `to_f64()` on `Int64(v)`), output Float64 (as the all-valid Int64 arm already
+/// emits) with missing slots invalid.
+fn cum_extrema_nullable_i64(
+    data: &[i64],
+    validity: &ValidityMask,
+    is_max: bool,
+) -> (Vec<f64>, ValidityMask) {
+    let n = data.len();
+    let mut out = vec![0.0_f64; n];
+    let mut out_valid = ValidityMask::all_valid(n);
+    let mut running: Option<f64> = None;
+    for i in 0..n {
+        if validity.get(i) {
+            let x = data[i] as f64;
+            let nv = match running {
+                Some(p) => {
+                    if is_max {
+                        p.max(x)
+                    } else {
+                        p.min(x)
+                    }
+                }
+                None => x,
+            };
+            running = Some(nv);
+            out[i] = nv;
+        } else {
+            out_valid.set(i, false);
+        }
+    }
+    (out, out_valid)
+}
+
 fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Column, ColumnError> {
     if !matches!(keep, "first" | "last" | "all") {
         return Err(ColumnError::Type(TypeError::NonNumericValue {
@@ -14592,6 +14665,23 @@ impl Column {
             }
             return Ok(Self::from_f64_values(Vec::new()));
         }
+        // Nullable Int64/Float64: the all-valid arms above bailed on the missing
+        // bit, so these fell to nancummax over the materialized Vec<Scalar>. Fold
+        // the raw slice + validity typed (present ⇒ running max, missing/NaN ⇒
+        // Null(NaN)), skipping the input Scalar materialization AND the Scalar
+        // output. Bit-identical to nancummax.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let (out, out_valid) = cum_extrema_nullable_f64(data, validity, true);
+            return Ok(Self::from_f64_values_with_validity(out, out_valid));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let (out, out_valid) = cum_extrema_nullable_i64(data, validity, true);
+            return Ok(Self::from_f64_values_with_validity(out, out_valid));
+        }
         let out = nancummax(&self.values);
         Self::new(DType::Float64, out)
     }
@@ -14624,6 +14714,20 @@ impl Column {
                 return Ok(Self::from_f64_values_owned(out));
             }
             return Ok(Self::from_f64_values(Vec::new()));
+        }
+        // Nullable Int64/Float64 (symmetric to cummax): typed running min over the
+        // raw slice + validity, skipping the Scalar materialization.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let (out, out_valid) = cum_extrema_nullable_f64(data, validity, false);
+            return Ok(Self::from_f64_values_with_validity(out, out_valid));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let (out, out_valid) = cum_extrema_nullable_i64(data, validity, false);
+            return Ok(Self::from_f64_values_with_validity(out, out_valid));
         }
         let out = nancummin(&self.values);
         Self::new(DType::Float64, out)
@@ -28127,6 +28231,89 @@ mod tests {
             assert_eq!(mx.values()[4], Scalar::Float64(5.0));
             let mn = col.cummin().expect("cummin");
             assert_eq!(mn.values()[4], Scalar::Float64(1.0));
+        }
+
+        #[test]
+        fn cummax_cummin_nullable_typed_matches_nancum_reference() {
+            // The nullable Int64/Float64 cummax/cummin typed paths must be
+            // BYTE-IDENTICAL to the generic nancummax/nancummin (running extremum
+            // over present values, Null(NaN) at missing). Null-missing only (no
+            // present-NaN) so the Scalars compare structurally. Typed backings via
+            // from_*_with_validity ⇒ the typed arm fires. Deterministic LCG.
+            fn reference(vals: &[Scalar], is_max: bool) -> Vec<Scalar> {
+                let mut running: Option<f64> = None;
+                vals.iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            return Scalar::Null(fp_types::NullKind::NaN);
+                        }
+                        match v.to_f64() {
+                            Ok(x) if !x.is_nan() => {
+                                let nv = match running {
+                                    Some(p) => {
+                                        if is_max {
+                                            p.max(x)
+                                        } else {
+                                            p.min(x)
+                                        }
+                                    }
+                                    None => x,
+                                };
+                                running = Some(nv);
+                                Scalar::Float64(nv)
+                            }
+                            _ => Scalar::Null(fp_types::NullKind::NaN),
+                        }
+                    })
+                    .collect()
+            }
+            let mut state: u64 = 0xCADE_1357_2468_ABCD;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..150 {
+                let n = (next() % 300) as usize + 1;
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 41) as i64 - 20
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else {
+                            ((r % 41) as f64 - 20.0) / 3.0
+                        }
+                    })
+                    .collect();
+                let icol = Column::from_i64_values_with_validity(idata, vi);
+                let fcol = Column::from_f64_values_with_validity(fdata, vf);
+                for (col, tag) in [(&icol, "i64"), (&fcol, "f64")] {
+                    let vals = col.values().to_vec();
+                    assert_eq!(
+                        col.cummax().expect("cummax").values(),
+                        reference(&vals, true).as_slice(),
+                        "{tag} cummax trial {trial}"
+                    );
+                    assert_eq!(
+                        col.cummin().expect("cummin").values(),
+                        reference(&vals, false).as_slice(),
+                        "{tag} cummin trial {trial}"
+                    );
+                }
+            }
         }
 
         #[test]

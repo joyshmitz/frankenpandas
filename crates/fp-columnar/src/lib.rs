@@ -15243,6 +15243,42 @@ impl Column {
             return Ok(Self::from_utf8_contiguous(out_bytes, out_offsets));
         }
 
+        // Typed nullable temporal fillna: a `LazyNullableDatetime64` / `LazyNullableTimedelta64`
+        // column (the common `df["date"].fillna(default)` shape — a temporal column WITH missing
+        // rows) and a matching NON-NaT temporal fill. The generic loop below materializes a
+        // `Vec<Scalar::Datetime64/Timedelta64>` (32 B/row) just to clone present values + the fill
+        // for missing. Build the filled i64-ns buffer directly: a present slot (validity set AND
+        // not the NaT sentinel — exactly the materialized `!is_missing`) keeps `data[i]`, a missing
+        // slot takes the fill ns. Every slot is filled ⇒ all-valid output. Bit-identical to the
+        // loop: present ⇒ the same value, missing ⇒ the fill, dtype unchanged. A NaT fill keeps
+        // nulls (its post-cast scalar IS missing) so it falls to the generic path.
+        if let (Scalar::Datetime64(fill), ScalarValues::LazyNullableDatetime64 { data, validity, .. }) =
+            (&cast_fill, &self.values)
+            && *fill != Timestamp::NAT
+        {
+            let out: Vec<i64> = data
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| if validity.get(i) && v != Timestamp::NAT { v } else { *fill })
+                .collect();
+            return Ok(Self::from_datetime64_values(out));
+        }
+        if let (Scalar::Timedelta64(fill), ScalarValues::LazyNullableTimedelta64 { data, validity, .. }) =
+            (&cast_fill, &self.values)
+            && *fill != Timedelta::NAT
+        {
+            let n = data.len();
+            let out: Vec<i64> = data
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| if validity.get(i) && v != Timedelta::NAT { v } else { *fill })
+                .collect();
+            return Ok(Self::from_timedelta64_values_with_validity(
+                out,
+                ValidityMask::all_valid(n),
+            ));
+        }
+
         let values = self
             .values
             .iter()
@@ -30494,6 +30530,79 @@ mod tests {
                     let a = col_typed.fillna(&fill).expect("typed fillna");
                     let b = col_eager.fillna(&fill).expect("eager fillna");
                     assert_eq!(a.values(), b.values(), "trial {trial} fill {fill:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn fillna_nullable_temporal_typed_matches_generic() {
+            // The typed nullable-temporal fillna arm (LazyNullableDatetime64/Timedelta64 +
+            // matching temporal fill) must be BIT-EXACT to the generic clone-fill path. A/B
+            // on identical data: col_typed (from_*_with_validity => LazyNullable) exercises
+            // the typed arm; col_eager (Column::new, Eager) falls to the generic path.
+            // ~25% validity-null + ~10% NaT-in-buffer (validity-true) => both are "missing"
+            // and get filled. NaT fill keeps nulls (both generic). Values near 1.6e18.
+            let mut state: u64 = 0xF117_DA7E_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for is_dt in [true, false] {
+                let base: i64 = if is_dt { 1_600_000_000_000_000_000 } else { 0 };
+                let nat = if is_dt {
+                    fp_types::Timestamp::NAT
+                } else {
+                    fp_types::Timedelta::NAT
+                };
+                for trial in 0..120 {
+                    let n = (next() % 250) as usize;
+                    let mut data = vec![0i64; n];
+                    let mut validity = crate::ValidityMask::all_valid(n);
+                    let mut eager: Vec<Scalar> = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let r = next() % 10;
+                        if r < 3 {
+                            validity.set(i, false);
+                            eager.push(Scalar::Null(NullKind::NaT));
+                        } else if r == 3 {
+                            data[i] = nat; // NaT in buffer with validity TRUE
+                            eager.push(if is_dt {
+                                Scalar::Datetime64(nat)
+                            } else {
+                                Scalar::Timedelta64(nat)
+                            });
+                        } else {
+                            data[i] = base + (next() % 1_000_000) as i64;
+                            eager.push(if is_dt {
+                                Scalar::Datetime64(data[i])
+                            } else {
+                                Scalar::Timedelta64(data[i])
+                            });
+                        }
+                    }
+                    let dtype = if is_dt { DType::Datetime64 } else { DType::Timedelta64 };
+                    let col_typed = if is_dt {
+                        Column::from_datetime64_values_with_validity(data.clone(), validity)
+                    } else {
+                        Column::from_timedelta64_values_with_validity(data.clone(), validity)
+                    };
+                    let col_eager = Column::new(dtype, eager).expect("eager temporal");
+                    let fills = if is_dt {
+                        [Scalar::Datetime64(base + 42), Scalar::Datetime64(nat)]
+                    } else {
+                        [Scalar::Timedelta64(42), Scalar::Timedelta64(nat)]
+                    };
+                    for fill in fills {
+                        let a = col_typed.fillna(&fill).expect("typed fillna");
+                        let b = col_eager.fillna(&fill).expect("eager fillna");
+                        assert_eq!(
+                            a.values(),
+                            b.values(),
+                            "is_dt={is_dt} trial {trial} fill {fill:?}"
+                        );
+                    }
                 }
             }
         }

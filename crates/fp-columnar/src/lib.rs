@@ -14442,6 +14442,59 @@ impl Column {
             return Ok(Self::from_bool_values_with_validity(bools, lv.and_mask(rv)));
         }
 
+        // Typed TEMPORAL fast path: both operands are Datetime64, or both are
+        // Timedelta64 (all-valid OR nullable). Temporal scalars are i64 nanoseconds
+        // but are NOT numeric to `to_f64`, so the generic loop below routes any
+        // PRESENT temporal pair through `scalar_compare` -> `Scalar::to_f64()`, which
+        // returns `Err(NonNumericValue)` — i.e. `s_dt1 < s_dt2` / `s_td1 == s_td2`
+        // ERROR outright today (only the Series-vs-scalar `compare_scalar` path
+        // handled temporal). Compare the raw `&[i64]` backings EXACTLY — pandas
+        // compares datetime64[ns]/timedelta64[ns] as i64; an f64 promotion would
+        // round for `|ns| > 2^53` (epoch-ns are ~1.6e18) — and mask a row where
+        // either side is missing: validity bit unset OR the NaT sentinel in the
+        // buffer, which is EXACTLY the generic path's `l.is_missing() ||
+        // r.is_missing()` (`Datetime64(NAT)`/`Timedelta64(NAT)` materialize as
+        // missing). A masked slot's bool (computed over a NaT sentinel) is never
+        // observed. A local `fn` (not a closure) ties the borrows to the `&Column`.
+        fn temporal_i64_backing(col: &Column) -> Option<(&[i64], &ValidityMask, i64)> {
+            let (all_valid, nat) = match col.dtype {
+                DType::Datetime64 => (col.as_datetime64_slice(), Timestamp::NAT),
+                DType::Timedelta64 => (col.as_timedelta64_slice(), Timedelta::NAT),
+                _ => return None,
+            };
+            if let Some(slice) = all_valid {
+                return Some((slice, &col.validity, nat));
+            }
+            match &col.values {
+                ScalarValues::LazyNullableDatetime64 { data, validity, .. }
+                | ScalarValues::LazyNullableTimedelta64 { data, validity, .. } => {
+                    Some((data.as_slice(), validity, nat))
+                }
+                _ => None,
+            }
+        }
+        if self.dtype == right.dtype
+            && let (Some((l, lv, nat)), Some((r, rv, _))) =
+                (temporal_i64_backing(self), temporal_i64_backing(right))
+        {
+            let zip = || l.iter().zip(r);
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => zip().map(|(&a, &b)| a > b).collect(),
+                ComparisonOp::Lt => zip().map(|(&a, &b)| a < b).collect(),
+                ComparisonOp::Eq => zip().map(|(&a, &b)| a == b).collect(),
+                ComparisonOp::Ne => zip().map(|(&a, &b)| a != b).collect(),
+                ComparisonOp::Ge => zip().map(|(&a, &b)| a >= b).collect(),
+                ComparisonOp::Le => zip().map(|(&a, &b)| a <= b).collect(),
+            };
+            let mut present = lv.and_mask(rv);
+            for (i, (&a, &b)) in l.iter().zip(r).enumerate() {
+                if a == nat || b == nat {
+                    present.set(i, false);
+                }
+            }
+            return Ok(Self::from_bool_values_with_validity(bools, present));
+        }
+
         let values = self
             .values
             .iter()
@@ -29625,6 +29678,107 @@ mod tests {
                             expected,
                             "trial {trial} ln={ln} rn={rn} op {op:?}"
                         );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn binary_comparison_temporal_col_vs_col_exact_i64_ns_masks_missing() {
+            // The typed temporal arm in binary_comparison (Datetime64-vs-Datetime64 or
+            // Timedelta64-vs-Timedelta64, all-valid OR nullable) makes an op that the
+            // generic path ERRORS on (scalar_compare -> to_f64 rejects a non-NaT
+            // temporal scalar) both WORK and be EXACT: present pair ⇒ Bool(a <op> b) on
+            // the raw i64 nanoseconds (NOT f64-promoted — the values live near 1.6e18 >>
+            // 2^53, where f64 would round), either missing ⇒ Null. "Missing" is validity
+            // bit unset OR the NaT sentinel embedded in the buffer (an all-valid-validity
+            // column can still hold NaT), matching the generic `l.is_missing() ||
+            // r.is_missing()`. Covers the 4 (all-valid, nullable)² combos for both dtypes.
+            let mut state: u64 = 0x7E11_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            // Build a temporal column of `n` rows around `base` ns. `nullable` ⇒ ~25% of
+            // rows carry a false validity bit; ~1/6 of the OTHERWISE-valid rows get a NaT
+            // sentinel in the buffer (validity still set) to exercise NaT masking in both
+            // the all-valid and nullable branches. Returns (column, data, validity_bits).
+            let build = |n: usize,
+                         nullable: bool,
+                         nat: i64,
+                         is_dt: bool,
+                         next: &mut dyn FnMut() -> u64|
+             -> (Column, Vec<i64>, Vec<bool>) {
+                let base: i64 = if is_dt { 1_600_000_000_000_000_000 } else { 0 };
+                let mut data = Vec::with_capacity(n);
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut vbits = vec![true; n];
+                for i in 0..n {
+                    if nullable && next() % 4 == 0 {
+                        validity.set(i, false);
+                        vbits[i] = false;
+                        data.push(base + (next() % 1000) as i64);
+                    } else if next() % 6 == 0 {
+                        data.push(nat);
+                    } else {
+                        // Small alphabet of magnitudes ⇒ frequent ties across columns.
+                        data.push(base + (next() % 8) as i64);
+                    }
+                }
+                let col = if is_dt {
+                    Column::from_datetime64_values_with_validity(data.clone(), validity)
+                } else {
+                    Column::from_timedelta64_values_with_validity(data.clone(), validity)
+                };
+                (col, data, vbits)
+            };
+            for (is_dt, nat) in [
+                (true, fp_types::Timestamp::NAT),
+                (false, fp_types::Timedelta::NAT),
+            ] {
+                for trial in 0..120 {
+                    let n = (next() % 200) as usize;
+                    for (ln, rn) in [(false, false), (true, false), (false, true), (true, true)] {
+                        let (lcol, ld, lv) = build(n, ln, nat, is_dt, &mut next);
+                        let (rcol, rd, rv) = build(n, rn, nat, is_dt, &mut next);
+                        for op in [
+                            ComparisonOp::Gt,
+                            ComparisonOp::Lt,
+                            ComparisonOp::Eq,
+                            ComparisonOp::Ne,
+                            ComparisonOp::Ge,
+                            ComparisonOp::Le,
+                        ] {
+                            let got = lcol
+                                .binary_comparison(&rcol, op)
+                                .expect("temporal col compare must not error");
+                            let expected: Vec<Scalar> = (0..n)
+                                .map(|i| {
+                                    let l_missing = !lv[i] || ld[i] == nat;
+                                    let r_missing = !rv[i] || rd[i] == nat;
+                                    if l_missing || r_missing {
+                                        Scalar::Null(NullKind::Null)
+                                    } else {
+                                        let (a, b) = (ld[i], rd[i]);
+                                        Scalar::Bool(match op {
+                                            ComparisonOp::Gt => a > b,
+                                            ComparisonOp::Lt => a < b,
+                                            ComparisonOp::Eq => a == b,
+                                            ComparisonOp::Ne => a != b,
+                                            ComparisonOp::Ge => a >= b,
+                                            ComparisonOp::Le => a <= b,
+                                        })
+                                    }
+                                })
+                                .collect();
+                            assert_eq!(
+                                got.values(),
+                                expected,
+                                "is_dt={is_dt} trial {trial} ln={ln} rn={rn} op {op:?}"
+                            );
+                        }
                     }
                 }
             }

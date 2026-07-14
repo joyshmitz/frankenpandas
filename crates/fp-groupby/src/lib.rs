@@ -178,19 +178,45 @@ fn groupby_sum_with_trace(
         Some((aligned_keys, aligned_values))
     };
 
+    let input_rows = aligned_storage
+        .as_ref()
+        .map_or_else(|| keys.len(), |(aligned_keys, _)| aligned_keys.len());
+    // Record an admission decision for policy observability without altering
+    // the current groupby output behavior.
+    let _ = policy.decide_join_admission(input_rows, ledger);
+    let estimated_bytes = estimate_groupby_intermediate_bytes(input_rows);
+    let use_arena = exec_options.use_arena && estimated_bytes <= exec_options.arena_budget_bytes;
+
+    // Identity-aligned, all-valid Int64 columns already expose contiguous raw
+    // buffers. Keep the dense direct-address algorithm, but run it before
+    // `values()` materializes two Scalar arrays. The helper preserves the
+    // exact i128 accumulator, sorted/first-seen order, and overflow promotion
+    // used by `try_groupby_sum_dense_int64_values`; wide key ranges still fall
+    // through to the former allocator-selected Scalar route.
+    if aligned_storage.is_none()
+        && let (Some(raw_keys), Some(raw_values)) =
+            (keys.column().as_i64_slice(), values.column().as_i64_slice())
+        && let Some((out_index, out_values)) =
+            try_groupby_sum_dense_int64_slices(raw_keys, raw_values, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        let result = Series::new("sum", Index::new(out_index), out_column)?;
+        return Ok((
+            result,
+            GroupByExecutionTrace {
+                used_arena: false,
+                input_rows,
+                estimated_bytes,
+            },
+        ));
+    }
+
     let (aligned_keys_values, aligned_values_values): (&[Scalar], &[Scalar]) =
         if let Some((aligned_keys, aligned_values)) = aligned_storage.as_ref() {
             (aligned_keys.values(), aligned_values.values())
         } else {
             (keys.values(), values.values())
         };
-
-    let input_rows = aligned_keys_values.len();
-    // Record an admission decision for policy observability without altering
-    // the current groupby output behavior.
-    let _ = policy.decide_join_admission(input_rows, ledger);
-    let estimated_bytes = estimate_groupby_intermediate_bytes(input_rows);
-    let use_arena = exec_options.use_arena && estimated_bytes <= exec_options.arena_budget_bytes;
 
     let result = if use_arena {
         groupby_sum_with_arena(aligned_keys_values, aligned_values_values, options)?
@@ -771,6 +797,78 @@ fn groupby_sum_int64(
 }
 
 const DENSE_INT_KEY_RANGE_LIMIT: i128 = 65_536;
+
+/// Dense-bucket `groupby_sum` directly over all-valid Int64 buffers.
+///
+/// This is the raw-slice equivalent of `try_groupby_sum_dense_int64_values`:
+/// it uses the same i128 totals, first-seen tape, ascending bucket emission,
+/// and i64-overflow promotion while avoiding full-column Scalar materialization.
+fn try_groupby_sum_dense_int64_slices(
+    keys: &[i64],
+    values: &[i64],
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if keys.len() != values.len() {
+        return None;
+    }
+    if keys.is_empty() {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let mut min_key = i64::MAX;
+    let mut max_key = i64::MIN;
+    for &key in keys {
+        min_key = min_key.min(key);
+        max_key = max_key.max(key);
+    }
+
+    let span = i128::from(max_key) - i128::from(min_key) + 1;
+    if span <= 0 || span > DENSE_INT_KEY_RANGE_LIMIT {
+        return None;
+    }
+
+    let bucket_len = usize::try_from(span).ok()?;
+    let mut sums = vec![0_i128; bucket_len];
+    let mut seen = vec![false; bucket_len];
+    let mut ordering = Vec::<i64>::new();
+    for (&key, &value) in keys.iter().zip(values) {
+        let raw = i128::from(key) - i128::from(min_key);
+        let bucket = usize::try_from(raw).ok()?;
+        if !seen[bucket] {
+            seen[bucket] = true;
+            ordering.push(key);
+        }
+        sums[bucket] += i128::from(value);
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    if sort {
+        for (bucket, was_seen) in seen.iter().enumerate() {
+            if !*was_seen {
+                continue;
+            }
+            let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+            out_index.push(IndexLabel::Int64(key));
+            out_values.push(match i64::try_from(sums[bucket]) {
+                Ok(value) => Scalar::Int64(value),
+                Err(_) => Scalar::Float64(sums[bucket] as f64),
+            });
+        }
+    } else {
+        for key in ordering {
+            let raw = i128::from(key) - i128::from(min_key);
+            let bucket = usize::try_from(raw).ok()?;
+            out_index.push(IndexLabel::Int64(key));
+            out_values.push(match i64::try_from(sums[bucket]) {
+                Ok(value) => Scalar::Int64(value),
+                Err(_) => Scalar::Float64(sums[bucket] as f64),
+            });
+        }
+    }
+
+    Some((out_index, out_values))
+}
 
 /// Scan keys and return (min, max, saw_any_int). Returns None if a non-Int64,
 /// non-droppable-null key is found.
@@ -3267,8 +3365,9 @@ pub fn approx_value_counts(values: &[Scalar]) -> Vec<(Scalar, u64)> {
 
 #[cfg(test)]
 mod tests {
+    use fp_columnar::Column;
     use fp_frame::Series;
-    use fp_index::IndexLabel;
+    use fp_index::{Index, IndexLabel};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::{NullKind, Scalar};
 
@@ -3276,7 +3375,7 @@ mod tests {
         GroupByExecutionOptions, GroupByOptions, groupby_nunique, groupby_prod, groupby_size,
         groupby_sum, groupby_sum_with_options, groupby_sum_with_trace,
         try_groupby_median_dense_int64, try_groupby_median_numeric_vectors,
-        try_groupby_sum_dense_int64_values,
+        try_groupby_sum_dense_int64_slices, try_groupby_sum_dense_int64_values,
     };
 
     #[test]
@@ -4712,6 +4811,72 @@ mod tests {
             first_seen_values,
             vec![Scalar::Int64(4), Scalar::Int64(2), Scalar::Int64(4)]
         );
+    }
+
+    #[test]
+    fn dense_int64_raw_sum_matches_scalar_reference_zjkxd() {
+        let raw_keys = vec![10_i64, 5, 10, -2, 5];
+        let raw_values = vec![i64::MAX, 2, 1, 4, -3];
+        let scalar_keys = raw_keys
+            .iter()
+            .copied()
+            .map(Scalar::Int64)
+            .collect::<Vec<_>>();
+        let scalar_values = raw_values
+            .iter()
+            .copied()
+            .map(Scalar::Int64)
+            .collect::<Vec<_>>();
+
+        for sort in [true, false] {
+            let expected =
+                try_groupby_sum_dense_int64_values(&scalar_keys, &scalar_values, true, sort)
+                    .expect("former Scalar dense path");
+            let actual = try_groupby_sum_dense_int64_slices(&raw_keys, &raw_values, sort)
+                .expect("raw dense path");
+            assert_eq!(actual, expected);
+
+            let index = Index::from_range(0, raw_keys.len() as i64, 1);
+            let keys = Series::new(
+                "key",
+                index.clone(),
+                Column::from_i64_values_owned(raw_keys.clone()),
+            )
+            .expect("typed keys");
+            let values = Series::new(
+                "value",
+                index,
+                Column::from_i64_values_owned(raw_values.clone()),
+            )
+            .expect("typed values");
+            let mut ledger = EvidenceLedger::new();
+            let public = groupby_sum(
+                &keys,
+                &values,
+                GroupByOptions {
+                    sort,
+                    ..GroupByOptions::default()
+                },
+                &RuntimePolicy::strict(),
+                &mut ledger,
+            )
+            .expect("public raw sum");
+            let expected_public = Series::new(
+                "sum",
+                Index::new(expected.0.clone()),
+                Column::from_values(expected.1.clone()).expect("former output column"),
+            )
+            .expect("former public output");
+            assert_eq!(public.index(), expected_public.index());
+            assert_eq!(public.values(), expected_public.values());
+        }
+
+        assert_eq!(
+            try_groupby_sum_dense_int64_slices(&[], &[], true),
+            Some((Vec::new(), Vec::new()))
+        );
+        assert!(try_groupby_sum_dense_int64_slices(&[0], &[], true).is_none());
+        assert!(try_groupby_sum_dense_int64_slices(&[i64::MIN, i64::MAX], &[1, 2], true).is_none());
     }
 
     #[test]

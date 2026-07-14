@@ -15334,6 +15334,48 @@ one in a peer-added test left outside this commit.
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
 `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: dense Int64 `groupby_sum` scans raw slices — 11.795x p50
+
+Negative-ledger-first routing began with `bv --robot-triage`: the graph had 3,662 issues, 340 actionable items, and no
+cycles, but its four advertised quick wins were already assigned to other agents or fenced by current ledger evidence.
+No prior standalone raw-slice `fp-groupby::groupby_sum` result existed, so the fresh bead
+`br-frankenpandas-zjkxd` took the identity-aligned, all-valid Int64 seam. Its score was impact 4 × confidence 5 ÷
+effort 2 = **10**.
+
+The pre-edit attribution run on `vmi1153651` used normal `--profile release`, 250,000 rows, 1,000 groups, and 11
+samples. Materializing the two typed columns into `Scalar` arrays cost **9,012,998 ns p50**; the already-materialized
+Scalar aggregation cost **5,139,951 ns p50**; and the cold public call cost **14,432,749 ns p50**. Thus the avoidable
+materialization boundary accounted for about **62.4%** of cold public latency before any production edit.
+
+One lever admits only identity-aligned all-valid Int64 key/value columns with a dense key span no wider than 65,536,
+then runs the existing direct-address sum algorithm over borrowed `&[i64]` buffers before `Series::values()` can
+materialize either column. The new helper preserves i128 accumulation, ascending emission for `sort=true`, first-seen
+emission for `sort=false`, and the former i64-overflow promotion through the same public `Column::from_values` builder.
+Reindexed/aligned inputs, nullable columns, Bool/Float64/Utf8/temporal values, mismatched lengths, and wide Int64 spans
+retain the former allocator-selected Scalar route. No floating-point accumulation order or RNG behavior changed.
+
+The single final foreground A/B used one normal-release binary on `vmi1153651`, fresh cold 100,000-row typed Series,
+1,000 groups, three warmups, 15 reversed-order samples, duplicate arms, and exact index/value equality preflight. The
+reference is a transcription of the former public identity-aligned dense body, including cold Scalar materialization.
+
+| same-binary arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| former cold Scalar body | 6,737,659 ns | 6,168,082 ns | 6,452,870.5 ns |
+| raw-slice public candidate | 555,832 ns | 538,321 ns | 547,076.5 ns |
+
+Reference/candidate is **11.795188607x p50** (**91.52196685% latency reduction**). Duplicate spreads are **9.234264%**
+for the former body and **3.252892%** for the candidate. RCH rebuilt its normal-release target before the invocation,
+but compilation was outside the timed body; no `release-perf` profile or LTO cold build ran.
+
+Correctness: the strict-remote focused proof is **1/1 green** across sorted and first-seen output order, negative keys,
+empty input, mismatched lengths, wide-span fallback, i128 accumulation, overflow promotion, and exact public output
+coercion against the former Scalar helper. Strict-remote workspace `cargo check --workspace --all-targets` is green
+with five pre-existing `fp-columnar` warnings, and focused `fp-groupby --all-targets --no-deps -D warnings` Clippy is
+green. Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local Cargo fallback
+ran; direct non-mutating `rustfmt --check` on the two owned Rust files and `git diff --check` are green. The bounded
+changed-file UBS scan reports **0 critical** findings; its warning inventory is the existing broad `fp-groupby` test and
+benchmark surface rather than a focused finding on the production lever. No local Cargo command ran.
+
 ### 2026-07-14 IvoryGlacier — WIN: affine Datetime64 `nunique` reads its witness — 7437.490x p50
 
 Negative-ledger-first routing found the existing temporal dedup-family optimization and the affine Datetime64

@@ -15615,6 +15615,44 @@ as non-compilation command `RCH-E301`, so no local fallback ran. The bounded UBS
 50-marker whole-file critical inventory; direct base/current counting confirms the textual `panic!` count is unchanged
 at 48/48, with no added critical marker in the touched hunk. `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: nullable Bool count_nonzero scans raw values — 5.219x p50
+
+Negative-ledger-first routing found no prior `count_nonzero` representation result. The public body still delegated to
+`nonzero().len()`, materializing one `Scalar` per row and allocating every matching row position only to discard the
+positions after taking their length. This fresh nullable-Bool reduction lever (`br-frankenpandas-akbew`) scored
+`impact 4 * confidence 5 / effort 1 = 20`.
+
+The new arm is deliberately narrow: only canonical `LazyNullableBool` storage scans its raw `&[bool]` and validity
+mask. It counts exactly validity-set true slots; false remains zero-like, and invalid raw true or false slots remain
+missing and therefore uncounted. `nonzero`, `flatnonzero`, every other dtype and backing, output type, ordering, and RNG
+state retain their former routes. There is no tie-breaking or floating-point arithmetic in this reduction, and no
+parser, unsafe-code, or recovery-policy surface moved.
+
+The single strict-remote foreground benchmark ran on `vmi1153651` in one release-perf binary. It used one million
+nullable Bool rows with approximately 20% invalid slots and 50% raw true values, three warmups, 15 ABBA-reversed
+samples per duplicate arm, and exact-output preflight. The former helper calls the exact prior `nonzero().len()` body.
+Its reference inputs are materialized during warmup, so the comparison conservatively excludes their first-call
+materialization cost; both candidate inputs retain empty `Scalar` caches throughout.
+
+| same-binary arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| former `nonzero().len()` | 7,945,153 ns | 8,661,525 ns | 8,303,339.0 ns |
+| nullable raw count | 1,618,459 ns | 1,563,276 ns | 1,590,867.5 ns |
+
+The candidate is **5.219378x faster at p50** (**80.8406% latency reduction**) for the exact count of **399,887**.
+Duplicate-arm spreads are **9.0165%** for the former body and **3.5300%** for the typed path, both below the 10%
+stability ceiling.
+
+Correctness: the strict-remote focused proof is **1/1 green** against the exact former body while covering valid true,
+valid false, invalid raw true, and invalid raw false slots and proving that the candidate's lazy `Scalar` cache remains
+empty. Strict-remote workspace `check --workspace --all-targets` is green with the same five pre-existing fp-columnar
+warnings. Strict-remote `fp-columnar --all-targets --no-deps -D warnings` Clippy reproduces exactly the tracked
+inventory (23 library and 64 test-target findings) and reports no changed-hunk finding. Fail-closed RCH rejected
+`cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran. The bounded UBS result and direct
+base/current `panic!` count reproduce the existing 50-marker whole-file critical inventory and unchanged 48/48
+textual count, with no added critical marker in the touched hunk. `git diff --check` is green. No local Cargo command
+ran.
+
 ### 2026-07-14 IvoryGlacier — WIN: temporal INNER validates while intersecting — 1.396x p50
 
 Negative-ledger-first routing found the temporal INNER raw-nanosecond keep, plus later validation-fusion keeps for its

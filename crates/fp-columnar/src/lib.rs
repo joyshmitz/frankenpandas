@@ -20021,6 +20021,20 @@ impl Column {
     /// Matches np.count_nonzero().
     #[must_use]
     pub fn count_nonzero(&self) -> usize {
+        // A nullable Bool reduction only needs the number of validity-set true
+        // slots. Scanning the canonical raw backing avoids materializing one
+        // Scalar per row and avoids allocating every matching row position via
+        // `nonzero()`. Invalid raw values are masked, exactly as the generic
+        // `is_missing()` guard; false values remain zero-like.
+        if let ScalarValues::LazyNullableBool { data, validity, .. } = &self.values {
+            let mut count = 0usize;
+            for (idx, &value) in data.iter().enumerate() {
+                if value && validity.get(idx) {
+                    count += 1;
+                }
+            }
+            return count;
+        }
         self.nonzero().len()
     }
 
@@ -43533,6 +43547,142 @@ mod tests {
                 out_of_bounds,
                 crate::ColumnError::InvalidSorter { .. }
             ));
+        }
+    }
+
+    mod count_nonzero {
+        use super::*;
+
+        fn former_body_akbew(column: &Column) -> usize {
+            column.nonzero().len()
+        }
+
+        fn assert_nullable_bool_unmaterialized_akbew(column: &Column) {
+            assert!(matches!(
+                &column.values,
+                ScalarValues::LazyNullableBool { .. }
+            ));
+            if let ScalarValues::LazyNullableBool { values, .. } = &column.values {
+                assert!(values.get().is_none());
+            }
+        }
+
+        fn median_nanos_akbew(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        fn measure_nanos_akbew<T>(f: impl FnOnce() -> T) -> u128 {
+            let start = std::time::Instant::now();
+            std::hint::black_box(f());
+            start.elapsed().as_nanos()
+        }
+
+        #[test]
+        fn nullable_bool_count_nonzero_raw_matches_former_akbew() {
+            let data = vec![true, false, true, true, false, true, false, true];
+            let mut validity = ValidityMask::all_valid(data.len());
+            validity.set(2, false);
+            validity.set(4, false);
+            validity.set(7, false);
+            let reference =
+                Column::from_bool_values_with_validity(data.clone(), validity.clone());
+            let candidate = Column::from_bool_values_with_validity(data, validity);
+
+            assert_eq!(former_body_akbew(&reference), 3);
+            assert_eq!(candidate.count_nonzero(), former_body_akbew(&reference));
+            assert_nullable_bool_unmaterialized_akbew(&candidate);
+        }
+
+        #[test]
+        #[ignore = "perf A/B; run with --ignored --nocapture"]
+        fn nullable_bool_count_nonzero_ab_akbew() {
+            const LEN: usize = 1_000_000;
+            const SAMPLES: usize = 15;
+            let mut state = 0xB001_C0A7_5EED_A11Du64;
+            let mut data = vec![false; LEN];
+            let mut validity = ValidityMask::all_valid(LEN);
+            for (idx, value) in data.iter_mut().enumerate() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                *value = state & 1 == 1;
+                if (state >> 40).is_multiple_of(5) {
+                    validity.set(idx, false);
+                }
+            }
+
+            let reference_a =
+                Column::from_bool_values_with_validity(data.clone(), validity.clone());
+            let reference_b =
+                Column::from_bool_values_with_validity(data.clone(), validity.clone());
+            let candidate_a =
+                Column::from_bool_values_with_validity(data.clone(), validity.clone());
+            let candidate_b = Column::from_bool_values_with_validity(data, validity);
+
+            let former = former_body_akbew(&reference_a);
+            let witness = candidate_a.count_nonzero();
+            assert_eq!(former, witness);
+            assert_nullable_bool_unmaterialized_akbew(&candidate_a);
+
+            for _ in 0..3 {
+                std::hint::black_box(former_body_akbew(std::hint::black_box(&reference_a)));
+                std::hint::black_box(former_body_akbew(std::hint::black_box(&reference_b)));
+                std::hint::black_box(std::hint::black_box(&candidate_a).count_nonzero());
+                std::hint::black_box(std::hint::black_box(&candidate_b).count_nonzero());
+            }
+
+            let mut former_a = Vec::with_capacity(SAMPLES);
+            let mut former_b = Vec::with_capacity(SAMPLES);
+            let mut typed_a = Vec::with_capacity(SAMPLES);
+            let mut typed_b = Vec::with_capacity(SAMPLES);
+            for sample in 0..SAMPLES {
+                if sample.is_multiple_of(2) {
+                    former_a.push(measure_nanos_akbew(|| {
+                        former_body_akbew(std::hint::black_box(&reference_a))
+                    }));
+                    typed_a.push(measure_nanos_akbew(|| {
+                        std::hint::black_box(&candidate_a).count_nonzero()
+                    }));
+                    typed_b.push(measure_nanos_akbew(|| {
+                        std::hint::black_box(&candidate_b).count_nonzero()
+                    }));
+                    former_b.push(measure_nanos_akbew(|| {
+                        former_body_akbew(std::hint::black_box(&reference_b))
+                    }));
+                } else {
+                    former_b.push(measure_nanos_akbew(|| {
+                        former_body_akbew(std::hint::black_box(&reference_b))
+                    }));
+                    typed_b.push(measure_nanos_akbew(|| {
+                        std::hint::black_box(&candidate_b).count_nonzero()
+                    }));
+                    typed_a.push(measure_nanos_akbew(|| {
+                        std::hint::black_box(&candidate_a).count_nonzero()
+                    }));
+                    former_a.push(measure_nanos_akbew(|| {
+                        former_body_akbew(std::hint::black_box(&reference_a))
+                    }));
+                }
+            }
+
+            let former_a_p50 = median_nanos_akbew(&mut former_a);
+            let former_b_p50 = median_nanos_akbew(&mut former_b);
+            let typed_a_p50 = median_nanos_akbew(&mut typed_a);
+            let typed_b_p50 = median_nanos_akbew(&mut typed_b);
+            let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+            let typed_mean = (typed_a_p50 + typed_b_p50) as f64 / 2.0;
+
+            println!(
+                "nullable Bool count_nonzero, len={LEN}, samples={SAMPLES}, count={witness}"
+            );
+            println!(
+                "former nonzero().len() p50 A/B: {former_a_p50} / {former_b_p50} ns"
+            );
+            println!("typed raw count p50 A/B: {typed_a_p50} / {typed_b_p50} ns");
+            println!("former/typed p50 ratio: {:.3}x", former_mean / typed_mean);
+            assert_nullable_bool_unmaterialized_akbew(&candidate_a);
+            assert_nullable_bool_unmaterialized_akbew(&candidate_b);
         }
     }
 

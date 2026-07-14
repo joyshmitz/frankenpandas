@@ -14282,6 +14282,39 @@ impl Column {
             };
             return Ok(Self::from_bool_values(bools));
         }
+        // Typed NULLABLE Bool fast path (sister to the all-valid Bool arm above): the
+        // all-valid arm needs BOTH `as_bool_slice()` (validity.all()), so any pair with a
+        // nullable Bool operand — (nullable, nullable), (all-valid, nullable), (nullable,
+        // all-valid) — fell to the generic per-element Scalar loop over Vec<Scalar::Bool>.
+        // Read the raw `&[bool]` backings + validity and apply the SAME per-op bool
+        // expressions, carrying the combined validity (present iff BOTH present == the
+        // generic `!(l.is_missing() || r.is_missing())`; Bool has no NaN sentinel, so
+        // "missing" is validity-unset only — no buffer scan). Bit-identical to the generic
+        // path's `scalar_compare` Bool arm. A local `fn` ties the borrows to the `&Column`.
+        fn bool_backing(col: &Column) -> Option<(&[bool], &ValidityMask)> {
+            if col.dtype != DType::Bool {
+                return None;
+            }
+            if let Some(slice) = col.as_bool_slice() {
+                return Some((slice, &col.validity));
+            }
+            if let ScalarValues::LazyNullableBool { data, validity, .. } = &col.values {
+                return Some((data.as_slice(), validity));
+            }
+            None
+        }
+        if let (Some((l, lv)), Some((r, rv))) = (bool_backing(self), bool_backing(right)) {
+            let zip = || l.iter().zip(r);
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => zip().map(|(&a, &b)| a && !b).collect(),
+                ComparisonOp::Lt => zip().map(|(&a, &b)| !a && b).collect(),
+                ComparisonOp::Eq => zip().map(|(&a, &b)| a == b).collect(),
+                ComparisonOp::Ne => zip().map(|(&a, &b)| a != b).collect(),
+                ComparisonOp::Ge => zip().map(|(&a, &b)| a >= b).collect(),
+                ComparisonOp::Le => zip().map(|(&a, &b)| a <= b).collect(),
+            };
+            return Ok(Self::from_bool_values_with_validity(bools, lv.and_mask(rv)));
+        }
         // Typed MIXED Int64×Float64 fast path: the both-same-dtype arms above miss a
         // mixed numeric pair, dropping it to the generic per-element Scalar
         // `scalar_compare`. Build an f64 view per side (an all-valid Float64 borrows its
@@ -29779,6 +29812,74 @@ mod tests {
                                 "is_dt={is_dt} trial {trial} ln={ln} rn={rn} op {op:?}"
                             );
                         }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn binary_comparison_nullable_bool_col_vs_col_matches_scalar_reference() {
+            // The typed nullable-Bool arm in binary_comparison (any pair with a nullable
+            // Bool operand — the all-valid arm needs BOTH as_bool_slice) must be BIT-EXACT
+            // to the generic path: both present ⇒ Bool(a <op> b), either missing ⇒ Null.
+            // Covers the 4 (all-valid, nullable)² combos; ~30% nulls; all 6 ops.
+            let mut state: u64 = 0xB001_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let build = |n: usize,
+                         nullable: bool,
+                         next: &mut dyn FnMut() -> u64|
+             -> (Column, Vec<Option<bool>>) {
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut opt: Vec<Option<bool>> = Vec::with_capacity(n);
+                let mut data: Vec<bool> = Vec::with_capacity(n);
+                for i in 0..n {
+                    if nullable && next() % 3 == 0 {
+                        validity.set(i, false);
+                        opt.push(None);
+                        data.push(false);
+                    } else {
+                        let b = next() % 2 == 0;
+                        opt.push(Some(b));
+                        data.push(b);
+                    }
+                }
+                (Column::from_bool_values_with_validity(data, validity), opt)
+            };
+            for trial in 0..200 {
+                let n = (next() % 300) as usize;
+                for (ln, rn) in [(false, false), (true, false), (false, true), (true, true)] {
+                    let (lcol, lopt) = build(n, ln, &mut next);
+                    let (rcol, ropt) = build(n, rn, &mut next);
+                    for op in [
+                        ComparisonOp::Gt,
+                        ComparisonOp::Lt,
+                        ComparisonOp::Eq,
+                        ComparisonOp::Ne,
+                        ComparisonOp::Ge,
+                        ComparisonOp::Le,
+                    ] {
+                        let got = lcol.binary_comparison(&rcol, op).expect("bool col compare");
+                        let expected: Vec<Scalar> = lopt
+                            .iter()
+                            .zip(&ropt)
+                            .map(|(l, r)| match (l, r) {
+                                (Some(a), Some(b)) => Scalar::Bool(
+                                    scalar_compare(&Scalar::Bool(*a), &Scalar::Bool(*b), op)
+                                        .expect("reference"),
+                                ),
+                                _ => Scalar::Null(NullKind::Null),
+                            })
+                            .collect();
+                        assert_eq!(
+                            got.values(),
+                            expected,
+                            "trial {trial} ln={ln} rn={rn} op {op:?}"
+                        );
                     }
                 }
             }

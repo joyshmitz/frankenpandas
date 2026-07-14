@@ -16147,6 +16147,57 @@ fallback ran; direct Rustfmt checking of the owned source and `git diff --check`
 scan reproduced its broad whole-file inventory (seven pre-existing test-only panics plus 138 false-positive
 name/token-comparison labels), with no production correctness or safety finding on the lever. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: conformal quantiles select one rank — 3.606x p50
+
+Negative-ledger-first routing began with `bv --robot-triage` (3,665 issues, 356 open, 340 actionable, no dependency
+cycles). The graph's perf umbrella was assigned, its quick wins were already owned or landed/rejected, and the remaining
+unassigned perf beads were stale transpose, CSV, expanding, or temporal surfaces. After the preceding `fp-expr` keep,
+this pass pivoted to the fresh `fp-runtime` calibration boundary. The ledger contained no conformal-quantile performance
+row; the only related bead was an old persisted-invariant correctness fix. `ConformalGuard::conformal_quantile` copied
+the finite calibration scores and fully sorted them on every decision even though it observes only one rank. The
+opportunity score for `br-frankenpandas-bh91q` was `impact 4 * confidence 5 / effort 1 = 20`.
+
+Attribution preceded the production edit. A strict-remote normal-`release` probe on `vmi1152480` used the default
+1,000-score calibration window, three warmups, and 11 rotated foreground samples:
+
+| pre-edit attributed phase | p50 |
+| --- | ---: |
+| finite-score collection | 1,542 ns |
+| full stable sort alone | 12,339 ns |
+| public quantile lifecycle | 13,941 ns |
+
+Sorting alone accounted for **88.5087%** of the public call. The one lever replaces that full sort with
+`select_nth_unstable_by(idx, f64::total_cmp)` on the same private finite-score copy. The split-conformal level and rank
+formula, alpha normalization, fewer-than-two guard, non-finite filtering, and `f64::total_cmp` ordering are unchanged;
+selection therefore returns the exact bit pattern at the same fully sorted rank. The persisted score window is never
+mutated, and rolling eviction, decision action, admissible-action order, coverage accounting, serialization, and public
+types are untouched. Tie behavior follows the same total-order element, and RNG state is not involved.
+
+The single final foreground ship gate used one normal-`release` binary on the same `vmi1152480` worker: the default
+1,000-score window, a fixed LCG input, exact-bit preflight, three warmups, 31 ABBA-reversed samples per duplicate arm,
+and 64 calls per timed batch. Reported values are per-call latency.
+
+| same-binary quantile lifecycle | p50 A / B | p95 A / B | p99 A / B |
+| --- | ---: | ---: | ---: |
+| former full-sort path | 14,088 / 13,792 ns | 18,513 / 15,534 ns | 23,038 / 26,538 ns |
+| rank-selection candidate | 3,910 / 3,822 ns | 5,449 / 7,476 ns | 8,376 / 8,828 ns |
+
+Duplicate-p50 means are **13,940 ns** and **3,866 ns**, a **3.605794x** speedup and **72.266858% latency reduction**.
+The duplicate-p50 spreads are **2.146172%** former and **2.302459%** candidate. Mean p95 improves **2.634197x** and
+mean p99 improves **2.881655x**. This was the only final benchmark; no `release-perf` profile or LTO cold build ran.
+
+Correctness and build evidence is strict-remote. The focused normal-`release` proof is **1/1 green** with bit-exact
+full-sort parity across empty and singleton windows, non-finite persisted scores, signed zero, extrema, duplicates, six
+alpha modes, and 1,000 seeded values. The full `fp-runtime` library suite is **41 passed / 0 failed / 1 ignored
+foreground benchmark**. The first full-suite admission was refused before Cargo with
+`insufficient_slots=9,hard_preflight=1`; a two-job strict-remote retry passed. Workspace `check --all-targets` is green
+with five peer-owned `fp-columnar` warnings. Workspace Clippy stops before `fp-runtime` on the tracked 23 peer-owned
+`fp-columnar` findings, beginning with `clippy::unnecessary_map_or` at line 5938; scoped
+`fp-runtime --all-targets --no-deps -D warnings` Clippy is green. Fail-closed RCH rejected `cargo fmt --check` as a
+non-compilation command (`RCH-E301`), so no local Cargo fallback ran; direct Rustfmt and `git diff --check` are green.
+The bounded changed-file UBS scan reports **0 critical** findings; its warnings are broad test/hygiene inventory, with no
+production correctness or safety finding on the selection lever. No local Cargo command ran.
+
 ### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 monotonic predicates read their witness — 2132.524x p50
 
 Negative-ledger-first routing found affine Datetime64 construction, search, and frequency keeps but no monotonicity row.

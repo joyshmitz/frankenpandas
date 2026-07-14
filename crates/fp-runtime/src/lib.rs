@@ -731,22 +731,22 @@ impl ConformalGuard {
     /// Returns None if the window has fewer than 2 scores.
     #[must_use]
     pub fn conformal_quantile(&self) -> Option<f64> {
-        let mut sorted: Vec<f64> = self
+        let mut finite: Vec<f64> = self
             .scores
             .iter()
             .copied()
             .filter(|score| score.is_finite())
             .collect();
-        if sorted.len() < 2 {
+        if finite.len() < 2 {
             return None;
         }
-        sorted.sort_by(f64::total_cmp);
         // Quantile at level (1 - alpha)(1 + 1/n) per split conformal prediction
-        let n = sorted.len() as f64;
+        let n = finite.len() as f64;
         let level = (1.0 - normalize_conformal_alpha(self.alpha)) * (1.0 + 1.0 / n);
         let idx = (level * n).ceil() as usize;
-        let idx = idx.min(sorted.len()).saturating_sub(1);
-        Some(sorted[idx])
+        let idx = idx.min(finite.len()).saturating_sub(1);
+        let (_, quantile, _) = finite.select_nth_unstable_by(idx, f64::total_cmp);
+        Some(*quantile)
     }
 
     /// Evaluate a decision record against the conformal guard.
@@ -1827,6 +1827,167 @@ mod tests {
         let q1 = guard.conformal_quantile();
         let q2 = guard.conformal_quantile();
         assert_eq!(q1, q2);
+    }
+
+    fn full_sort_conformal_quantile(guard: &ConformalGuard) -> Option<f64> {
+        let mut sorted = guard
+            .scores
+            .iter()
+            .copied()
+            .filter(|score| score.is_finite())
+            .collect::<Vec<_>>();
+        if sorted.len() < 2 {
+            return None;
+        }
+        sorted.sort_by(f64::total_cmp);
+        let n = sorted.len() as f64;
+        let level = (1.0 - super::normalize_conformal_alpha(guard.alpha)) * (1.0 + 1.0 / n);
+        let idx = (level * n).ceil() as usize;
+        let idx = idx.min(sorted.len()).saturating_sub(1);
+        Some(sorted[idx])
+    }
+
+    #[test]
+    fn conformal_quantile_selection_matches_full_sort_bh91q() {
+        let mut state = 0xd1b5_4a32_d192_ed03_u64;
+        let mut random_scores = Vec::with_capacity(1_005);
+        for _ in 0..1_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            random_scores.push((state >> 11) as f64 / ((1_u64 << 53) as f64));
+        }
+        random_scores.extend([f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0, 0.0]);
+        let cases = [
+            Vec::new(),
+            vec![1.0],
+            vec![f64::NAN, f64::INFINITY, 2.0],
+            vec![-0.0, 0.0, -1.0, 1.0, 1.0, f64::MAX, f64::MIN],
+            random_scores,
+        ];
+
+        for scores in cases {
+            for alpha in [0.01, 0.1, 0.5, 0.99, f64::NAN, f64::INFINITY] {
+                let guard = ConformalGuard {
+                    window_size: scores.len().max(1),
+                    scores: scores.clone(),
+                    alpha,
+                    in_set_count: 0,
+                    total_count: 0,
+                };
+                let former = full_sort_conformal_quantile(&guard).map(f64::to_bits);
+                let candidate = guard.conformal_quantile().map(f64::to_bits);
+                assert_eq!(candidate, former, "len={} alpha={alpha}", scores.len());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn conformal_quantile_selection_ab_bh91q() {
+        const WINDOW: usize = 1_000;
+        const BATCH: usize = 64;
+        const SAMPLES: usize = 31;
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let scores = (0..WINDOW)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 11) as f64 / ((1_u64 << 53) as f64)
+            })
+            .collect::<Vec<_>>();
+        let guard = ConformalGuard {
+            scores,
+            window_size: WINDOW,
+            alpha: 0.1,
+            in_set_count: 0,
+            total_count: 0,
+        };
+
+        let former = full_sort_conformal_quantile(&guard).map(f64::to_bits);
+        let candidate = guard.conformal_quantile().map(f64::to_bits);
+        assert_eq!(candidate, former);
+
+        let measure_former = || {
+            let started = Instant::now();
+            let mut digest = 0_u64;
+            for _ in 0..BATCH {
+                let quantile = full_sort_conformal_quantile(black_box(&guard));
+                digest = digest.wrapping_add(quantile.map_or(0, f64::to_bits));
+            }
+            black_box(digest);
+            started.elapsed().as_nanos() / BATCH as u128
+        };
+        let measure_candidate = || {
+            let started = Instant::now();
+            let mut digest = 0_u64;
+            for _ in 0..BATCH {
+                let quantile = black_box(&guard).conformal_quantile();
+                digest = digest.wrapping_add(quantile.map_or(0, f64::to_bits));
+            }
+            black_box(digest);
+            started.elapsed().as_nanos() / BATCH as u128
+        };
+
+        for _ in 0..3 {
+            black_box(measure_former());
+            black_box(measure_candidate());
+        }
+        let mut former_a = Vec::with_capacity(SAMPLES);
+        let mut former_b = Vec::with_capacity(SAMPLES);
+        let mut candidate_a = Vec::with_capacity(SAMPLES);
+        let mut candidate_b = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_a.push(measure_former());
+                candidate_a.push(measure_candidate());
+                candidate_b.push(measure_candidate());
+                former_b.push(measure_former());
+            } else {
+                former_b.push(measure_former());
+                candidate_b.push(measure_candidate());
+                candidate_a.push(measure_candidate());
+                former_a.push(measure_former());
+            }
+        }
+        former_a.sort_unstable();
+        former_b.sort_unstable();
+        candidate_a.sort_unstable();
+        candidate_b.sort_unstable();
+        let percentile = |samples: &[u128], pct: usize| {
+            let rank = (samples.len() * pct).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        };
+        let former_a_p50 = percentile(&former_a, 50);
+        let former_b_p50 = percentile(&former_b, 50);
+        let candidate_a_p50 = percentile(&candidate_a, 50);
+        let candidate_b_p50 = percentile(&candidate_b, 50);
+        let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+        let candidate_mean = (candidate_a_p50 + candidate_b_p50) as f64 / 2.0;
+        println!(
+            "fp-runtime conformal quantile A/B: window={WINDOW} batch={BATCH} samples={SAMPLES}"
+        );
+        println!("former full-sort p50 A/B: {former_a_p50} / {former_b_p50} ns");
+        println!("candidate selection p50 A/B: {candidate_a_p50} / {candidate_b_p50} ns");
+        println!(
+            "former full-sort p95/p99 A: {} / {} ns; B: {} / {} ns",
+            percentile(&former_a, 95),
+            percentile(&former_a, 99),
+            percentile(&former_b, 95),
+            percentile(&former_b, 99)
+        );
+        println!(
+            "candidate selection p95/p99 A: {} / {} ns; B: {} / {} ns",
+            percentile(&candidate_a, 95),
+            percentile(&candidate_a, 99),
+            percentile(&candidate_b, 95),
+            percentile(&candidate_b, 99)
+        );
+        println!(
+            "former/candidate ratio: {:.6}x",
+            former_mean / candidate_mean
+        );
     }
 
     // --- AG-09-T: Conformal Calibration Tests ---

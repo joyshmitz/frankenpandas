@@ -568,7 +568,7 @@ impl RaptorQEnvelope {
     ) -> Self {
         let symbol_hashes: Vec<String> = source_bytes
             .chunks(DEFAULT_RAPTORQ_SYMBOL_BYTES)
-            .map(|chunk| format!("sha256:{}", sha256_hex(chunk)))
+            .map(sha256_prefixed_hex)
             .collect();
         let k = u32::try_from(symbol_hashes.len()).unwrap_or(u32::MAX);
         let overhead_ratio = if k == 0 {
@@ -580,7 +580,7 @@ impl RaptorQEnvelope {
         Self {
             artifact_id: artifact_id.into(),
             artifact_type: artifact_type.into(),
-            source_hash: format!("sha256:{}", sha256_hex(source_bytes)),
+            source_hash: sha256_prefixed_hex(source_bytes),
             raptorq: RaptorQMetadata {
                 k,
                 repair_symbols,
@@ -646,14 +646,26 @@ fn sha256_hex(bytes: &[u8]) -> String {
     sha256_digest_hex(digest)
 }
 
+fn sha256_prefixed_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(7 + 64);
+    hex.push_str("sha256:");
+    append_sha256_digest_hex(&mut hex, digest);
+    hex
+}
+
 fn sha256_digest_hex(digest: impl IntoIterator<Item = u8>) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut hex = String::with_capacity(64);
+    append_sha256_digest_hex(&mut hex, digest);
+    hex
+}
+
+fn append_sha256_digest_hex(hex: &mut String, digest: impl IntoIterator<Item = u8>) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in digest {
         hex.push(char::from(HEX[usize::from(byte >> 4)]));
         hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
-    hex
 }
 
 // === Conformal Calibration for Decision Engine (bd-2t5e.9, AG-09) ===
@@ -938,6 +950,79 @@ mod tests {
             b.finish(),
             super::semantic_fingerprint_bytes(b"hello world")
         );
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn raptorq_prefixed_sha256_single_buffer_ab_qfz4j() {
+        fn former(bytes: &[u8]) -> String {
+            format!("sha256:{}", super::sha256_hex(bytes))
+        }
+
+        fn one_buffer(bytes: &[u8]) -> String {
+            super::sha256_prefixed_hex(bytes)
+        }
+
+        fn elapsed(source: &[u8], hash: impl Fn(&[u8]) -> String) -> u128 {
+            let start = Instant::now();
+            let mut digest = 0_usize;
+            for chunk in source.chunks(super::DEFAULT_RAPTORQ_SYMBOL_BYTES) {
+                digest = digest.wrapping_add(black_box(hash(black_box(chunk))).len());
+            }
+            black_box(digest);
+            start.elapsed().as_nanos()
+        }
+
+        fn median(values: &mut [u128]) -> u128 {
+            values.sort_unstable();
+            values[values.len() / 2]
+        }
+
+        for len in [0, 1, 31, 1_023, 1_024, 1_025, 4_097] {
+            let bytes: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            assert_eq!(former(&bytes), one_buffer(&bytes));
+        }
+
+        let source: Vec<u8> = (0..4 * 1_024 * 1_024)
+            .map(|i| ((i * 131 + i / 17) % 251) as u8)
+            .collect();
+        for chunk in source.chunks(super::DEFAULT_RAPTORQ_SYMBOL_BYTES) {
+            assert_eq!(former(chunk), one_buffer(chunk));
+        }
+
+        for _ in 0..2 {
+            black_box(elapsed(&source, former));
+            black_box(elapsed(&source, one_buffer));
+        }
+
+        let mut former_samples = Vec::with_capacity(18);
+        let mut candidate_samples = Vec::with_capacity(18);
+        for block in 0..9 {
+            if block % 2 == 0 {
+                former_samples.push(elapsed(&source, former));
+                candidate_samples.push(elapsed(&source, one_buffer));
+                candidate_samples.push(elapsed(&source, one_buffer));
+                former_samples.push(elapsed(&source, former));
+            } else {
+                candidate_samples.push(elapsed(&source, one_buffer));
+                former_samples.push(elapsed(&source, former));
+                former_samples.push(elapsed(&source, former));
+                candidate_samples.push(elapsed(&source, one_buffer));
+            }
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        eprintln!(
+            "RAPTORQ_HASH_AB bytes={} symbols={} former_p50_ns={} candidate_p50_ns={} ratio={:.6}",
+            source.len(),
+            source.len() / super::DEFAULT_RAPTORQ_SYMBOL_BYTES,
+            former_p50,
+            candidate_p50,
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("RAPTORQ_HASH_AB former_samples_ns={former_samples:?}");
+        eprintln!("RAPTORQ_HASH_AB candidate_samples_ns={candidate_samples:?}");
     }
 
     #[test]

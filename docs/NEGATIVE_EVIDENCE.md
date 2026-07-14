@@ -15334,6 +15334,39 @@ one in a peer-added test left outside this commit.
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
 `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: RaptorQ prefixed SHA-256 writes one buffer — 1.084x p50
+
+Negative-ledger-first routing (`br-frankenpandas-qfz4j`) found no prior row for the `fp-runtime` RaptorQ hash-emission
+allocation seam after `bv --robot-triage` reported 3,672 total beads, 356 open, 340 actionable, four blocked, and one
+in progress. The ranked perf leaves were stale or already-owned, so the fresh runtime seam scored
+`impact 3 × confidence 5 ÷ effort 1 = 15`: every 1 KiB source symbol first allocated a 64-byte hexadecimal digest and
+then allocated and copied it again through `format!("sha256:{}", ...)`.
+
+The one lever adds the `sha256:` prefix and hexadecimal digest to one exactly sized `String`, then routes
+`RaptorQEnvelope::from_source_bytes` symbol and source hashes through it. Hash algorithm, lowercase encoding, prefix,
+symbol boundaries, manifest fields, and empty-source behavior are unchanged; all unprefixed semantic-fingerprint
+callers retain the existing helper.
+
+The pre-production-edit attribution ran on `vmi1227854` with a 4 MiB source (4,096 real 1 KiB symbols), two warmups,
+nine reversed ABBA blocks, and 18 samples per arm. The exact former body measured **3,088,567 ns p50** versus
+**2,689,200 ns p50** for the single-buffer candidate (**1.148508x**), with the candidate maximum below the former
+minimum. The final same-binary `--profile release` ship gate ran on the same worker and completed its timed body in
+0.13 seconds:
+
+| final same-binary arm | p50 |
+| --- | ---: |
+| former two-allocation hash | 3,008,929 ns |
+| single-buffer hash | 2,775,159 ns |
+
+The final candidate is **1.084237x faster at p50** (**7.769% latency reduction**). The harness asserts byte-for-byte
+parity across empty and symbol-boundary lengths and across all 4,096 measured chunks before timing.
+
+Correctness: strict-remote `fp-runtime --lib` is **41 passed, 0 failed, 2 ignored**; focused
+`fp-runtime --all-targets --no-deps -D warnings` Clippy is green. The bounded UBS scan reports **0 critical** while
+reproducing broad pre-existing whole-file warnings; no actionable defect was found in the touched helper. Direct
+Rustfmt and `git diff --check` are green. All Cargo commands used fail-closed RCH remote execution; no local Cargo or
+`release-perf` command ran.
+
 ### 2026-07-14 IvoryGlacier — WIN: `Timedelta::isoformat` writes one output buffer — 2.223x p50
 
 Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable). The ranked perf work was

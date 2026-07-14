@@ -16468,6 +16468,32 @@ and the changed Criterion file plus `git diff --check` are clean. Bounded UBS re
 the pre-existing benchmark-only `panic!` at line 75, with no finding on the lever; its shadow fmt/check/test subchecks are
 green. All agent-invoked Cargo commands ran through strict-remote RCH; no `release-perf` build ran.
 
+### 2026-07-14 IvoryGlacier — BENCH-COST PROHIBITIVE: chained-comparison parser operand moves
+
+Negative-ledger-first routing began with `bv --robot-triage` (3,673 total beads, 356 open, 340 actionable, four
+blocked, one in progress, and no dependency cycles). The ranked perf umbrella was assigned; its apparent index-gather
+quick wins were `cc`/`cod-b` owned, while the generic dedup idea was already ledgered as unmeasurable on the real typed
+paths. The pass therefore pivoted to the distinct `fp-expr` parser boundary (`br-frankenpandas-ocf9f`). No prior ledger
+row covered `parse_comparison` operand cloning.
+
+Code attribution found that every ordinary comparison cloned both parsed operands before retaining the right operand as
+the next chained pair's left side. For a 64-operand pandas-style chain, moving the consumed left AST into
+`Expr::Compare` would remove one recursive boxed-AST clone per operator while retaining the right clone required by
+pairwise chained-comparison semantics. The opportunity scored `impact 3 * confidence 5 / effort 1 = 15`. An ignored,
+test-only former/candidate harness asserted exact AST equality, parsed positions, and 64-operand chain shape before a
+two-warmup, nine-block reversed-ABBA timing body; production parser code was not changed.
+
+**BENCH-COST PROHIBITIVE — NO PERFORMANCE VERDICT.** The strict-remote foreground command used normal
+`--profile release` on `vmi1227854` with a hard 180-second timeout. RCH spent 32.376 seconds synchronizing, then compiled
+the release dependency graph through `fp-types`, `fp-runtime`, `fp-columnar`, `fp-index`, and into `fp-frame`; it never
+reached `fp-expr`, the test binary, or the timed path before exit 124. Per the cheap-bench rule, the cold build was not
+retried and no local fallback or `release-perf` build ran.
+
+The ignored attribution harness was removed manually, and `crates/fp-expr/src/lib.rs` is byte-identical to `HEAD`.
+Retry only with an already-warm `fp-expr` normal-release test binary or a smaller standalone parser target that is known
+to return inside the cap; retain the exact-AST differential and same-binary former/candidate arms. This row and the bead
+record are the only deliverables from the rejected lever.
+
 ### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 monotonic predicates read their witness — 2132.524x p50
 
 Negative-ledger-first routing found affine Datetime64 construction, search, and frequency keeps but no monotonicity row.

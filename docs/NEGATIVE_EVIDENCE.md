@@ -15376,6 +15376,45 @@ reproducing the tracked broad whole-file warning inventory; no touched productio
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran.
 `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: affine Datetime64 `min` reads its endpoint witness — 9146.304x p50
+
+Negative-ledger-first routing found the adjacent affine Datetime64 monotonicity, frequency, and `nunique` keeps but no
+`min` row. `Index::min` already used a validated affine endpoint for Int64, while the same lazy Datetime64
+`(start, step, len)` backing fell through to materialize and scan every 32-byte `IndexLabel`. This is a fresh reduction
+boundary, not a retry of the eager temporal dedup family. The opportunity score was
+`impact 4 * confidence 5 / effort 1 = 20`.
+
+One lever (`br-frankenpandas-hi31t`) reads the Datetime64 endpoint. Affine construction rejects a zero step when
+`len > 1` and validates the final endpoint, so the first value is the minimum for a positive step and the last is the
+minimum for a negative step. `IndexLabel::Datetime64` derives ordering from its raw `i64` nanoseconds; therefore the
+endpoint result also preserves the former handling of the reserved `i64::MIN` NaT sentinel. Empty and singleton ranges
+retain their exact answers. Non-affine Datetime64, Timedelta64, Int64, mixed, duplicate, nullable, and irregular indexes
+retain the former paths. `max`, `argmin`, and `argmax` are deliberately untouched; ordering, tie-breaking, floating
+point, and RNG state do not change.
+
+The single strict-remote foreground benchmark ran on `vmi1152480` in one release-perf binary. It used one-million-row
+ascending affine ranges, three warmups, 15 ABBA-reversed samples per duplicate arm, an equality preflight, and an exact
+transcription of the former `min` body as the reference. Warmup leaves the former arm's label cache hot, so the result
+conservatively measures the repeated scan and omits the avoided first-call materialization cost.
+
+| same-binary arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| former materialize/scan body | 3,135,777 ns | 3,184,319 ns | 3,160,048.0 ns |
+| affine endpoint witness | 441 ns | 250 ns | 345.5 ns |
+
+The candidate is **9146.304x faster at p50** (**99.9891% latency reduction**). Duplicate former-body controls differ by
+**1.548%**. The witness arm is below one microsecond, so its duplicate spread is timer-floor noise rather than a useful
+stability statistic; the four-order-of-magnitude separation is decisive.
+
+Correctness: the strict-remote focused eager-oracle proof is **1/1 green** across empty, regular and NaT singletons,
+ascending, descending, NaT-starting, NaT-ending, and near-`i64::MAX` ranges. It also proves that neither the label
+materialization cache nor the failed Int64-view cache initializes. Scoped strict-remote
+`fp-index --all-targets --no-deps -D warnings` Clippy is green. Strict-remote workspace `check --all-targets` is green
+with five peer-owned `fp-columnar` warnings. The bounded static-only UBS scan reports **0 critical** findings while
+reproducing the tracked broad whole-file warning inventory; no touched production line was identified as actionable.
+Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran.
+`git diff --check` is green. No local Cargo command ran.
+
 ### 2026-07-14 IvoryGlacier — WIN: temporal INNER validates while intersecting — 1.396x p50
 
 Negative-ledger-first routing found the temporal INNER raw-nanosecond keep, plus later validation-fusion keeps for its

@@ -3990,6 +3990,17 @@ impl Index {
             let position = if affine.step >= 0 { 0 } else { affine.len - 1 };
             return Some(IndexLabel::Int64(affine.value_at(position)));
         }
+        // Datetime64 affine ranges have the same validated endpoint witness.
+        // Derived IndexLabel ordering compares their raw nanoseconds, including
+        // the reserved i64::MIN NaT sentinel, so the minimum is exactly the
+        // first endpoint when ascending and the last when descending.
+        if let Some(affine) = self.labels.datetime64_affine_range() {
+            if affine.len == 0 {
+                return None;
+            }
+            let position = if affine.step >= 0 { 0 } else { affine.len - 1 };
+            return Some(IndexLabel::Datetime64(affine.value_at(position)));
+        }
         // Lazy typed/strided Int64: scan raw i64 values and return the same
         // scalar the IndexLabel fallback would have yielded, without materializing.
         if self.labels.has_lazy_int64_backing()
@@ -23635,6 +23646,134 @@ mod tests {
         let witness_mean = (witness_a_p50 + witness_b_p50) as f64 / 2.0;
 
         println!("affine Datetime64 nunique, len={LEN}, samples={SAMPLES}");
+        println!("former body p50 A/B: {former_a_p50} / {former_b_p50} ns");
+        println!("affine witness p50 A/B: {witness_a_p50} / {witness_b_p50} ns");
+        println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);
+        assert!(candidate_a.labels.materialized.get().is_none());
+        assert!(candidate_b.labels.materialized.get().is_none());
+    }
+
+    #[test]
+    fn datetime64_affine_min_matches_eager_oracle_hi31t() {
+        let cases = [
+            ("empty", 0, 0, 0),
+            ("singleton", 7, 0, 1),
+            ("singleton_nat", i64::MIN, 0, 1),
+            ("ascending", 0, 2, 4),
+            ("descending", 12, -4, 4),
+            ("nat_start", i64::MIN, 1, 4),
+            ("nat_end", i64::MIN + 3, -1, 4),
+            ("near_max", i64::MAX, -1, 3),
+        ];
+
+        for (name, start, step, len) in cases {
+            let affine = Index::from_datetime64_affine_range(start, step, len)
+                .expect("valid Datetime64 affine range");
+            let eager_values = (0..len)
+                .map(|offset| {
+                    let offset = i64::try_from(offset).expect("test offset fits i64");
+                    start
+                        .checked_add(step.checked_mul(offset).expect("test span fits i64"))
+                        .expect("test endpoint fits i64")
+                })
+                .collect();
+            let eager = Index::from_datetime64(eager_values);
+
+            assert_eq!(affine.min(), eager.min(), "{name}");
+            assert!(
+                affine.labels.materialized.get().is_none(),
+                "{name}: affine min must not materialize labels",
+            );
+            assert!(
+                affine.labels.int64_typed.get().is_none(),
+                "{name}: affine min must not probe the Int64 view",
+            );
+        }
+    }
+
+    fn datetime64_min_former_body_hi31t(index: &Index) -> Option<IndexLabel> {
+        if let Some(affine) = index.labels.int64_affine_range() {
+            if affine.len == 0 {
+                return None;
+            }
+            let position = if affine.step >= 0 { 0 } else { affine.len - 1 };
+            return Some(IndexLabel::Int64(affine.value_at(position)));
+        }
+        if index.labels.has_lazy_int64_backing()
+            && let Some(values) = index.labels.int64_view()
+        {
+            return values.iter().copied().min().map(IndexLabel::Int64);
+        }
+        index.labels.iter().min().cloned()
+    }
+
+    fn median_nanos_hi31t(samples: &mut [u128]) -> u128 {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    fn measure_min_nanos_hi31t<T>(f: impl FnOnce() -> T) -> u128 {
+        let start = std::time::Instant::now();
+        std::hint::black_box(f());
+        start.elapsed().as_nanos()
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn datetime64_affine_min_ab_hi31t() {
+        const LEN: usize = 1_000_000;
+        const SAMPLES: usize = 15;
+        let reference_a = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let reference_b = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let candidate_a = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let candidate_b = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+
+        assert_eq!(
+            datetime64_min_former_body_hi31t(&reference_a),
+            candidate_a.min(),
+        );
+        assert!(candidate_a.labels.materialized.get().is_none());
+        for _ in 0..3 {
+            std::hint::black_box(datetime64_min_former_body_hi31t(&reference_a));
+            std::hint::black_box(datetime64_min_former_body_hi31t(&reference_b));
+            std::hint::black_box(candidate_a.min());
+            std::hint::black_box(candidate_b.min());
+        }
+
+        let mut former_a = Vec::with_capacity(SAMPLES);
+        let mut former_b = Vec::with_capacity(SAMPLES);
+        let mut witness_a = Vec::with_capacity(SAMPLES);
+        let mut witness_b = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_a.push(measure_min_nanos_hi31t(|| {
+                    datetime64_min_former_body_hi31t(&reference_a)
+                }));
+                witness_a.push(measure_min_nanos_hi31t(|| candidate_a.min()));
+                witness_b.push(measure_min_nanos_hi31t(|| candidate_b.min()));
+                former_b.push(measure_min_nanos_hi31t(|| {
+                    datetime64_min_former_body_hi31t(&reference_b)
+                }));
+            } else {
+                former_b.push(measure_min_nanos_hi31t(|| {
+                    datetime64_min_former_body_hi31t(&reference_b)
+                }));
+                witness_b.push(measure_min_nanos_hi31t(|| candidate_b.min()));
+                witness_a.push(measure_min_nanos_hi31t(|| candidate_a.min()));
+                former_a.push(measure_min_nanos_hi31t(|| {
+                    datetime64_min_former_body_hi31t(&reference_a)
+                }));
+            }
+        }
+
+        let former_a_p50 = median_nanos_hi31t(&mut former_a);
+        let former_b_p50 = median_nanos_hi31t(&mut former_b);
+        let witness_a_p50 = median_nanos_hi31t(&mut witness_a);
+        let witness_b_p50 = median_nanos_hi31t(&mut witness_b);
+        let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+        let witness_mean = (witness_a_p50 + witness_b_p50) as f64 / 2.0;
+
+        println!("affine Datetime64 min, len={LEN}, samples={SAMPLES}");
         println!("former body p50 A/B: {former_a_p50} / {former_b_p50} ns");
         println!("affine witness p50 A/B: {witness_a_p50} / {witness_b_p50} ns");
         println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);

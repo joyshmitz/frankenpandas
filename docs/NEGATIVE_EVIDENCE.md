@@ -16198,6 +16198,53 @@ non-compilation command (`RCH-E301`), so no local Cargo fallback ran; direct Rus
 The bounded changed-file UBS scan reports **0 critical** findings; its warnings are broad test/hygiene inventory, with no
 production correctness or safety finding on the selection lever. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — INVALID/HOLD: `fp_types::nansem` single-buffer lever hit allocator carry-over
+
+Negative-ledger-first routing began with `bv --robot-triage` (3,666 issues, 356 open, 340 actionable, four blocked, no
+dependency cycles). The graph's perf umbrella was assigned and its apparent quick wins were already owned, landed, or
+rejected. The preceding runtime vein had yielded a keep, so this pass pivoted to the fresh `fp-types` reduction boundary.
+The ledger already records typed `Column::sem` bypasses, but not the public `fp_types::nansem` primitive itself. Its numeric
+arm collects finite values to obtain `n`, then calls `nanstd -> nanvar`, which collects the same `Scalar` slice again. The
+one candidate for `br-frankenpandas-xyn71` reused the first buffer for the existing mean-centered variance, square root,
+and `sqrt(n)` division. Opportunity score was `impact 4 * confidence 5 / effort 1 = 20`.
+
+Attribution preceded the production edit. A strict-remote normal-`release` probe on `vmi1152480` used one million Int64
+scalars with every 257th value missing and five foreground calls per phase:
+
+| pre-edit attributed phase | five-call total |
+| --- | ---: |
+| first `collect_finite` alone | 26.441 ms |
+| existing `nanstd` tail | 31.756 ms |
+| public `nansem` lifecycle | 91.846 ms |
+| proposed single-buffer formula | 34.912 ms |
+
+The directional attribution ratio was **2.631x**, confirming the duplicate buffer was material. The lever did not change
+the Timedelta64 branch or arithmetic: the same finite values, in the same order, fed the same `sum / n`, squared-deviation
+fold, `/(n-ddof)`, `.sqrt()`, and `/sqrt(n)` operations. A focused strict-remote normal-`release` proof was **1/1 green**
+and bit-exact against the former implementation across empty/insufficient input, null-bearing mixed numerics, a 4,096-value
+Int64 case, and nonnumeric values.
+
+The single final foreground gate used the same worker and normal `release`, one million rows, and nine `A-B-B-A` blocks:
+
+| same-binary lifecycle | p50 |
+| --- | ---: |
+| former double-buffer path | 16.283 ms |
+| single-buffer candidate | 8.766 ms |
+| directional ratio | **1.857x** |
+| adjacent candidate A/A control | **1.5428x (54.28% spread)** |
+
+**INVALID — no performance verdict.** The adjacent same-arm control is far too broad to certify the directional median,
+and its placement immediately after the allocator-heavy former arm admits the ledger's known cross-arm allocator carry-over:
+the former path allocates and drops two large vectors, after which the first candidate call can be charged reclamation while
+the second can reuse allocator state. This gate therefore cannot separate the lever from arm-order state. Per the explicit
+one-final-benchmark constraint, no retry or additional timing was run. The production and test hunks were removed manually;
+`crates/fp-types/src/lib.rs` is byte-identical to `HEAD`, so this closeout retains only the evidence row and bead record.
+
+Retry only with the same one-binary comparison after an untimed same-arm warmup immediately before every timed sample (or
+a short same-arm batch whose per-operation samples are reported), plus candidate A/A controls that are not preceded by the
+other arm's vector drops. Preserve the exact-bit proof, pinned worker, normal `release`, and raw per-position timing vectors.
+No local Cargo command ran, no `release-perf` build ran, and strict RCH never fell back locally.
+
 ### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 monotonic predicates read their witness — 2132.524x p50
 
 Negative-ledger-first routing found affine Datetime64 construction, search, and frequency keeps but no monotonicity row.

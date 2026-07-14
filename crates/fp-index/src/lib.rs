@@ -4056,6 +4056,13 @@ impl Index {
         if let Some(affine) = self.labels.int64_affine_range() {
             return (affine.len > 0).then(|| if affine.step >= 0 { 0 } else { affine.len - 1 });
         }
+        // A validated Datetime64 affine range is unique for len > 1, and its
+        // raw-nanosecond ordering is the same ordering used by IndexLabel.
+        // Therefore the minimum position is the corresponding endpoint even
+        // when that endpoint is the reserved i64::MIN NaT sentinel.
+        if let Some(affine) = self.labels.datetime64_affine_range() {
+            return (affine.len > 0).then(|| if affine.step >= 0 { 0 } else { affine.len - 1 });
+        }
         // Lazy typed/strided Int64: scan the i64 view with the identical min_by
         // (last-of-equal) tie-break — bit-identical, no label vector. Guarded by
         // has_lazy_int64_backing so already-materialized indexes keep the label
@@ -23912,6 +23919,139 @@ mod tests {
         let witness_mean = (witness_a_p50 + witness_b_p50) as f64 / 2.0;
 
         println!("affine Datetime64 max, len={LEN}, samples={SAMPLES}");
+        println!("former body p50 A/B: {former_a_p50} / {former_b_p50} ns");
+        println!("affine witness p50 A/B: {witness_a_p50} / {witness_b_p50} ns");
+        println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);
+        assert!(candidate_a.labels.materialized.get().is_none());
+        assert!(candidate_b.labels.materialized.get().is_none());
+    }
+
+    #[test]
+    fn datetime64_affine_argmin_matches_eager_oracle_wxjca() {
+        let cases = [
+            ("empty", 0, 0, 0),
+            ("singleton", 7, 0, 1),
+            ("singleton_nat", i64::MIN, 0, 1),
+            ("ascending", 0, 2, 4),
+            ("descending", 12, -4, 4),
+            ("nat_start", i64::MIN, 1, 4),
+            ("nat_end", i64::MIN + 3, -1, 4),
+            ("near_max", i64::MAX, -1, 3),
+        ];
+
+        for (name, start, step, len) in cases {
+            let affine = Index::from_datetime64_affine_range(start, step, len)
+                .expect("valid Datetime64 affine range");
+            let eager_values = (0..len)
+                .map(|offset| {
+                    let offset = i64::try_from(offset).expect("test offset fits i64");
+                    start
+                        .checked_add(step.checked_mul(offset).expect("test span fits i64"))
+                        .expect("test endpoint fits i64")
+                })
+                .collect();
+            let eager = Index::from_datetime64(eager_values);
+
+            assert_eq!(affine.argmin(), eager.argmin(), "{name}");
+            assert!(
+                affine.labels.materialized.get().is_none(),
+                "{name}: affine argmin must not materialize labels",
+            );
+            assert!(
+                affine.labels.int64_typed.get().is_none(),
+                "{name}: affine argmin must not probe the Int64 view",
+            );
+        }
+    }
+
+    fn datetime64_argmin_former_body_wxjca(index: &Index) -> Option<usize> {
+        if let Some(affine) = index.labels.int64_affine_range() {
+            return (affine.len > 0).then(|| if affine.step >= 0 { 0 } else { affine.len - 1 });
+        }
+        if index.labels.has_lazy_int64_backing()
+            && let Some(values) = index.labels.int64_view()
+        {
+            return values
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a.cmp(b))
+                .map(|(i, _)| i);
+        }
+        index
+            .labels
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.cmp(b))
+            .map(|(i, _)| i)
+    }
+
+    fn median_nanos_wxjca(samples: &mut [u128]) -> u128 {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    fn measure_argmin_nanos_wxjca<T>(f: impl FnOnce() -> T) -> u128 {
+        let start = std::time::Instant::now();
+        std::hint::black_box(f());
+        start.elapsed().as_nanos()
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn datetime64_affine_argmin_ab_wxjca() {
+        const LEN: usize = 1_000_000;
+        const SAMPLES: usize = 15;
+        let reference_a = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let reference_b = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let candidate_a = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let candidate_b = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+
+        assert_eq!(
+            datetime64_argmin_former_body_wxjca(&reference_a),
+            candidate_a.argmin(),
+        );
+        assert!(candidate_a.labels.materialized.get().is_none());
+        for _ in 0..3 {
+            std::hint::black_box(datetime64_argmin_former_body_wxjca(&reference_a));
+            std::hint::black_box(datetime64_argmin_former_body_wxjca(&reference_b));
+            std::hint::black_box(candidate_a.argmin());
+            std::hint::black_box(candidate_b.argmin());
+        }
+
+        let mut former_a = Vec::with_capacity(SAMPLES);
+        let mut former_b = Vec::with_capacity(SAMPLES);
+        let mut witness_a = Vec::with_capacity(SAMPLES);
+        let mut witness_b = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_a.push(measure_argmin_nanos_wxjca(|| {
+                    datetime64_argmin_former_body_wxjca(&reference_a)
+                }));
+                witness_a.push(measure_argmin_nanos_wxjca(|| candidate_a.argmin()));
+                witness_b.push(measure_argmin_nanos_wxjca(|| candidate_b.argmin()));
+                former_b.push(measure_argmin_nanos_wxjca(|| {
+                    datetime64_argmin_former_body_wxjca(&reference_b)
+                }));
+            } else {
+                former_b.push(measure_argmin_nanos_wxjca(|| {
+                    datetime64_argmin_former_body_wxjca(&reference_b)
+                }));
+                witness_b.push(measure_argmin_nanos_wxjca(|| candidate_b.argmin()));
+                witness_a.push(measure_argmin_nanos_wxjca(|| candidate_a.argmin()));
+                former_a.push(measure_argmin_nanos_wxjca(|| {
+                    datetime64_argmin_former_body_wxjca(&reference_a)
+                }));
+            }
+        }
+
+        let former_a_p50 = median_nanos_wxjca(&mut former_a);
+        let former_b_p50 = median_nanos_wxjca(&mut former_b);
+        let witness_a_p50 = median_nanos_wxjca(&mut witness_a);
+        let witness_b_p50 = median_nanos_wxjca(&mut witness_b);
+        let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+        let witness_mean = (witness_a_p50 + witness_b_p50) as f64 / 2.0;
+
+        println!("affine Datetime64 argmin, len={LEN}, samples={SAMPLES}");
         println!("former body p50 A/B: {former_a_p50} / {former_b_p50} ns");
         println!("affine witness p50 A/B: {witness_a_p50} / {witness_b_p50} ns");
         println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);

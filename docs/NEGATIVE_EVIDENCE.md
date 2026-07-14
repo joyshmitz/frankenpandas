@@ -15334,6 +15334,60 @@ one in a peer-added test left outside this commit.
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
 `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 monotonic predicates read their witness — 2132.524x p50
+
+Negative-ledger-first routing found affine Datetime64 construction, search, and frequency keeps but no monotonicity row.
+`Index::is_monotonic_increasing` and `is_monotonic_decreasing` recognized affine Int64 backings, yet an equally validated
+Datetime64 `(start, step, len)` backing fell through the Int64-view probe and then materialized and scanned one million
+`IndexLabel::Datetime64` values.
+
+One lever (`br-frankenpandas-jrlto`) reads the Datetime64 affine step sign before that materialization boundary, but only
+when the validated range does not contain the reserved `i64::MIN` NaT sentinel. Nondecreasing is exactly `step >= 0`;
+nonincreasing is exactly `step <= 0`. Empty and singleton indexes retain the existing first guard. Affine construction
+already rejects a zero step when `len > 1` and proves the final endpoint cannot overflow. For NaT-free ranges,
+`IndexLabel::Datetime64` orders the same raw `i64` nanoseconds, so positive, negative, and boundary cases remain identical
+to the former label-window result. NaT-starting and NaT-ending affine ranges explicitly decline the shortcut and retain
+the existing materializing fallback; pandas-parity for the pre-existing generic and singleton-NaT behavior is tracked by
+`br-frankenpandas-x6i5k`. Non-affine, eager, mixed, duplicate, nullable, and irregular indexes retain the former paths;
+no floating-point or RNG behavior is involved.
+
+The strict-remote foreground harness starts with separate one-million-row lazy ascending date ranges for the former
+label-window reference and public arm. Its equality preflight warms the reference's materialized labels while leaving the
+witness-backed candidate lazy; timing then uses three warmups, 15 alternating samples, duplicate reference/reference
+controls, and a two-bit digest of both monotonic predicates. On this ascending workload the increasing reference scans
+all rows and the decreasing reference exits after the first pair, so the result is scoped to the combined public-call
+digest rather than either direction independently. On the pre-production implementation at `vmi1227854`, the public
+path remained in the O(n) control envelope:
+
+| pre-production arm | p50 | p95 | max |
+| --- | ---: | ---: | ---: |
+| label-window control A | 1,245,376 ns | 1,377,515 ns | 1,605,546 ns |
+| label-window control B | 1,289,483 ns | 1,486,008 ns | 1,567,009 ns |
+| label-window reference | 1,133,198 ns | 1,317,914 ns | 1,371,966 ns |
+| pre-production public path | 1,037,074 ns | 1,300,228 ns | 1,391,114 ns |
+
+The final exact-source ship gate ran both arms from one binary on `vmi1152480`; duplicate label-window controls differ by
+**0.4721%** at p50:
+
+| final same-binary arm | p50 | p95 | max |
+| --- | ---: | ---: | ---: |
+| label-window control A | 1,477,693 ns | 1,594,467 ns | 1,620,385 ns |
+| label-window control B | 1,470,733 ns | 1,603,921 ns | 1,643,420 ns |
+| label-window reference | 1,494,899 ns | 1,813,914 ns | 1,900,684 ns |
+| affine-witness candidate | 701 ns | 1,252 ns | 1,432 ns |
+
+Reference/candidate is **2132.5235x p50** (**99.953107% latency reduction**) and **1448.8131x p95**. The focused
+strict-remote eager-oracle proof is **1/1 green** across NaT-free ascending, descending, empty, singleton, and
+near-`i64::MAX` ranges; those cases prove that neither the IndexLabel cache nor the failed Int64-view cache initializes.
+Separate NaT-starting and NaT-ending cases prove that the shortcut is declined and the eager cache materializes. The
+exact-source full `fp-index` library suite is **531 passed / 0 failed / 1 ignored**, and scoped
+`fp-index --all-targets --no-deps -D warnings` Clippy is green. Exact-source workspace `check --all-targets` is green
+with five peer-owned `fp-columnar` warnings. Full workspace Clippy was admitted remotely but remains blocked before
+`fp-index` by 23 peer-owned `fp-columnar` findings; the first is `clippy::unnecessary_map_or` at
+`crates/fp-columnar/src/lib.rs:5938`. Fail-closed RCH rejected `cargo fmt --check` as a non-compilation command
+(`RCH-E301`), so no local fallback ran. The bounded static-only UBS scan reports **0 critical** findings, and
+`git diff --check` is green.
+
 ### 2026-07-13 IvoryGlacier — WIN: regular temporal LEFT joins plan over raw nanoseconds — 22.418x p50
 
 Negative-ledger-first routing skipped the exhausted numeric DataFrame surface and took the still-unprobed temporal LEFT

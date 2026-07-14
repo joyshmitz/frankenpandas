@@ -3094,6 +3094,16 @@ impl Index {
         if let Some(affine) = self.labels.int64_affine_range() {
             return affine.step >= 0;
         }
+        // Datetime64 affine backings carry the same validated `(start, step,
+        // len)` witness. IndexLabel::Datetime64 ordering compares the raw
+        // nanoseconds, so the step sign is exactly the former label-window
+        // result without materializing any labels. Keep NaT-bearing ranges on
+        // the existing fallback because i64::MIN is the reserved NaT sentinel.
+        if let Some(affine) = self.labels.datetime64_affine_range()
+            && affine.position(i64::MIN).is_none()
+        {
+            return affine.step >= 0;
+        }
         // Typed non-affine Int64: scan the i64 view instead of the wider
         // IndexLabel window, so we never materialize the label vector. All-Int64
         // backings carry no missing labels and IndexLabel::Int64 Ord matches i64
@@ -3124,6 +3134,11 @@ impl Index {
         // step is non-positive. O(1), no IndexLabel materialization
         // (br-frankenpandas-k9tlb vein).
         if let Some(affine) = self.labels.int64_affine_range() {
+            return affine.step <= 0;
+        }
+        if let Some(affine) = self.labels.datetime64_affine_range()
+            && affine.position(i64::MIN).is_none()
+        {
             return affine.step <= 0;
         }
         // Typed non-affine Int64: scan the i64 view (no label materialization),
@@ -23389,6 +23404,90 @@ mod tests {
             obj.is_monotonic_decreasing(),
             Index::from_i64_values(vec![1, 3, 3, 9]).is_monotonic_decreasing()
         );
+    }
+
+    #[test]
+    fn datetime64_affine_monotonic_predicates_match_eager_oracle_jrlto() {
+        let cases = [
+            ("ascending", 0, 2, 4),
+            ("descending", 12, -4, 4),
+            ("near_max", i64::MAX, -1, 3),
+            ("singleton", 7, 0, 1),
+            ("empty", 0, 0, 0),
+        ];
+
+        for (name, start, step, len) in cases {
+            let affine = Index::from_datetime64_affine_range(start, step, len)
+                .expect("valid Datetime64 affine range");
+            let eager_values = (0..len)
+                .map(|offset| {
+                    let offset = i64::try_from(offset).expect("test offset fits i64");
+                    start
+                        .checked_add(step.checked_mul(offset).expect("test span fits i64"))
+                        .expect("test endpoint fits i64")
+                })
+                .collect();
+            let eager = Index::from_datetime64(eager_values);
+
+            assert!(
+                affine.labels.materialized.get().is_none(),
+                "{name}: affine labels must begin lazy",
+            );
+            assert_eq!(
+                affine.is_monotonic_increasing(),
+                eager.is_monotonic_increasing(),
+                "{name}: increasing predicate must match eager labels",
+            );
+            assert_eq!(
+                affine.is_monotonic_decreasing(),
+                eager.is_monotonic_decreasing(),
+                "{name}: decreasing predicate must match eager labels",
+            );
+            assert_eq!(
+                affine.is_monotonic(),
+                eager.is_monotonic(),
+                "{name}: monotonic alias must match eager labels",
+            );
+            assert!(
+                affine.labels.materialized.get().is_none(),
+                "{name}: affine monotonic predicates must not materialize labels",
+            );
+            assert!(
+                affine.labels.int64_typed.get().is_none(),
+                "{name}: affine monotonic predicates must not probe the Int64 view",
+            );
+        }
+
+        // NaT-bearing affine ranges deliberately retain the former eager
+        // fallback. This optimization must not define or change NaT ordering
+        // semantics; pandas-parity for that pre-existing behavior is tracked
+        // separately.
+        for (name, start, step) in [
+            ("nat_start", i64::MIN, 1),
+            ("nat_end", i64::MIN + 2, -1),
+        ] {
+            let affine = Index::from_datetime64_affine_range(start, step, 3)
+                .expect("valid NaT-bearing Datetime64 affine range");
+            let eager_values = (0..3)
+                .map(|offset| start + step * offset)
+                .collect();
+            let eager = Index::from_datetime64(eager_values);
+
+            assert_eq!(
+                affine.is_monotonic_increasing(),
+                eager.is_monotonic_increasing(),
+                "{name}: increasing predicate must retain the eager fallback",
+            );
+            assert_eq!(
+                affine.is_monotonic_decreasing(),
+                eager.is_monotonic_decreasing(),
+                "{name}: decreasing predicate must retain the eager fallback",
+            );
+            assert!(
+                affine.labels.materialized.get().is_some(),
+                "{name}: NaT-bearing ranges must decline the affine shortcut",
+            );
+        }
     }
 
     #[test]

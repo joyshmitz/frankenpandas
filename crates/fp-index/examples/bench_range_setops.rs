@@ -28,6 +28,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_isin
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 25 date_range
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 25 date_range_infer_freq
+//!   cargo run -p fp-index --profile release-perf --example bench_range_setops -- 1000000 15 date_range_monotonic
 
 use std::{hint::black_box, time::Instant};
 
@@ -516,6 +517,18 @@ fn public_infer_freq_digest(index: &Index) -> usize {
     frequency_digest(infer_freq(black_box(index)).expect("valid benchmark frequency"))
 }
 
+fn former_monotonic_digest(index: &Index) -> usize {
+    let labels = black_box(index).labels();
+    let increasing = labels.windows(2).all(|pair| pair[0] <= pair[1]);
+    let decreasing = labels.windows(2).all(|pair| pair[0] >= pair[1]);
+    usize::from(increasing) | (usize::from(decreasing) << 1)
+}
+
+fn public_monotonic_digest(index: &Index) -> usize {
+    usize::from(black_box(index).is_monotonic_increasing())
+        | (usize::from(black_box(index).is_monotonic_decreasing()) << 1)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args
@@ -531,6 +544,52 @@ fn main() {
         .get(4)
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
+    if scenario == "date_range_monotonic" {
+        let make_index = || {
+            date_range(
+                Some("1970-01-01"),
+                None,
+                Some(n),
+                Timedelta::NANOS_PER_SEC,
+                Some("timestamp"),
+            )
+            .expect("valid benchmark date range")
+        };
+        let reference_index = make_index();
+        let candidate_index = make_index();
+        assert_eq!(
+            former_monotonic_digest(&reference_index),
+            public_monotonic_digest(&candidate_index),
+            "public monotonic predicates must match the former label-window body",
+        );
+        let (control_a_ns, control_b_ns, control_sink) = paired_percentiles_ns(
+            iters,
+            || former_monotonic_digest(&reference_index),
+            || former_monotonic_digest(&reference_index),
+        );
+        let (reference_ns, candidate_ns, candidate_sink) = paired_percentiles_ns(
+            iters,
+            || former_monotonic_digest(&reference_index),
+            || public_monotonic_digest(&candidate_index),
+        );
+        let sink = control_sink ^ candidate_sink;
+        println!(
+            "date_range_monotonic n={n} control_a_p50_ns={} control_a_p95_ns={} control_a_max_ns={} control_b_p50_ns={} control_b_p95_ns={} control_b_max_ns={} reference_p50_ns={} reference_p95_ns={} reference_max_ns={} candidate_p50_ns={} candidate_p95_ns={} candidate_max_ns={} sink={sink}",
+            control_a_ns.0,
+            control_a_ns.1,
+            control_a_ns.2,
+            control_b_ns.0,
+            control_b_ns.1,
+            control_b_ns.2,
+            reference_ns.0,
+            reference_ns.1,
+            reference_ns.2,
+            candidate_ns.0,
+            candidate_ns.1,
+            candidate_ns.2,
+        );
+        return;
+    }
     if scenario == "date_range" {
         let reference = || {
             let nanos = (0..n)

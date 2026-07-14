@@ -6876,12 +6876,20 @@ fn ordered_unique_temporal_i64_right_match_positions(
 /// Datetime64 and Timedelta64 ordering is their raw nanosecond ordering, so a
 /// three-way merge produces the same key-sorted optional position tapes as the
 /// generic Scalar planner without materializing either input key for position
-/// planning. Nullable, NaT-bearing, duplicate, unsorted, or mixed-dtype keys
-/// decline.
+/// planning. Each newly reached value is validated for NaT and strict ordering
+/// inside that merge, avoiding separate input pre-scans. Nullable, NaT-bearing,
+/// duplicate, unsorted, or mixed-dtype keys decline.
 fn ordered_unique_temporal_i64_outer_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<OptionalJoinPositions> {
+    fn newly_reached_value_is_strict(values: &[i64], idx: usize, nat: i64) -> bool {
+        let Some(&value) = values.get(idx) else {
+            return true;
+        };
+        value != nat && (idx == 0 || values[idx - 1] < value)
+    }
+
     if !left_key.validity().all() || !right_key.validity().all() {
         return None;
     }
@@ -6899,11 +6907,8 @@ fn ordered_unique_temporal_i64_outer_positions(
         ),
         _ => return None,
     };
-    if left.contains(&nat) || right.contains(&nat) {
-        return None;
-    }
-    if left.windows(2).any(|pair| pair[0] >= pair[1])
-        || right.windows(2).any(|pair| pair[0] >= pair[1])
+    if !newly_reached_value_is_strict(left, 0, nat)
+        || !newly_reached_value_is_strict(right, 0, nat)
     {
         return None;
     }
@@ -6919,16 +6924,27 @@ fn ordered_unique_temporal_i64_outer_positions(
                 right_positions.push(Some(right_idx));
                 left_idx += 1;
                 right_idx += 1;
+                if !newly_reached_value_is_strict(left, left_idx, nat)
+                    || !newly_reached_value_is_strict(right, right_idx, nat)
+                {
+                    return None;
+                }
             }
             Ordering::Less => {
                 left_positions.push(Some(left_idx));
                 right_positions.push(None);
                 left_idx += 1;
+                if !newly_reached_value_is_strict(left, left_idx, nat) {
+                    return None;
+                }
             }
             Ordering::Greater => {
                 left_positions.push(None);
                 right_positions.push(Some(right_idx));
                 right_idx += 1;
+                if !newly_reached_value_is_strict(right, right_idx, nat) {
+                    return None;
+                }
             }
         }
     }
@@ -6936,11 +6952,17 @@ fn ordered_unique_temporal_i64_outer_positions(
         left_positions.push(Some(left_idx));
         right_positions.push(None);
         left_idx += 1;
+        if !newly_reached_value_is_strict(left, left_idx, nat) {
+            return None;
+        }
     }
     while right_idx < right.len() {
         left_positions.push(None);
         right_positions.push(Some(right_idx));
         right_idx += 1;
+        if !newly_reached_value_is_strict(right, right_idx, nat) {
+            return None;
+        }
     }
     Some((left_positions, right_positions))
 }
@@ -12451,8 +12473,13 @@ mod tests {
 
         let nat = fp_types::Timestamp::NAT;
         let nat_left = Column::from_datetime64_values(vec![nat, 1, 2]);
+        let nat_middle_left = Column::from_datetime64_values(vec![1, nat, 3]);
+        let nat_tail_right = Column::from_datetime64_values(vec![1, 2, nat]);
+        let single_nat = Column::from_datetime64_values(vec![nat]);
         let duplicate_left = Column::from_datetime64_values(vec![1, 1, 2]);
+        let late_duplicate_left = Column::from_datetime64_values(vec![1, 2, 3, 3]);
         let unsorted_right = Column::from_datetime64_values(vec![2, 1, 3]);
+        let late_unsorted_right = Column::from_datetime64_values(vec![1, 2, 4, 3]);
         let mixed_right = Column::from_values(
             [1, 2, 3]
                 .into_iter()
@@ -12466,8 +12493,13 @@ mod tests {
             Column::from_datetime64_values_with_validity(vec![1, 2, 3], validity);
         for (left, right) in [
             (&nat_left, &ordered_right),
+            (&nat_middle_left, &ordered_right),
+            (&ordered_right, &nat_tail_right),
+            (&single_nat, &ordered_right),
             (&duplicate_left, &ordered_right),
+            (&late_duplicate_left, &ordered_right),
             (&ordered_right, &unsorted_right),
+            (&ordered_right, &late_unsorted_right),
             (&ordered_right, &mixed_right),
             (&nullable_left, &ordered_right),
         ] {
@@ -12857,6 +12889,132 @@ mod tests {
                 "unsupported temporal OUTER shape must retain the scalar fallback",
             );
         }
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn bench_temporal_i64_outer_validation_fusion_pizud() {
+        let n = 400_000_i64;
+        let input_len = usize::try_from(n).expect("positive benchmark length");
+        let left = Column::from_datetime64_values_with_validity(
+            (0..n).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+        let right = Column::from_datetime64_values_with_validity(
+            (0..n).map(|value| value * 2).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+        let expected_rows = 600_000usize;
+
+        // Exact pre-pizud body: separate NaT and strict-order scans followed by
+        // the same three-way optional-position union.
+        let former = || {
+            if !left.validity().all() || !right.validity().all() {
+                return None;
+            }
+            let left_raw = left.as_datetime64_slice()?;
+            let right_raw = right.as_datetime64_slice()?;
+            let nat = fp_types::Timestamp::NAT;
+            if left_raw.contains(&nat) || right_raw.contains(&nat) {
+                return None;
+            }
+            if left_raw.windows(2).any(|pair| pair[0] >= pair[1])
+                || right_raw.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return None;
+            }
+
+            let capacity = left_raw.len().saturating_add(right_raw.len());
+            let mut left_positions = Vec::<Option<usize>>::with_capacity(capacity);
+            let mut right_positions = Vec::<Option<usize>>::with_capacity(capacity);
+            let (mut left_idx, mut right_idx) = (0usize, 0usize);
+            while left_idx < left_raw.len() && right_idx < right_raw.len() {
+                match left_raw[left_idx].cmp(&right_raw[right_idx]) {
+                    std::cmp::Ordering::Equal => {
+                        left_positions.push(Some(left_idx));
+                        right_positions.push(Some(right_idx));
+                        left_idx += 1;
+                        right_idx += 1;
+                    }
+                    std::cmp::Ordering::Less => {
+                        left_positions.push(Some(left_idx));
+                        right_positions.push(None);
+                        left_idx += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        left_positions.push(None);
+                        right_positions.push(Some(right_idx));
+                        right_idx += 1;
+                    }
+                }
+            }
+            while left_idx < left_raw.len() {
+                left_positions.push(Some(left_idx));
+                right_positions.push(None);
+                left_idx += 1;
+            }
+            while right_idx < right_raw.len() {
+                left_positions.push(None);
+                right_positions.push(Some(right_idx));
+                right_idx += 1;
+            }
+            Some((left_positions, right_positions))
+        };
+        let candidate = || super::ordered_unique_temporal_i64_outer_positions(&left, &right);
+
+        let former_output = former().expect("former temporal union");
+        let candidate_output = candidate().expect("fused temporal union");
+        assert_eq!(candidate_output, former_output);
+        assert_eq!(candidate_output.0.len(), expected_rows);
+        drop((former_output, candidate_output));
+        for _ in 0..2 {
+            std::hint::black_box(former());
+            std::hint::black_box(candidate());
+        }
+
+        let sample = |plan: &dyn Fn() -> Option<super::OptionalJoinPositions>| {
+            let start = std::time::Instant::now();
+            let output = std::hint::black_box(plan()).expect("supported temporal union");
+            assert_eq!(std::hint::black_box(output.0.len()), expected_rows);
+            drop(output);
+            start.elapsed().as_secs_f64() * 1_000.0
+        };
+        let mut former_a = Vec::with_capacity(15);
+        let mut former_b = Vec::with_capacity(15);
+        let mut candidate_a = Vec::with_capacity(15);
+        let mut candidate_b = Vec::with_capacity(15);
+        for round in 0..15 {
+            if round % 2 == 0 {
+                former_a.push(sample(&former));
+                candidate_a.push(sample(&candidate));
+                candidate_b.push(sample(&candidate));
+                former_b.push(sample(&former));
+            } else {
+                former_b.push(sample(&former));
+                candidate_b.push(sample(&candidate));
+                candidate_a.push(sample(&candidate));
+                former_a.push(sample(&former));
+            }
+        }
+
+        let report = |label: &str, mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            let p50 = samples[samples.len() / 2];
+            let p95_idx = samples
+                .len()
+                .saturating_mul(95)
+                .div_ceil(100)
+                .saturating_sub(1);
+            println!(
+                "{label}: p50={p50:.3} ms p95={:.3} ms max={:.3} ms",
+                samples[p95_idx],
+                samples[samples.len() - 1],
+            );
+        };
+        report("outer_plan_three_pass_former_a", former_a);
+        report("outer_plan_three_pass_former_b", former_b);
+        report("outer_plan_fused_candidate_a", candidate_a);
+        report("outer_plan_fused_candidate_b", candidate_b);
     }
 
     #[test]

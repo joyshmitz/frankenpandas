@@ -15383,6 +15383,46 @@ whole-file inventory (21 critical labels: 19 token-comparison false positives, o
 test-only panic), with no finding on the changed production body; benchmark warnings are intentional test-only
 fail-fast assertions and printing. `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — DROP: temporal LEFT validation fusion stays below its null-control floor
+
+Negative-ledger-first routing found validation-fusion keeps for temporal INNER, RIGHT, and OUTER but no LEFT result.
+`temporal_i64_left_positions` likewise scans both raw-nanosecond inputs for NaT, scans them again for strict order, then
+performs its left-major two-pointer match. The candidate (`br-frankenpandas-ucjxh`) fused those checks into that match:
+each newly reached left or right value was checked once, the unconsumed right tail was validated before admission, an
+order failure retained the complete NaT guard and existing dense/hash fallback, and the emitted optional position tapes
+were asserted exactly equal to the former body before timing. The opportunity score was
+`impact 3 * confidence 5 / effort 1 = 15`; measured attribution, not semantics, rejected it.
+
+Both the untouched baseline and edited A/B ran foreground under strict remote-only RCH on `vmi1152480`. The workload
+used 400,000 ordered-unique Datetime64 rows per side, 200,000 matches, two warmups, and 15
+ABBA-reversed/interleaved samples per duplicate arm. Each sample built and dropped both complete optional-position
+vectors. In the untouched binary, the exact copied former body and equivalent production function exposed a material
+compiler/layout null-control floor:
+
+| untouched pre-edit arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| exact three-pass former body | 1.451 ms | 1.606 ms | 1.5285 ms |
+| current three-pass function | 1.829 ms | 1.772 ms | 1.8005 ms |
+
+The current/former ratio is **1.1780x**, so any candidate must clear a **17.795%** apparent improvement before a source
+win can be distinguished from compiler/layout effects. The edited same-binary gate measured:
+
+| edited planning lifecycle | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| exact three-pass former body | 1.888 ms | 1.761 ms | 1.8245 ms |
+| fused validate-and-match candidate | 1.766 ms | 1.750 ms | 1.7580 ms |
+
+The candidate is only **1.0378x faster** (**3.645% latency reduction**), far below the **1.1780x** untouched
+null-control floor. Its duplicate p50s are stable (**1.0091x** spread), but stability does not rescue an effect smaller
+than the measured arm-shape bias. The 15-sample p95 is the sample maximum and descriptive only. Verdict: **DROP / DO
+NOT SHIP**. Do not retry LEFT validate-while-match without a stronger representation/witness change or an A/B design
+whose untouched arm floor is below the expected effect.
+
+The production, focused-test, and benchmark edits were removed manually after the gate; `crates/fp-join/src/lib.rs` is
+byte-identical to committed `main` (`git diff --quiet` green). Therefore no code correctness or compatibility surface
+ships from this experiment. Only this evidence row and the closed bead remain. Both Cargo invocations were direct,
+fail-closed `rch exec` commands; no local Cargo command ran.
+
 ### 2026-07-13 IvoryGlacier — WIN: ordered-unique temporal OUTER joins plan over raw nanoseconds — 8.178x p50
 
 Negative-ledger-first routing found temporal INNER, LEFT, and RIGHT keeps but no temporal OUTER row. Older rejected

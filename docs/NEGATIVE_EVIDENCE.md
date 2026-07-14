@@ -15271,3 +15271,23 @@ errors); `fp-frame --all-targets --no-deps -D warnings` is clean when the two pr
 command `RCH-E301`, so no local fallback ran. `git diff --check` is green. The bounded static-only UBS source scan
 reproduced the documented whole-file timeout; the benchmark-only rerun confirmed both new direct-index warnings were
 removed, leaving only its pre-existing operation-dispatch `panic!()` inventory finding. No local Cargo command ran.
+
+### 2026-07-13 cc_fp — profile-driven gap_hunt sweep: numeric DataFrame surface confirmed exhausted (no accessible small-increment lever)
+
+Ran `gap_hunt` (fp-conformance example, measurement-only FP-side timing) on a 4-col × 500k typed-Float64 frame after the Column
+Utf8 typed-arm vein was mined. Slowest ops (ms/iter): corrwith 58.6, rank(average) 24.3, drop_duplicates(all cols) 23.4,
+sort_index(shuffled) 23.4, duplicated(all cols) 19.6, df_take 17.9, isin 14.8, nunique 11.9, describe 9.8, mode 8.9. Cross-checked
+each against the ledger: these are ALREADY pandas WINS (corrwith 9.7x, nlargest 20x, diff 5.9x, ffill 4.4x per the 2026-07-02
+sweep at line ~9168 — "accessible loss surface exhausted") or documented STRUCTURAL floors (df_take = random-scatter memory-bound
+gather; sort/dedup = radix/khash floors; describe/mode/rank = inherent multi-pass compute already typed). No outlier is a missing
+typed-fast-path GAP — they are inherently costly ops FP already does well vs pandas (which loops in Python).
+
+The one FP-side residual worth noting: **corrwith is the biggest absolute cost (58ms) but a 9.7x pandas WIN**. Its per-column path
+(`DataFrame::corrwith` → per-column `Series::corr` → `cov_centered_cross_sum`) re-does `self.index == other.index` + `is_unique()`
+per column and the typed cross-sum reads f64 slices; whether the typed path even fires depends on `Index` affine-detection /
+value-eq for two separately-constructed same-labelled indexes. A corrwith fast path (check index-compat ONCE, compute Pearson
+directly over f64 slices) would trim it — BUT it carries an f64 BIT-IDENTITY risk (must reproduce `cov_centered_cross_sum`'s exact
+two-pass mean-centered accumulation ULP-for-ULP) on an op that already beats pandas 9.7x. DEPRIORITIZED: not a clean small
+increment; needs a golden-safe corr investigation, not a quick lever. Numeric compute surface confirmed dry; real remaining levers
+are subsystem-level (khash i64 groupby high-card, Categorical dtype for cut/qcut, 2D-block transpose) or in un-probed subsystems
+(fp-join numeric/temporal keys, fp-index temporal routing).

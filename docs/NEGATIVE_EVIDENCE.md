@@ -16245,6 +16245,50 @@ a short same-arm batch whose per-operation samples are reported), plus candidate
 other arm's vector drops. Preserve the exact-bit proof, pinned worker, normal `release`, and raw per-position timing vectors.
 No local Cargo command ran, no `release-perf` build ran, and strict RCH never fell back locally.
 
+### 2026-07-14 IvoryGlacier — BENCH-COST PROHIBITIVE: DataFrame Int64 astype typed-column candidate
+
+Negative-ledger-first routing began with `bv --robot-triage` (3,667 issues, 356 open, 340 actionable, four blocked,
+one in progress, no dependency cycles). The graph's perf umbrella and remaining obvious perf beads were already owned,
+so this pass pivoted from the preceding `fp-types` reduction hold to a fresh `fp-frame` conversion boundary. Existing
+ledger rows cover the typed `Column::astype` numeric casts and Series-level string/numeric conversion, but not scalar
+`DataFrame::astype(Float64)`: that wrapper still materialized and cloned a `Vec<Scalar>` for every column and rebuilt it
+with `Column::new`, bypassing the already-exact typed Int64-to-Float64 kernel. The opportunity score for
+`br-frankenpandas-wj3h2` was `impact 5 * confidence 5 / effort 1 = 25`.
+
+Attribution preceded the production edit. A strict-remote normal-`release` probe on `vmi1153651` isolated one
+500,000-row all-valid Int64 column:
+
+| pre-edit attributed phase | elapsed |
+| --- | ---: |
+| scalar `values().to_vec()` materialize + clone | 32.749 ms |
+| scalar `Column::new(Float64, ...)` rebuild | 46.668 ms |
+| former total | 79.417 ms |
+| typed `Column::astype(Float64)` | 3.747 ms |
+
+The directional attribution ratio was **21.195x**, and materialization alone accounted for **41.24%** of the former
+path. The candidate made scalar `DataFrame::astype(Float64)` delegate only all-valid typed Int64 columns to the existing
+`Column::astype` kernel. Every other dtype and backing, nullable data, parsing/coercion fallback, mapping-style
+`astype_columns`, index/name propagation, column order, null/NaN behavior, and dtype promotion retained the former path.
+The typed kernel performed the same row-ordered `i64 as f64` conversion and returned the same Float64 backing.
+
+**BENCH-COST PROHIBITIVE — NO SHIP / NO PERFORMANCE VERDICT.** The attempted single final foreground gate used normal
+`--profile release` on pinned worker `vmi1153651`, but RCH assigned a fresh worker-pool target instead of the attributed
+artifact. The release test binary remained in `fp-frame` codegen/link for more than 42 minutes and never reached the
+timed path. It was interrupted rather than allowed to consume more remote capacity. Consequently there is no final A/B,
+no null control, and no measured keep claim. The production, parity-test, attribution, and ABBA harness hunks were
+removed manually; `crates/fp-frame/src/lib.rs` is restored to `HEAD`, and this closeout retains only the evidence row and
+bead record. Do not retry this inline-test benchmark shape. A future attempt must use an already-built small standalone
+normal-release bench binary, tiny input, and a hard three-minute wall-clock cap.
+
+Correctness and build evidence is strict-remote on `vmi1153651`. The focused DataFrame astype suite is **8 passed / 0
+failed / 2 ignored foreground probes**, including exact `Float64::to_bits()` parity for signed values and integer
+extrema plus preservation of a named RangeIndex, column order, and a Utf8 numeric fallback column. Scoped
+`cargo check -p fp-frame --lib` is green. Scoped `--no-deps -D warnings` Clippy reaches `fp-frame` but remains blocked
+by two pre-existing `clippy::question_mark` findings at lines 30798 and 36942, outside the astype hunk. Direct Rustfmt
+and `git diff --check` are green. The bounded 180-second UBS scan reproduced the documented `fp-frame` whole-file
+stall without emitting a focused finding. Those checks establish semantic feasibility only, not a performance verdict.
+No local Cargo command ran, no `release-perf` build ran, and strict RCH never fell back locally.
+
 ### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 monotonic predicates read their witness — 2132.524x p50
 
 Negative-ledger-first routing found affine Datetime64 construction, search, and frequency keeps but no monotonicity row.

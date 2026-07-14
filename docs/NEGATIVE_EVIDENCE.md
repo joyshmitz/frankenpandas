@@ -15334,6 +15334,48 @@ one in a peer-added test left outside this commit.
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
 `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: affine Datetime64 `nunique` reads its witness — 7437.490x p50
+
+Negative-ledger-first routing found the existing temporal dedup-family optimization and the affine Datetime64
+monotonicity/frequency keeps, but no representation-specific `nunique` result. `Index::nunique_with_dropna` still
+ignored a validated `(start, step, len)` Datetime64 backing: it materialized one million 32-byte `IndexLabel` values,
+copied them into a second `Vec<i64>`, and counted values that affine construction had already proved distinct. This is
+not a retry of the eager temporal dedup work; it removes that work at the lazy affine representation boundary. The
+opportunity score was `impact 4 * confidence 5 / effort 1 = 20`.
+
+One lever (`br-frankenpandas-uls13`) returns the affine length directly. Because construction rejects a zero step when
+`len > 1` and validates the final endpoint, every raw nanosecond is distinct. The reserved `i64::MIN` NaT sentinel can
+therefore occur at most once: `dropna=false` returns `len`, while `dropna=true` subtracts one exactly when the affine
+position witness contains NaT. Empty, singleton, positive/negative-step, and boundary ranges retain their exact former
+answers. Non-affine Datetime64, Timedelta64, typed/eager Int64, mixed, duplicate, nullable, and irregular indexes retain
+the former paths; no ordering, floating-point, or RNG behavior changes.
+
+The single strict-remote foreground benchmark ran on `vmi1149989` in one release-perf binary. It used one-million-row
+NaT-free affine ranges, three warmups, 15 ABBA-reversed samples per duplicate arm, an equality preflight, and an exact
+transcription of the former body as the reference. Warmup deliberately leaves the former reference's label cache hot,
+so the result is conservative: it measures the repeated scan/allocation cost and does not claim the avoided first-call
+materialization cost.
+
+| same-binary arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| former materialize/copy/count body | 3,349,875 ns | 3,284,366 ns | 3,317,120.5 ns |
+| affine witness | 561 ns | 331 ns | 446.0 ns |
+
+The candidate is **7437.490x faster at p50** (**99.9866% latency reduction**). Duplicate former-body controls differ by
+**1.995%**. The witness arm is below one microsecond, so its duplicate spread is timer-floor noise rather than a useful
+stability statistic; the four-order-of-magnitude separation is decisive.
+
+Correctness: the strict-remote focused eager-oracle proof is **1/1 green** across empty, regular and NaT singletons,
+ascending, descending, NaT-starting, NaT-ending, and near-`i64::MAX` ranges in both `dropna` modes. It also proves that
+neither the label materialization cache nor the failed Int64-view cache initializes. Scoped strict-remote
+`fp-index --all-targets --no-deps -D warnings` Clippy is green. Strict-remote workspace `check --all-targets` is green
+with five peer-owned `fp-columnar` warnings. The first focused-test attempt was fail-closed before
+Cargo when a peer-owned `fp-columnar` example disappeared during RCH dependency preflight (`RCH-E410`); an unchanged
+retry admitted on the same worker and passed. The bounded static-only UBS scan reports **0 critical** findings while
+reproducing the tracked broad whole-file warning inventory; no touched production line was identified as actionable.
+Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran.
+`git diff --check` is green. No local Cargo command ran.
+
 ### 2026-07-14 IvoryGlacier — WIN: temporal INNER validates while intersecting — 1.396x p50
 
 Negative-ledger-first routing found the temporal INNER raw-nanosecond keep, plus later validation-fusion keeps for its

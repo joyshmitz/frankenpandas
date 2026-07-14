@@ -4104,6 +4104,14 @@ impl Index {
         if let Some(affine) = self.labels.int64_affine_range() {
             return affine.len;
         }
+        // A validated affine Datetime64 backing has no repeated raw nanosecond
+        // values. It can contain the reserved NaT sentinel at most once, so the
+        // witness gives the exact dropna-aware count without materializing the
+        // IndexLabel vector or allocating a temporary nanosecond buffer.
+        if let Some(affine) = self.labels.datetime64_affine_range() {
+            return affine.len
+                - usize::from(dropna && affine.position(i64::MIN).is_some());
+        }
         if let Some(values) = self.labels.int64_view() {
             return Self::nunique_i64(&values);
         }
@@ -23488,6 +23496,150 @@ mod tests {
                 "{name}: NaT-bearing ranges must decline the affine shortcut",
             );
         }
+    }
+
+    #[test]
+    fn datetime64_affine_nunique_matches_eager_oracle_uls13() {
+        let cases = [
+            ("empty", 0, 0, 0),
+            ("singleton", 7, 0, 1),
+            ("singleton_nat", i64::MIN, 0, 1),
+            ("ascending", 0, 2, 4),
+            ("nat_start", i64::MIN, 1, 4),
+            ("nat_end", i64::MIN + 3, -1, 4),
+            ("near_max", i64::MAX, -1, 3),
+        ];
+
+        for (name, start, step, len) in cases {
+            let affine = Index::from_datetime64_affine_range(start, step, len)
+                .expect("valid Datetime64 affine range");
+            let eager_values = (0..len)
+                .map(|offset| {
+                    let offset = i64::try_from(offset).expect("test offset fits i64");
+                    start
+                        .checked_add(step.checked_mul(offset).expect("test span fits i64"))
+                        .expect("test endpoint fits i64")
+                })
+                .collect();
+            let eager = Index::from_datetime64(eager_values);
+
+            for dropna in [true, false] {
+                assert_eq!(
+                    affine.nunique_with_dropna(dropna),
+                    eager.nunique_with_dropna(dropna),
+                    "{name}: dropna={dropna}",
+                );
+            }
+            assert!(
+                affine.labels.materialized.get().is_none(),
+                "{name}: affine nunique must not materialize labels",
+            );
+            assert!(
+                affine.labels.int64_typed.get().is_none(),
+                "{name}: affine nunique must not probe the Int64 view",
+            );
+        }
+    }
+
+    fn datetime64_nunique_former_body_uls13(index: &Index, dropna: bool) -> usize {
+        if let Some(affine) = index.labels.int64_affine_range() {
+            return affine.len;
+        }
+        if let Some(values) = index.labels.int64_view() {
+            return Index::nunique_i64(&values);
+        }
+        if let Some(ns) = index
+            .temporal_ns_present(true)
+            .or_else(|| index.temporal_ns_present(false))
+        {
+            return Index::nunique_i64(&ns);
+        }
+        index
+            .unique()
+            .labels
+            .iter()
+            .filter(|label| !dropna || !label.is_missing())
+            .count()
+    }
+
+    fn median_nanos_uls13(samples: &mut [u128]) -> u128 {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    fn measure_nunique_nanos_uls13(f: impl FnOnce() -> usize) -> u128 {
+        let start = std::time::Instant::now();
+        std::hint::black_box(f());
+        start.elapsed().as_nanos()
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn datetime64_affine_nunique_ab_uls13() {
+        const LEN: usize = 1_000_000;
+        const SAMPLES: usize = 15;
+        let reference_a = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let reference_b = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let candidate_a = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let candidate_b = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+
+        assert_eq!(
+            datetime64_nunique_former_body_uls13(&reference_a, true),
+            candidate_a.nunique(),
+        );
+        assert!(candidate_a.labels.materialized.get().is_none());
+        for _ in 0..3 {
+            std::hint::black_box(datetime64_nunique_former_body_uls13(
+                &reference_a,
+                true,
+            ));
+            std::hint::black_box(datetime64_nunique_former_body_uls13(
+                &reference_b,
+                true,
+            ));
+            std::hint::black_box(candidate_a.nunique());
+            std::hint::black_box(candidate_b.nunique());
+        }
+
+        let mut former_a = Vec::with_capacity(SAMPLES);
+        let mut former_b = Vec::with_capacity(SAMPLES);
+        let mut witness_a = Vec::with_capacity(SAMPLES);
+        let mut witness_b = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_a.push(measure_nunique_nanos_uls13(|| {
+                    datetime64_nunique_former_body_uls13(&reference_a, true)
+                }));
+                witness_a.push(measure_nunique_nanos_uls13(|| candidate_a.nunique()));
+                witness_b.push(measure_nunique_nanos_uls13(|| candidate_b.nunique()));
+                former_b.push(measure_nunique_nanos_uls13(|| {
+                    datetime64_nunique_former_body_uls13(&reference_b, true)
+                }));
+            } else {
+                former_b.push(measure_nunique_nanos_uls13(|| {
+                    datetime64_nunique_former_body_uls13(&reference_b, true)
+                }));
+                witness_b.push(measure_nunique_nanos_uls13(|| candidate_b.nunique()));
+                witness_a.push(measure_nunique_nanos_uls13(|| candidate_a.nunique()));
+                former_a.push(measure_nunique_nanos_uls13(|| {
+                    datetime64_nunique_former_body_uls13(&reference_a, true)
+                }));
+            }
+        }
+
+        let former_a_p50 = median_nanos_uls13(&mut former_a);
+        let former_b_p50 = median_nanos_uls13(&mut former_b);
+        let witness_a_p50 = median_nanos_uls13(&mut witness_a);
+        let witness_b_p50 = median_nanos_uls13(&mut witness_b);
+        let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+        let witness_mean = (witness_a_p50 + witness_b_p50) as f64 / 2.0;
+
+        println!("affine Datetime64 nunique, len={LEN}, samples={SAMPLES}");
+        println!("former body p50 A/B: {former_a_p50} / {former_b_p50} ns");
+        println!("affine witness p50 A/B: {witness_a_p50} / {witness_b_p50} ns");
+        println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);
+        assert!(candidate_a.labels.materialized.get().is_none());
+        assert!(candidate_b.labels.materialized.get().is_none());
     }
 
     #[test]

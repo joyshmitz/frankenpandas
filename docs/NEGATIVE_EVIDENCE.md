@@ -15536,6 +15536,45 @@ bounded UBS scan reports the existing 50-marker whole-file critical inventory; d
 the textual `panic!` count is unchanged at 48/48, with no added critical marker in the touched hunk. The adjusted
 focused proof recompiles **1/1 green** remotely. `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: nullable Int64 `duplicated(keep=False)` two-passes raw values — 2.131x p50
+
+Negative-ledger-first routing found the nullable-Int64 `duplicated(first)` source path and the immediately preceding
+`duplicated(last)` keep, but no nullable `keep=False` result. Older ledger rows cover all-valid wide Int64, temporal,
+UTF-8, DataFrame, or categorical duplicate shapes. The remaining policy still fell through to the generic
+materialized-`Scalar` / enum-`Key` / two-`FxHashSet` body. The opportunity scored
+`impact 4 * confidence 5 / effort 1 = 20`.
+
+One lever (`br-frankenpandas-dxh4b`) handles only `DupPolicy::None` on a nullable Int64 backing. Its first raw scan
+records present values seen once and more than once in `FxHashSet<i64>` while tracking the shared missing bucket with
+two booleans; its second raw scan flags every present value in the repeated set and every missing row iff the missing
+bucket repeated. This is exactly the former `Key::Int64` / `Key::Null` contract: every occurrence of a repeated value
+is true, including every missing row when two or more are present. The `first` and `last` policies, all-valid routing,
+other dtypes, output order, tie-breaking, floating point, and RNG state are unchanged.
+
+The single strict-remote foreground benchmark ran on `vmi1153651` in one release-perf binary. It used one million
+rows, approximately one-third missing values, moderate-cardinality signed Int64 values, three warmups, 15
+ABBA-reversed samples per duplicate arm, and an exact-output preflight. The former helper transcribes the generic
+materialized-`Scalar` / enum-key / two-set body. Its inputs are materialized during warmup, so the reference
+conservatively excludes the additional first-call materialization cost; both typed inputs retain empty `Scalar`
+caches throughout.
+
+| same-binary arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| former generic two-set scan | 211,590,778 ns | 213,380,355 ns | 212,485,566.5 ns |
+| nullable typed raw two-pass | 96,039,204 ns | 103,382,249 ns | 99,710,726.5 ns |
+
+The candidate is **2.131x faster at p50** (**53.0741% latency reduction**). Duplicate-arm spreads are **0.842%** for
+the former body and **7.364%** for the typed path, both below the 10% stability ceiling.
+
+Correctness: the strict-remote focused proof is **1/1 green** across singleton/repeated missing buckets, three-way
+present duplicates, unique values, and `i64::{MIN,MAX}`, while proving that the input's lazy `Scalar` cache remains
+empty. Strict-remote workspace `check --workspace --all-targets` is green with the same five peer-owned warnings.
+Strict-remote `fp-columnar --all-targets --no-deps -D warnings` Clippy reproduces exactly the tracked inventory (23
+library and 64 test-target findings) and reports no changed-hunk finding. Fail-closed RCH rejected `cargo fmt --check`
+as non-compilation command `RCH-E301`, so no local fallback ran. The bounded UBS scan reproduces the existing
+50-marker whole-file critical inventory; direct base/current counting confirms the textual `panic!` count is unchanged
+at 48/48, with no added critical marker in the touched hunk. `git diff --check` is green. No local Cargo command ran.
+
 ### 2026-07-14 IvoryGlacier — WIN: temporal INNER validates while intersecting — 1.396x p50
 
 Negative-ledger-first routing found the temporal INNER raw-nanosecond keep, plus later validation-fusion keeps for its

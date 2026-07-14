@@ -15524,6 +15524,75 @@ so no local fallback ran. The bounded static-only UBS scan reproduced the broad 
 critical labels: 19 token-comparison false positives, one decode-name false positive, and one test-only panic), with no
 finding on the changed production helper. `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: temporal RIGHT validates while matching — 1.352x planner p50
+
+Negative-ledger-first routing followed the ordered-unique temporal RIGHT keep (`br-frankenpandas-8tf5c`) and the
+separate temporal OUTER validation-fusion keep (`br-frankenpandas-pizud`). RIGHT still scanned both raw-nanosecond
+inputs once for NaT, again through `windows(2)` for strict order, and only then performed its right-major two-pointer
+match. This is not a retry of the rejected UTF-8 RIGHT or optional-position wrapper families: it changes only the two
+redundant validation passes on the already-landed temporal planner. The opportunity score was
+`impact 3 * confidence 5 / effort 1 = 15`.
+
+One lever (`br-frankenpandas-69e0m`) validates each newly reached value during the unchanged match. The first left value
+is checked at admission, every right value is checked before it is matched, and every left value is checked when the
+pointer advances. A final left-tail walk preserves the former requirement that even unmatched values beyond the last
+right key be NaT-free and strictly increasing. The helper is shared with the already-fused OUTER planner without changing
+that planner's calls or behavior. Nullable keys, NaT at any position, duplicates, inversions, mixed temporal dtypes, and
+unsupported execution options still decline to the scalar planner. Ordering is preserved because output remains one
+optional left position per right row; tie-breaking is unchanged because the admitted shape remains unique; floating
+point is not involved; RNG state is unchanged.
+
+Before editing, strict-remote RCH built and ran the existing release-perf public RIGHT probe on `vmi1149989`. It uses
+200,000 ordered-unique rows per side, two warmups, seven measured samples per arm, and an asserted 200,000-row result on
+every sample.
+
+| pre-edit public arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| Int64 RIGHT control | 1.274 ms | 1.033 ms | 1.1535 ms |
+| NaT-routed scalar temporal reference | 75.576 ms | 74.103 ms | 74.8395 ms |
+| temporal RIGHT public path | 1.782 ms | 2.220 ms | 2.0010 ms |
+
+The exact former three-pass body and fused candidate were then measured inside one strict-remote release-perf test
+binary on that same worker. Both build and destroy the complete 400,000-entry optional-position vector from 400,000
+inputs per side. Exact vector equality is asserted before timing; two warmups precede 15 ABBA-reversed/interleaved
+samples per duplicate arm.
+
+| same-binary planning lifecycle | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| former NaT scan + order scan + match | 1.402 ms | 1.431 ms | 1.4165 ms |
+| fused validate-and-match candidate | 1.051 ms | 1.045 ms | 1.0480 ms |
+
+The boundary improves **1.3516x p50** (**26.015% latency reduction**). Former duplicate spread is **1.0207x** and
+candidate spread is **1.0057x**, so the result clears its same-binary control floor.
+
+The final public probe rebuilt the edited source and ran on the same `vmi1149989` worker:
+
+| post-edit public arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| Int64 RIGHT control | 1.280 ms | 1.313 ms | 1.2965 ms |
+| NaT-routed scalar temporal reference | 66.364 ms | 68.250 ms | 67.3070 ms |
+| temporal RIGHT public path | 1.896 ms | 1.928 ms | 1.9120 ms |
+
+The raw identical-workload public reduction is **1.0465x p50** (**4.448%**). These are separate binaries, so the
+same-worker controls are part of attribution: Int64 slowed by 12.40%, while temporal RIGHT still became faster;
+temporal/Int64 improved from **1.7347x** to **1.4747x**, a **1.1763x ratio-of-ratios**. Baseline temporal duplicate
+spread was **1.2458x**, while the post-edit duplicate spread was **1.0169x**; the low-noise same-binary planner result is
+therefore the decisive ship gate. Printed p95 is the sample maximum for both the 7-sample public arms and 15-sample
+planner arms and is descriptive only.
+
+Correctness: the strict-remote full `fp-join` library suite is green (**149 passed, 0 failed, 3 ignored foreground
+probes**). It covers both temporal dtypes, exact scalar-oracle positions, empty-left behavior, public key dtype/order,
+right payload identity, left null-fill, and fallback for NaT at the start/middle/tail, singleton NaT, late duplicate,
+late inversion, nullable keys, and mixed dtype. Focused `fp-join --all-targets --no-deps -D warnings` Clippy is green.
+The first full-suite attempt was blocked before Cargo by a peer-created example disappearing during strict RCH preflight
+(`RCH-E410`); a retry on `vmi1152480` admitted and passed. Strict-remote workspace check compiled every workspace crate
+through final `fp-bench`, then stopped emitting progress and was boundedly interrupted rather than reported green. Full
+workspace Clippy was not repeated after that final-target stall. Fail-closed RCH rejected `cargo fmt --check` as a
+non-compilation command (`RCH-E301`), so no local fallback ran. The bounded static-only UBS scan reproduced the tracked
+whole-file inventory (21 critical labels: 19 token-comparison false positives, one decode-name false positive, and one
+test-only panic), with no finding on the changed production helper. `git diff --check` is green. No local Cargo command
+ran.
+
 ### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 monotonic predicates read their witness — 2132.524x p50
 
 Negative-ledger-first routing found affine Datetime64 construction, search, and frequency keeps but no monotonicity row.

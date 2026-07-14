@@ -19553,6 +19553,34 @@ impl Column {
                     .collect();
                 return Ok(Self::from_i64_values_owned(out));
             }
+            // Typed temporal self+other of the SAME dtype (all-valid OR nullable), all-valid
+            // cond. Generic loop materializes Vec<Scalar> + a cast_scalar per row. Select over
+            // the raw &[i64] ns via temporal_i64_backing: cond-true ⇒ self[i], cond-false ⇒
+            // other[i]; a taken slot present (validity set AND not the NaT sentinel) keeps its
+            // ns, else clears the bit. All-valid cond ⇒ the only missing source is a taken +
+            // missing slot, whose cleared bit materializes exactly as the generic clone/cast of
+            // a missing temporal slot (same-dtype cast_scalar is identity). Bit-identical.
+            if self.dtype == other.dtype
+                && let (Some((sd, sv, nat)), Some((od, ov, _))) =
+                    (self.temporal_i64_backing(), other.temporal_i64_backing())
+            {
+                let n = sd.len();
+                let mut out = vec![0_i64; n];
+                let mut vmask = ValidityMask::all_valid(n);
+                for i in 0..n {
+                    let (d, v) = if cb[i] { (sd, sv) } else { (od, ov) };
+                    if v.get(i) && d[i] != nat {
+                        out[i] = d[i];
+                    } else {
+                        vmask.set(i, false);
+                    }
+                }
+                return Ok(if self.dtype == DType::Datetime64 {
+                    Self::from_datetime64_values_with_validity(out, vmask)
+                } else {
+                    Self::from_timedelta64_values_with_validity(out, vmask)
+                });
+            }
         }
         let out: Vec<Scalar> = self
             .values
@@ -19596,6 +19624,31 @@ impl Column {
                     .map(|i| if cb[i] { o[i] } else { s[i] })
                     .collect();
                 return Ok(Self::from_i64_values_owned(out));
+            }
+            // Typed temporal self+other same dtype (all-valid OR nullable), all-valid cond —
+            // inverse of the where_cond_series temporal arm: cond-true ⇒ other[i], cond-false ⇒
+            // self[i]; a taken slot present (validity set AND not NaT) keeps its ns else clears
+            // the bit. Bit-identical to the generic clone/cast select.
+            if self.dtype == other.dtype
+                && let (Some((sd, sv, nat)), Some((od, ov, _))) =
+                    (self.temporal_i64_backing(), other.temporal_i64_backing())
+            {
+                let n = sd.len();
+                let mut out = vec![0_i64; n];
+                let mut vmask = ValidityMask::all_valid(n);
+                for i in 0..n {
+                    let (d, v) = if cb[i] { (od, ov) } else { (sd, sv) };
+                    if v.get(i) && d[i] != nat {
+                        out[i] = d[i];
+                    } else {
+                        vmask.set(i, false);
+                    }
+                }
+                return Ok(if self.dtype == DType::Datetime64 {
+                    Self::from_datetime64_values_with_validity(out, vmask)
+                } else {
+                    Self::from_timedelta64_values_with_validity(out, vmask)
+                });
             }
         }
         let out: Vec<Scalar> = self
@@ -41005,6 +41058,80 @@ mod tests {
                     let mt = col_typed.mask(&cond, &other).expect("typed mask");
                     let me = col_eager.mask(&cond, &other).expect("eager mask");
                     assert_eq!(mt.values(), me.values(), "is_dt={is_dt} mask trial {trial}");
+                }
+            }
+        }
+
+        #[test]
+        fn where_mask_series_temporal_typed_matches_generic() {
+            // Typed temporal where_cond_series/mask_series arms (col-vs-col `other`, all-valid
+            // OR nullable Datetime64/Timedelta64 self+other, all-valid cond) must be BIT-EXACT
+            // to the generic clone/cast select. A/B: typed self+other (from_*_with_validity) vs
+            // eager (Column::new). ~25% validity-null + ~10% NaT-in-buffer on BOTH sides.
+            let mut state: u64 = 0x5E12_DA7E_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            // Build a (typed, eager, ) pair for one side.
+            let build = |n: usize,
+                         is_dt: bool,
+                         nat: i64,
+                         next: &mut dyn FnMut() -> u64|
+             -> (Column, Column) {
+                let base: i64 = if is_dt { 1_600_000_000_000_000_000 } else { 0 };
+                let mut data = vec![0i64; n];
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut eager: Vec<Scalar> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let r = next() % 10;
+                    if r < 3 {
+                        validity.set(i, false);
+                        eager.push(Scalar::Null(NullKind::NaT));
+                    } else if r == 3 {
+                        data[i] = nat;
+                        eager.push(if is_dt {
+                            Scalar::Datetime64(nat)
+                        } else {
+                            Scalar::Timedelta64(nat)
+                        });
+                    } else {
+                        data[i] = base + (next() % 1_000_000) as i64;
+                        eager.push(if is_dt {
+                            Scalar::Datetime64(data[i])
+                        } else {
+                            Scalar::Timedelta64(data[i])
+                        });
+                    }
+                }
+                let dtype = if is_dt { DType::Datetime64 } else { DType::Timedelta64 };
+                let typed = if is_dt {
+                    Column::from_datetime64_values_with_validity(data.clone(), validity)
+                } else {
+                    Column::from_timedelta64_values_with_validity(data.clone(), validity)
+                };
+                (typed, Column::new(dtype, eager).expect("eager temporal"))
+            };
+            for is_dt in [true, false] {
+                let nat = if is_dt {
+                    fp_types::Timestamp::NAT
+                } else {
+                    fp_types::Timedelta::NAT
+                };
+                for trial in 0..120 {
+                    let n = (next() % 250) as usize;
+                    let (s_typed, s_eager) = build(n, is_dt, nat, &mut next);
+                    let (o_typed, o_eager) = build(n, is_dt, nat, &mut next);
+                    let cbits: Vec<bool> = (0..n).map(|_| next() % 2 == 0).collect();
+                    let cond = Column::from_bool_values(cbits);
+                    let wt = s_typed.where_cond_series(&cond, &o_typed).expect("typed where_series");
+                    let we = s_eager.where_cond_series(&cond, &o_eager).expect("eager where_series");
+                    assert_eq!(wt.values(), we.values(), "is_dt={is_dt} where_series trial {trial}");
+                    let mt = s_typed.mask_series(&cond, &o_typed).expect("typed mask_series");
+                    let me = s_eager.mask_series(&cond, &o_eager).expect("eager mask_series");
+                    assert_eq!(mt.values(), me.values(), "is_dt={is_dt} mask_series trial {trial}");
                 }
             }
         }

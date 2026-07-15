@@ -16938,3 +16938,38 @@ but all sync and compilation time remained outside the in-process measurements. 
 the crate's 23 pre-existing findings, all outside the touched primitive and tests. Direct Rustfmt and bounded UBS likewise
 reproduced broad pre-existing whole-file inventories with no finding on either touched hunk; `git diff --check` is green.
 All explicit Cargo invocations used fail-closed remote RCH, no `release-perf` command ran, and no stash was changed.
+
+### 2026-07-14 IvoryGlacier — allocation-free heterogeneous `Scalar::semantic_cmp`: 47.035636x p50 WIN (`br-frankenpandas-d5ikg`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). Its ranked
+columnar/index quick wins remained assigned to other agents, while the recent ledger already covered validity,
+datetime/index, join, runtime-fingerprint, GroupBy, and timedelta-formatting veins. The fresh `fp-types` scalar-ordering
+fallback had no ledger row: every inconsistent-type comparison built two `Debug` strings and compared them, paying two
+heap allocations even though different derived-Debug enum variants are ordered entirely by their static variant names.
+
+Attribution preceded the production edit. A test-only normal-`release` prototype compared the exact former two-string
+body with static variant names across every directed heterogeneous representative pair; its first strict-remote run
+measured 69,839,442 ns versus 953,056 ns p50 per batch (73.279474x). The first production correctness gate then exposed
+that `Int64`/`Float64` has a deliberate numeric arm and never reaches this fallback. The oracle and timer were narrowed
+to the remaining 70 directed pairs, preserving that cross-numeric behavior unchanged. A non-ignored exhaustive guard
+proves every optimized fallback pair returns exactly the ordering of the former full `Debug` strings.
+
+The one lever adds an allocation-free static Debug-variant-name projection and uses it only in the existing final
+fallback arm. Same-variant comparisons, null/NaN/NaT behavior, numeric cross-type comparison, temporal ordering,
+interval ordering, payloads, and public types are unchanged.
+
+The final foreground same-binary gate ran on RCH worker `vmi1153651` with `--profile release`: 4,096 batches of all 70
+directed fallback pairs, two in-process warmups, and nine reversed-ABBA blocks. RCH routed away from the requested warm
+worker and cold-built without a timeout; compilation remained outside the in-process measurements, whose complete test
+body took 2.74 seconds.
+
+| final arm | p50 per 286,720 fallback comparisons |
+| --- | ---: |
+| former two-`Debug`-allocation comparator | 139,209,113 ns |
+| public static-variant-name comparator | 2,959,652 ns |
+
+The public candidate is **47.035636x faster at p50** (**97.874% lower latency**). Focused strict-remote release tests
+are **4 passed / 0 failed / 1 ignored attribution harness**; scoped `fp-types --all-targets -D warnings` Clippy,
+direct Rustfmt, and `git diff --check` are green. Bounded UBS found no touched-hunk issue while reproducing the file's
+pre-existing broad test panic/unwrap/assert inventory. Every explicit Cargo command used fail-closed remote RCH; no
+local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.

@@ -487,6 +487,21 @@ impl From<String> for Scalar {
 }
 
 impl Scalar {
+    #[inline]
+    const fn debug_variant_name(&self) -> &'static str {
+        match self {
+            Self::Null(_) => "Null",
+            Self::Bool(_) => "Bool",
+            Self::Int64(_) => "Int64",
+            Self::Float64(_) => "Float64",
+            Self::Utf8(_) => "Utf8",
+            Self::Timedelta64(_) => "Timedelta64",
+            Self::Datetime64(_) => "Datetime64",
+            Self::Period(_) => "Period",
+            Self::Interval(_) => "Interval",
+        }
+    }
+
     #[must_use]
     pub fn dtype(&self) -> DType {
         match self {
@@ -705,8 +720,10 @@ impl Scalar {
             (Self::Float64(a), Self::Int64(b)) => a
                 .partial_cmp(&(*b as f64))
                 .unwrap_or(std::cmp::Ordering::Equal),
-            // Fallback to debug representation for inconsistent types
-            (a, b) => format!("{a:?}").cmp(&format!("{b:?}")),
+            // Derived Debug starts every variant with its static variant name.
+            // Different variants therefore order by that name before either
+            // payload is observed; compare those names without allocating.
+            (a, b) => a.debug_variant_name().cmp(b.debug_variant_name()),
         }
     }
 
@@ -4844,6 +4861,127 @@ mod tests {
             let (da, db) = (Scalar::Datetime64(a), Scalar::Datetime64(b));
             assert_eq!(da.semantic_cmp(&db), a.cmp(&b));
         }
+    }
+
+    fn semantic_cmp_cross_variant_values_d5ikg() -> [Scalar; 9] {
+        [
+            Scalar::Null(NullKind::Null),
+            Scalar::Bool(true),
+            Scalar::Int64(-7),
+            Scalar::Float64(3.5),
+            Scalar::Utf8("mixed".to_owned()),
+            Scalar::Timedelta64(11),
+            Scalar::Datetime64(1_735_732_800_123_456_789),
+            Scalar::Period(Period::new(649, PeriodFreq::Monthly)),
+            Scalar::Interval(Interval::new(-1.5, 2.5, IntervalClosed::Right)),
+        ]
+    }
+
+    fn semantic_cmp_uses_debug_fallback_d5ikg(left: &Scalar, right: &Scalar) -> bool {
+        !matches!(
+            (left, right),
+            (Scalar::Int64(_), Scalar::Float64(_)) | (Scalar::Float64(_), Scalar::Int64(_))
+        )
+    }
+
+    #[test]
+    fn semantic_cmp_cross_variant_matches_debug_order_d5ikg() {
+        let values = semantic_cmp_cross_variant_values_d5ikg();
+        for (left_index, left) in values.iter().enumerate() {
+            for (right_index, right) in values.iter().enumerate() {
+                if left_index != right_index && semantic_cmp_uses_debug_fallback_d5ikg(left, right)
+                {
+                    assert_eq!(
+                        left.semantic_cmp(right),
+                        format!("{left:?}").cmp(&format!("{right:?}")),
+                        "cross-variant order mismatch: {left:?} vs {right:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn semantic_cmp_cross_variant_debug_alloc_ab_d5ikg() {
+        use std::cmp::Ordering;
+
+        const BATCH: usize = 4_096;
+        const BLOCKS: usize = 9;
+
+        fn former(left: &Scalar, right: &Scalar) -> Ordering {
+            format!("{left:?}").cmp(&format!("{right:?}"))
+        }
+
+        fn candidate(left: &Scalar, right: &Scalar) -> Ordering {
+            left.semantic_cmp(right)
+        }
+
+        fn elapsed(values: &[Scalar], compare: fn(&Scalar, &Scalar) -> Ordering) -> u128 {
+            let mut less = 0usize;
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                for (left_index, left) in values.iter().enumerate() {
+                    for (right_index, right) in values.iter().enumerate() {
+                        if left_index != right_index
+                            && semantic_cmp_uses_debug_fallback_d5ikg(left, right)
+                            && compare(std::hint::black_box(left), std::hint::black_box(right))
+                                == Ordering::Less
+                        {
+                            less += 1;
+                        }
+                    }
+                }
+            }
+            std::hint::black_box(less);
+            started.elapsed().as_nanos()
+        }
+
+        fn median(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let values = semantic_cmp_cross_variant_values_d5ikg();
+
+        for (left_index, left) in values.iter().enumerate() {
+            for (right_index, right) in values.iter().enumerate() {
+                if left_index != right_index && semantic_cmp_uses_debug_fallback_d5ikg(left, right)
+                {
+                    assert_eq!(
+                        former(left, right),
+                        candidate(left, right),
+                        "cross-variant order mismatch: {left:?} vs {right:?}"
+                    );
+                }
+            }
+        }
+
+        std::hint::black_box(elapsed(&values, former));
+        std::hint::black_box(elapsed(&values, candidate));
+
+        let mut former_samples = Vec::with_capacity(BLOCKS * 2);
+        let mut candidate_samples = Vec::with_capacity(BLOCKS * 2);
+        for block in 0..BLOCKS {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, candidate));
+                candidate_samples.push(elapsed(&values, candidate));
+                former_samples.push(elapsed(&values, former));
+            } else {
+                candidate_samples.push(elapsed(&values, candidate));
+                former_samples.push(elapsed(&values, former));
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, candidate));
+            }
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        eprintln!(
+            "semantic_cmp_cross_variant_debug_alloc former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} speedup={:.6}",
+            former_p50 as f64 / candidate_p50 as f64
+        );
     }
 
     #[test]

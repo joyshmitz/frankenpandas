@@ -16802,3 +16802,33 @@ untimed release suite plus Clippy run preceded the final A/B on the same worker.
 answers and streaming/one-shot equivalence. Scoped `fp-runtime --all-targets --no-deps -D warnings` Clippy, direct
 Rustfmt, and `git diff --check` are green. Bounded UBS reports zero critical findings. No local Cargo or `release-perf`
 command ran, and no stash was changed.
+
+### 2026-07-14 IvoryGlacier — first-invalid-word `Column::has_any_missing`: 1165.061415x p50 WIN (`br-frankenpandas-m32bh`)
+
+Negative-ledger-first routing moved out of the recently mined runtime fingerprint vein and into the columnar missingness
+admission predicate used by fill, interpolation, dropna, and groupby paths. Typed nullable Bool, Int64, Utf8, and Interval
+columns answered the boolean question by calling `ValidityMask::count_invalid() > 0`, which popcounted every packed word.
+The one lever now calls `!ValidityMask::all()`, stopping at the first invalid word. Float64 NaN handling, generic Scalar
+fallbacks, empty/all-valid behavior, sparse invalid ranges, and returned booleans are unchanged.
+
+Attribution preceded the production edit. A strict-remote normal-`release` run on `vmi1149989` used 1,000,003 rows,
+one invalid bit at row 257, 256 calls per sample, two in-process warmups, and 18 reversed-ABBA samples per arm. The exact
+former body measured **2,223,016 ns p50** versus **1,963 ns p50** for the short-circuit prototype per batch
+(**1132.458482x**). Exact parity passed across empty, all-valid, all-invalid, sparse-range, nullable Bool/Utf8, Float64
+NaN, and Datetime64 fallback cases before timing.
+
+The single final foreground same-binary gate ran on `vmi1156319` with `--profile release`; the candidate arm called the
+shipped public `Column::has_any_missing`:
+
+| final arm | p50 per 256-call batch |
+| --- | ---: |
+| former full validity popcount | 3,490,524 ns |
+| public first-invalid-word predicate | 2,996 ns |
+
+The public candidate is **1165.061415x faster at p50**. The timed body finished in 0.08 seconds. RCH missed its cache
+after an explicit untimed no-run warm-up, but compilation and transfer remained outside the measured body. Correctness is
+strict-remote: the full `fp-columnar` release library suite is **587 passed / 0 failed / 52 ignored performance probes**.
+The touched hunk has no Rustfmt delta and `git diff --check` is green. Scoped release Clippy reproduced the crate's 23
+pre-existing findings, all outside the touched predicate and harness; bounded UBS likewise reproduced the tracked broad
+whole-file inventory with no finding on either touched hunk. Every Cargo invocation used fail-closed remote RCH; no local
+Cargo or `release-perf` command ran, and no stash was changed.

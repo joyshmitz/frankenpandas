@@ -11934,7 +11934,7 @@ impl Column {
                 | DType::Utf8
                 | DType::Interval
         ) {
-            return self.validity.count_invalid() > 0;
+            return !self.validity.all();
         }
 
         self.values.iter().any(Scalar::is_missing)
@@ -26652,6 +26652,118 @@ mod tests {
         );
         eprintln!("VALIDITY_ALL_SHORT_CIRCUIT_AB former_samples_ns={former_samples:?}");
         eprintln!("VALIDITY_ALL_SHORT_CIRCUIT_AB candidate_samples_ns={candidate_samples:?}");
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn has_any_missing_first_invalid_word_ab_m32bh() {
+        const ROWS: usize = 1_000_003;
+        const BATCH: usize = 256;
+
+        fn former(column: &Column) -> bool {
+            if column.dtype == DType::Float64 {
+                if let Some((data, validity)) = column.as_f64_slice_with_validity() {
+                    return data
+                        .iter()
+                        .enumerate()
+                        .any(|(idx, value)| !validity.get(idx) || value.is_nan());
+                }
+                if let Some(data) = column.as_f64_slice() {
+                    return data.iter().any(|value| value.is_nan());
+                }
+            }
+
+            if matches!(
+                column.dtype,
+                DType::Bool
+                    | DType::BoolNullable
+                    | DType::Int64
+                    | DType::Int64Nullable
+                    | DType::Utf8
+                    | DType::Interval
+            ) {
+                return column.validity.count_invalid() > 0;
+            }
+
+            column.values.iter().any(Scalar::is_missing)
+        }
+
+        fn candidate(column: &Column) -> bool {
+            column.has_any_missing()
+        }
+
+        fn elapsed(column: &Column, check: fn(&Column) -> bool) -> u128 {
+            std::hint::black_box(check(std::hint::black_box(column)));
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(check(std::hint::black_box(column)));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let parity_cases = [
+            Column::from_values(Vec::<Scalar>::new()).expect("empty column"),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("all-valid int64"),
+            Column::from_i64_values_with_validity(vec![0, 0, 0], ValidityMask::all_invalid(3)),
+            Column::from_i64_values_with_validity(
+                vec![1, 2, 3, 4, 5, 6],
+                ValidityMask::from_invalid_ranges(Arc::from(vec![(0, 2), (5, 1)]), 6),
+            ),
+            Column::from_values(vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)])
+                .expect("nullable bool"),
+            Column::from_values(vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Null(NullKind::Null),
+            ])
+            .expect("nullable utf8"),
+            Column::from_f64_values(vec![1.0, f64::NAN, 3.0]),
+            Column::from_values(vec![Scalar::Datetime64(1), Scalar::Datetime64(i64::MIN)])
+                .expect("datetime fallback"),
+        ];
+        for column in &parity_cases {
+            assert_eq!(former(column), candidate(column));
+        }
+
+        let mut validity = ValidityMask::all_valid(ROWS);
+        validity.set(257, false);
+        let column = Column::from_i64_values_with_validity(vec![7; ROWS], validity);
+        assert!(former(&column));
+        assert_eq!(former(&column), candidate(&column));
+
+        for _ in 0..2 {
+            std::hint::black_box(elapsed(&column, former));
+            std::hint::black_box(elapsed(&column, candidate));
+        }
+
+        let mut former_samples = Vec::with_capacity(18);
+        let mut candidate_samples = Vec::with_capacity(18);
+        for block in 0_usize..9 {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&column, former));
+                candidate_samples.push(elapsed(&column, candidate));
+                candidate_samples.push(elapsed(&column, candidate));
+                former_samples.push(elapsed(&column, former));
+            } else {
+                candidate_samples.push(elapsed(&column, candidate));
+                former_samples.push(elapsed(&column, former));
+                former_samples.push(elapsed(&column, former));
+                candidate_samples.push(elapsed(&column, candidate));
+            }
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        eprintln!(
+            "HAS_ANY_MISSING_FIRST_INVALID_AB rows={ROWS} batch={BATCH} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6}",
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("HAS_ANY_MISSING_FIRST_INVALID_AB former_samples_ns={former_samples:?}");
+        eprintln!("HAS_ANY_MISSING_FIRST_INVALID_AB candidate_samples_ns={candidate_samples:?}");
     }
 
     #[test]

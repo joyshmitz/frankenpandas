@@ -17253,3 +17253,36 @@ normal-release tests are 4 passed / 0 failed / 1 ignored, and crate-scoped norma
 the file's pre-existing whole-file unwrap, test-panic, assertion, indexing, and numeric inventories, with no finding
 in the touched `Timestamp::isoformat` hunk. Every Cargo command used fail-closed remote RCH; no explicit local Cargo
 or `release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.
+
+### 2026-07-15 IvoryGlacier — borrowed dense Datetime64 `merge_asof` right keys: 2.540355x p50 WIN (`br-frankenpandas-nsslz`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). Its ranked
+performance picks were already claimed by other agents, and the recently mined timestamp/validity families were
+thinning. A fresh `fp-join` attribution found that the typed Datetime64 `merge_asof` matcher unconditionally allocated
+and copied right-key values and source positions before matching, even when every right key was valid and the filtered
+position was necessarily identical to the source position.
+
+The one production lever borrows the dense right-key slice and uses implicit identity positions when `all_valid` is
+true and no key is NaT. Nullable or NaT-bearing inputs retain the exact former filter-and-copy preparation. Backward,
+forward, nearest, exact-match, tolerance, and output-position semantics share the unchanged matcher body. A permanent
+parity matrix covers dense right keys plus right-NaT and left-NaT cases across all three directions, exact-match on/off,
+and absent/present tolerance: 36 exact result-vector comparisons. The full focused `merge_asof` release suite is 24
+passed / 0 failed.
+
+The single final foreground same-binary A/B ran fail-closed through RCH with normal `--profile release`. It matched
+131,072 sorted dense Datetime64 keys per arm, proved complete output parity before timing, warmed both arms, and
+collected ten alternating-order samples. The in-process measurement body completed in 0.10 seconds.
+
+| final arm | p50 | samples (ns) |
+| --- | ---: | --- |
+| former copied values plus position tape | 2,726,372 ns | 1,646,358 / 1,686,627 / 2,124,336 / 2,229,705 / 2,574,484 / 2,726,372 / 3,042,178 / 3,260,835 / 3,424,784 / 28,037,753 |
+| public borrowed dense-right matcher | 1,073,225 ns | 629,456 / 739,312 / 757,119 / 794,826 / 1,015,948 / 1,073,225 / 1,183,281 / 1,272,535 / 1,673,006 / 5,430,641 |
+
+The public candidate is **2.540355x faster at p50** (**60.6354% lower latency**). An untimed cold warm-up completed
+first on `vmi1153651`; RCH subsequently missed that worker's cache and rerouted the final comparison to
+`vmi1149989`, where both arms still ran inside one release process. Its 202.7-second compile and transfer overhead
+remained outside every in-process sample. Crate-scoped Clippy is clean under `-D warnings`; touched-hunk Rustfmt and
+`git diff --check` are clean. Bounded UBS completed and reproduced only the file's pre-existing broad test/assertion,
+indexing, and false-positive secret inventories, with no finding in either touched matcher or test hunk. Every Cargo
+command used fail-closed remote RCH; no explicit local Cargo or `release-perf` command ran, unrelated artifact dirt
+was untouched, and the 71 stashes were not changed.

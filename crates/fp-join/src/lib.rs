@@ -9709,14 +9709,44 @@ fn compute_asof_matches_datetime64(
     allow_exact_matches: bool,
     tolerance: Option<f64>,
 ) -> Vec<Option<usize>> {
-    let mut right_valid_values = Vec::new();
-    let mut right_valid_positions = Vec::new();
-    for i in 0..right.data.len() {
-        if right.is_valid(i) {
-            right_valid_values.push(right.data[i]);
-            right_valid_positions.push(i);
-        }
-    }
+    let mut filtered_values = Vec::new();
+    let mut filtered_positions = Vec::new();
+    let (right_valid_values, right_valid_positions) =
+        if right.all_valid && !right.data.contains(&fp_types::Timestamp::NAT) {
+            (right.data, None)
+        } else {
+            for i in 0..right.data.len() {
+                if right.is_valid(i) {
+                    filtered_values.push(right.data[i]);
+                    filtered_positions.push(i);
+                }
+            }
+            (
+                filtered_values.as_slice(),
+                Some(filtered_positions.as_slice()),
+            )
+        };
+
+    compute_asof_matches_datetime64_prepared(
+        left,
+        right_valid_values,
+        right_valid_positions,
+        direction,
+        allow_exact_matches,
+        tolerance,
+    )
+}
+
+fn compute_asof_matches_datetime64_prepared(
+    left: Datetime64AsofKey<'_>,
+    right_valid_values: &[i64],
+    right_valid_positions: Option<&[usize]>,
+    direction: AsofDirection,
+    allow_exact_matches: bool,
+    tolerance: Option<f64>,
+) -> Vec<Option<usize>> {
+    let right_source_position =
+        |position: usize| right_valid_positions.map_or(position, |positions| positions[position]);
 
     let mut right_matches = Vec::with_capacity(left.data.len());
 
@@ -9741,7 +9771,7 @@ fn compute_asof_matches_datetime64(
                     if !should_include {
                         break;
                     }
-                    best = Some(right_valid_positions[j]);
+                    best = Some(right_source_position(j));
                     best_val = Some(rv);
                     j += 1;
                 }
@@ -9779,7 +9809,7 @@ fn compute_asof_matches_datetime64(
                 if j < right_valid_values.len() {
                     let rv = right_valid_values[j];
                     if within_datetime64_tolerance(lv, rv, tolerance) {
-                        right_matches.push(Some(right_valid_positions[j]));
+                        right_matches.push(Some(right_source_position(j)));
                     } else {
                         right_matches.push(None);
                     }
@@ -9843,7 +9873,7 @@ fn compute_asof_matches_datetime64(
                     Some(idx)
                         if within_datetime64_tolerance(lv, right_valid_values[idx], tolerance) =>
                     {
-                        Some(right_valid_positions[idx])
+                        Some(right_source_position(idx))
                     }
                     _ => None,
                 };
@@ -18040,6 +18070,161 @@ mod tests {
     }
 
     // ── merge_asof tests ──
+
+    fn compute_asof_matches_datetime64_former_nsslz(
+        left: super::Datetime64AsofKey<'_>,
+        right: super::Datetime64AsofKey<'_>,
+        direction: super::AsofDirection,
+        allow_exact_matches: bool,
+        tolerance: Option<f64>,
+    ) -> Vec<Option<usize>> {
+        let mut right_valid_values = Vec::new();
+        let mut right_valid_positions = Vec::new();
+        for i in 0..right.data.len() {
+            if right.is_valid(i) {
+                right_valid_values.push(right.data[i]);
+                right_valid_positions.push(i);
+            }
+        }
+        super::compute_asof_matches_datetime64_prepared(
+            left,
+            &right_valid_values,
+            Some(&right_valid_positions),
+            direction,
+            allow_exact_matches,
+            tolerance,
+        )
+    }
+
+    #[test]
+    fn merge_asof_datetime64_borrowed_dense_right_matches_former_nsslz() {
+        let dense_left = Column::from_datetime64_values_with_validity(
+            vec![-15, -10, -5, 0, 5, 30, 35],
+            ValidityMask::all_valid(7),
+        );
+        let dense_right = Column::from_datetime64_values_with_validity(
+            vec![-10, 0, 10, 20, 30],
+            ValidityMask::all_valid(5),
+        );
+
+        let nat_right = Column::from_datetime64_values_with_validity(
+            vec![fp_types::Timestamp::NAT, -10, 0, 20, 30],
+            ValidityMask::all_valid(5),
+        );
+        let nat_left = Column::from_datetime64_values_with_validity(
+            vec![fp_types::Timestamp::NAT, -10, -5, 0, 5, 30, 35],
+            ValidityMask::all_valid(7),
+        );
+
+        for (left, right) in [
+            (&dense_left, &dense_right),
+            (&dense_left, &nat_right),
+            (&nat_left, &dense_right),
+        ] {
+            let left_key = super::datetime64_key_parts(left).expect("Datetime64 left key");
+            let right_key = super::datetime64_key_parts(right).expect("Datetime64 right key");
+            for direction in [
+                super::AsofDirection::Backward,
+                super::AsofDirection::Forward,
+                super::AsofDirection::Nearest,
+            ] {
+                for allow_exact_matches in [false, true] {
+                    for tolerance in [None, Some(7.0)] {
+                        assert_eq!(
+                            super::compute_asof_matches_datetime64(
+                                left_key,
+                                right_key,
+                                direction,
+                                allow_exact_matches,
+                                tolerance,
+                            ),
+                            compute_asof_matches_datetime64_former_nsslz(
+                                left_key,
+                                right_key,
+                                direction,
+                                allow_exact_matches,
+                                tolerance,
+                            ),
+                            "direction={direction:?} exact={allow_exact_matches} tolerance={tolerance:?}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release A/B only"]
+    fn datetime64_asof_borrowed_dense_right_ab_nsslz() {
+        use std::{hint::black_box, time::Instant};
+
+        const ITEMS: usize = 131_072;
+        const SAMPLES: usize = 10;
+
+        fn elapsed(run: impl FnOnce() -> Vec<Option<usize>>) -> u128 {
+            let started = Instant::now();
+            let output = black_box(run());
+            black_box(output.len());
+            let elapsed = started.elapsed().as_nanos();
+            drop(output);
+            elapsed
+        }
+
+        let left = Column::from_datetime64_values_with_validity(
+            (0..ITEMS).map(|i| i as i64 * 4 + 1).collect(),
+            ValidityMask::all_valid(ITEMS),
+        );
+        let right = Column::from_datetime64_values_with_validity(
+            (0..ITEMS).map(|i| i as i64 * 4).collect(),
+            ValidityMask::all_valid(ITEMS),
+        );
+        let left_key = super::datetime64_key_parts(&left).expect("Datetime64 left key");
+        let right_key = super::datetime64_key_parts(&right).expect("Datetime64 right key");
+        let former = || {
+            compute_asof_matches_datetime64_former_nsslz(
+                left_key,
+                right_key,
+                super::AsofDirection::Backward,
+                true,
+                None,
+            )
+        };
+        let candidate = || {
+            super::compute_asof_matches_datetime64(
+                left_key,
+                right_key,
+                super::AsofDirection::Backward,
+                true,
+                None,
+            )
+        };
+
+        assert_eq!(candidate(), former());
+        black_box(former());
+        black_box(candidate());
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut candidate_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_ns.push(elapsed(former));
+                candidate_ns.push(elapsed(candidate));
+            } else {
+                candidate_ns.push(elapsed(candidate));
+                former_ns.push(elapsed(former));
+            }
+        }
+        former_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let former_p50 = former_ns[SAMPLES / 2];
+        let candidate_p50 = candidate_ns[SAMPLES / 2];
+        println!(
+            "datetime64_asof_borrowed_dense_right_ab items={ITEMS} samples={SAMPLES} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} speedup={:.6}x",
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        println!("former_samples_ns={former_ns:?}");
+        println!("candidate_samples_ns={candidate_ns:?}");
+    }
 
     #[test]
     fn merge_asof_backward() {

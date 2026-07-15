@@ -16771,3 +16771,34 @@ no-run warmups and are not benchmark evidence. Correctness is strict-remote: the
 is **41 passed / 0 failed / 3 ignored performance probes**, including SHA-256 known answers and streaming/one-shot
 equivalence. Scoped `fp-runtime --all-targets --no-deps -D warnings` Clippy, direct Rustfmt, and `git diff --check` are
 green. UBS reports zero critical findings. No local Cargo or `release-perf` command ran, and no stash was changed.
+
+### 2026-07-14 IvoryGlacier — one-buffer `SemanticFingerprintBuilder::finish`: 2.138298x p50 WIN (`br-frankenpandas-88cuv`)
+
+Negative-ledger-first routing found that the one-shot semantic-fingerprint path was already single-buffer, but the
+streaming builder still finalized into a 64-byte digest `String` and then allocated and copied it through
+`format!("sha256:{}", ...)`. The one lever now finalizes directly into an exactly sized 71-byte output buffer. Hashing,
+lowercase hexadecimal encoding, the `sha256:` prefix, streaming state, output length, and every returned byte are
+unchanged. The historical two-allocation helper is test-only so the permanent A/B retains the exact former body without
+leaving dead production code.
+
+Attribution preceded the production edit. A strict-remote normal-`release` run on warmed `vmi1153651` cloned the same
+pre-seeded 64-byte SHA-256 state for both arms, thereby excluding input-update cost; it used 2,048 finishes per sample,
+two in-process warmups, and 20 reversed-ABBA samples per arm. The former body measured **413 ns p50** versus **189 ns
+p50** for the one-buffer prototype (**2.185185x**); p95 was **553 / 235 ns**. Exact output parity passed for input lengths
+0, 1, 31, 64, 65, 1,024, and 1,025 before timing.
+
+The single final foreground same-binary gate ran on warmed `vmi1227854` with `--profile release` and the candidate arm
+calling the shipped public `SemanticFingerprintBuilder::finish`:
+
+| final arm | p50 | p95 |
+| --- | ---: | ---: |
+| former two-allocation builder finish | 201 ns | 241 ns |
+| public one-buffer builder finish | 94 ns | 121 ns |
+
+The public candidate is **2.138298x faster at p50** (**53.234% lower latency**) and **1.991736x faster at p95**. The
+timed test body finished in 0.01 seconds; dependency compilation and transfer were outside the measured body, and an
+untimed release suite plus Clippy run preceded the final A/B on the same worker. Correctness is strict-remote: the full
+`fp-runtime` release library suite is **41 passed / 0 failed / 4 ignored performance probes**, including SHA-256 known
+answers and streaming/one-shot equivalence. Scoped `fp-runtime --all-targets --no-deps -D warnings` Clippy, direct
+Rustfmt, and `git diff --check` are green. Bounded UBS reports zero critical findings. No local Cargo or `release-perf`
+command ran, and no stash was changed.

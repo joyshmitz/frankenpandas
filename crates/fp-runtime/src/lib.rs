@@ -637,7 +637,11 @@ impl SemanticFingerprintBuilder {
 
     #[must_use]
     pub fn finish(self) -> String {
-        format!("sha256:{}", sha256_digest_hex(self.hasher.finalize()))
+        let digest = self.hasher.finalize();
+        let mut output = String::with_capacity(7 + 64);
+        output.push_str("sha256:");
+        append_sha256_digest_hex(&mut output, digest);
+        output
     }
 }
 
@@ -655,6 +659,7 @@ fn sha256_prefixed_hex(bytes: &[u8]) -> String {
     hex
 }
 
+#[cfg(test)]
 fn sha256_digest_hex(digest: impl IntoIterator<Item = u8>) -> String {
     let mut hex = String::with_capacity(64);
     append_sha256_digest_hex(&mut hex, digest);
@@ -1100,6 +1105,89 @@ mod tests {
         );
         eprintln!("SEMANTIC_FINGERPRINT_AB former_samples_ns={former_samples:?}");
         eprintln!("SEMANTIC_FINGERPRINT_AB candidate_samples_ns={candidate_samples:?}");
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn semantic_fingerprint_builder_finish_one_buffer_ab_88cuv() {
+        const BATCH: usize = 2_048;
+        const BLOCKS: usize = 10;
+
+        fn former(hasher: super::Sha256) -> String {
+            format!(
+                "sha256:{}",
+                super::sha256_digest_hex(super::Digest::finalize(hasher))
+            )
+        }
+
+        fn candidate(hasher: super::Sha256) -> String {
+            super::SemanticFingerprintBuilder { hasher }.finish()
+        }
+
+        fn seeded_hasher(len: usize) -> super::Sha256 {
+            let mut hasher = <super::Sha256 as super::Digest>::new();
+            let bytes = (0..len)
+                .map(|i| ((i * 131 + i / 7) % 251) as u8)
+                .collect::<Vec<_>>();
+            super::Digest::update(&mut hasher, &bytes);
+            hasher
+        }
+
+        fn elapsed(template: &super::Sha256, finish: fn(super::Sha256) -> String) -> u128 {
+            let started = Instant::now();
+            let mut digest = 0_u8;
+            for _ in 0..BATCH {
+                let output = black_box(finish(black_box(template.clone())));
+                digest ^= output.as_bytes().last().copied().unwrap_or_default();
+            }
+            black_box(digest);
+            started.elapsed().as_nanos() / BATCH as u128
+        }
+
+        fn percentile(samples: &mut [u128], pct: usize) -> u128 {
+            samples.sort_unstable();
+            let rank = (samples.len() * pct).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        }
+
+        for len in [0, 1, 31, 64, 65, 1_024, 1_025] {
+            let template = seeded_hasher(len);
+            assert_eq!(former(template.clone()), candidate(template));
+        }
+
+        let template = seeded_hasher(64);
+        for _ in 0..2 {
+            black_box(elapsed(&template, former));
+            black_box(elapsed(&template, candidate));
+        }
+
+        let mut former_samples = Vec::with_capacity(BLOCKS * 2);
+        let mut candidate_samples = Vec::with_capacity(BLOCKS * 2);
+        for block in 0..BLOCKS {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&template, former));
+                candidate_samples.push(elapsed(&template, candidate));
+                candidate_samples.push(elapsed(&template, candidate));
+                former_samples.push(elapsed(&template, former));
+            } else {
+                candidate_samples.push(elapsed(&template, candidate));
+                former_samples.push(elapsed(&template, former));
+                former_samples.push(elapsed(&template, former));
+                candidate_samples.push(elapsed(&template, candidate));
+            }
+        }
+
+        let former_p50 = percentile(&mut former_samples, 50);
+        let candidate_p50 = percentile(&mut candidate_samples, 50);
+        let former_p95 = percentile(&mut former_samples, 95);
+        let candidate_p95 = percentile(&mut candidate_samples, 95);
+        eprintln!(
+            "SEMANTIC_BUILDER_FINISH_AB bytes=64 batch={BATCH} samples={} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6} former_p95_ns={former_p95} candidate_p95_ns={candidate_p95}",
+            BLOCKS * 2,
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("SEMANTIC_BUILDER_FINISH_AB former_samples_ns={former_samples:?}");
+        eprintln!("SEMANTIC_BUILDER_FINISH_AB candidate_samples_ns={candidate_samples:?}");
     }
 
     #[test]

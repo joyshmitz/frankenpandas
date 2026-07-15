@@ -16863,3 +16863,40 @@ Scoped `fp-types --all-targets --no-deps -D warnings` release Clippy, direct Rus
 Bounded UBS reproduced only the pre-existing whole-file test panic/assert inventory, with no finding on the production
 formatter or A/B harness. Every Cargo invocation used fail-closed remote RCH; no local Cargo or `release-perf` command
 ran, and no stash was changed.
+
+### 2026-07-14 IvoryGlacier — monotonic `PeriodIndex::is_unique` avoids hashing: 9.445046x p50 WIN (`br-frankenpandas-dcqru`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). The ranked quick
+wins were claimed or already exhausted, and the ledger showed that CategoricalIndex and compact MultiIndex uniqueness
+already had integer sidecars but no `PeriodIndex::is_unique` performance row. A common `PeriodIndex::from_range` still
+allocated an `FxHashSet` and hashed every `(ordinal, freq)` pair even though a strictly monotonic total order proves that
+every value is unique.
+
+Attribution preceded the production edit. A strict-remote normal-`release` run on `vmi1156319` compared the exact public
+hash body with an allocation-free monotonic prototype over 200,000 minutely periods, using two in-process warmups and
+nine reversed-ABBA blocks. The former duplicate p50s were **3,760,297 / 4,131,358 ns** and the prototype duplicate p50s
+were **556,848 / 412,238 ns**, a **8.143400x** duplicate-median ratio. Exact parity passed before timing for empty and
+singleton indexes, ascending and descending ranges, adjacent duplicates, nonmonotonic unique values, and mixed-frequency
+unique and duplicate inputs.
+
+The one lever scans adjacent periods while their total-order direction remains strict. An equal neighbor returns false;
+the first direction reversal falls back to the exact former full-period hash set, so nonmonotonic and mixed-order inputs
+retain their previous result. `has_duplicates` continues to negate `is_unique`; names, values, frequency semantics,
+ordering, dtype, null behavior, serialization, and every other PeriodIndex method are unchanged.
+
+The single final foreground same-binary gate ran on `vmi1156319` with `--profile release`, with the candidate arm calling
+the shipped public `PeriodIndex::is_unique`:
+
+| final arm | duplicate p50 A / B | duplicate-p50 mean |
+| --- | ---: | ---: |
+| former full-period hash set | 4,311,573 / 4,635,096 ns | 4,473,334.5 ns |
+| public strict-monotonic proof | 491,245 / 455,989 ns | 473,617 ns |
+
+The public candidate is **9.445046x faster at p50** (**89.412% lower latency**). The timed body finished in **0.11
+seconds**. RCH missed its cache after the explicit untimed release warm-up and after each later successful job, but all
+sync and compilation time remained outside the in-process measurements. Correctness is strict-remote: the full
+`fp-index` release library suite is **538 passed / 0 failed / 7 ignored performance probes**, including the new exact
+hash-fallback parity guard. Scoped `fp-index --lib --profile release --no-deps -D warnings` Clippy and `git diff --check`
+are green. Direct Rustfmt shows only tracked pre-existing drift elsewhere in the file, with no delta on either touched
+hunk. Bounded UBS reports **0 critical** findings while reproducing the broad existing whole-file inventory. Every Cargo
+invocation used fail-closed remote RCH; no local Cargo or `release-perf` command ran, and the 70 stashes were unchanged.

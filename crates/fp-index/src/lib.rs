@@ -9888,8 +9888,20 @@ impl PeriodIndex {
 
     #[must_use]
     pub fn is_unique(&self) -> bool {
-        let unique: FxHashSet<&Period> = self.values.iter().collect();
-        unique.len() == self.values.len()
+        let mut direction = std::cmp::Ordering::Equal;
+        for pair in self.values.windows(2) {
+            let ordering = Self::compare_periods(&pair[0], &pair[1]);
+            if ordering.is_eq() {
+                return false;
+            }
+            if direction.is_eq() {
+                direction = ordering;
+            } else if ordering != direction {
+                let unique: FxHashSet<&Period> = self.values.iter().collect();
+                return unique.len() == self.values.len();
+            }
+        }
+        true
     }
 
     #[must_use]
@@ -31257,6 +31269,125 @@ mod tests {
         let (codes, uniques) = pi.factorize();
         assert!(codes.is_empty());
         assert!(uniques.is_empty());
+    }
+
+    fn period_index_is_unique_hash_former_dcqru(index: &super::PeriodIndex) -> bool {
+        let unique: super::FxHashSet<&fp_types::Period> = index.values().iter().collect();
+        unique.len() == index.len()
+    }
+
+    #[test]
+    fn period_index_is_unique_monotonic_matches_hash_fallback_dcqru() {
+        use fp_types::{Period, PeriodFreq};
+
+        let cases = [
+            Vec::new(),
+            vec![Period::new(7, PeriodFreq::Monthly)],
+            vec![
+                Period::new(1, PeriodFreq::Monthly),
+                Period::new(2, PeriodFreq::Monthly),
+                Period::new(3, PeriodFreq::Monthly),
+            ],
+            vec![
+                Period::new(3, PeriodFreq::Monthly),
+                Period::new(2, PeriodFreq::Monthly),
+                Period::new(1, PeriodFreq::Monthly),
+            ],
+            vec![
+                Period::new(1, PeriodFreq::Monthly),
+                Period::new(2, PeriodFreq::Monthly),
+                Period::new(2, PeriodFreq::Monthly),
+            ],
+            vec![
+                Period::new(2, PeriodFreq::Monthly),
+                Period::new(1, PeriodFreq::Monthly),
+                Period::new(3, PeriodFreq::Monthly),
+            ],
+            vec![
+                Period::new(1, PeriodFreq::Monthly),
+                Period::new(1, PeriodFreq::Daily),
+                Period::new(2, PeriodFreq::Monthly),
+            ],
+            vec![
+                Period::new(1, PeriodFreq::Monthly),
+                Period::new(1, PeriodFreq::Daily),
+                Period::new(1, PeriodFreq::Monthly),
+            ],
+        ];
+        for values in cases {
+            let index = super::PeriodIndex::new(values);
+            assert_eq!(
+                index.is_unique(),
+                period_index_is_unique_hash_former_dcqru(&index)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn period_index_is_unique_monotonic_ab_dcqru() {
+        use fp_types::{Period, PeriodFreq};
+
+        fn elapsed(index: &super::PeriodIndex, candidate: bool) -> u128 {
+            let started = std::time::Instant::now();
+            let result = if candidate {
+                std::hint::black_box(index).is_unique()
+            } else {
+                period_index_is_unique_hash_former_dcqru(std::hint::black_box(index))
+            };
+            std::hint::black_box(result);
+            started.elapsed().as_nanos()
+        }
+
+        fn percentile(samples: &mut [u128], pct: usize) -> u128 {
+            samples.sort_unstable();
+            let rank = (samples.len() * pct).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        }
+
+        let index =
+            super::PeriodIndex::from_range(Period::new(-100_000, PeriodFreq::Minutely), 200_000);
+        assert!(index.is_unique());
+        assert!(period_index_is_unique_hash_former_dcqru(&index));
+
+        for _ in 0..2 {
+            std::hint::black_box(elapsed(&index, false));
+            std::hint::black_box(elapsed(&index, true));
+        }
+
+        let mut former_a = Vec::with_capacity(9);
+        let mut former_b = Vec::with_capacity(9);
+        let mut candidate_a = Vec::with_capacity(9);
+        let mut candidate_b = Vec::with_capacity(9);
+        for block in 0_usize..9 {
+            if block.is_multiple_of(2) {
+                former_a.push(elapsed(&index, false));
+                candidate_a.push(elapsed(&index, true));
+                candidate_b.push(elapsed(&index, true));
+                former_b.push(elapsed(&index, false));
+            } else {
+                candidate_b.push(elapsed(&index, true));
+                former_b.push(elapsed(&index, false));
+                former_a.push(elapsed(&index, false));
+                candidate_a.push(elapsed(&index, true));
+            }
+        }
+
+        let former_a_p50 = percentile(&mut former_a, 50);
+        let former_b_p50 = percentile(&mut former_b, 50);
+        let candidate_a_p50 = percentile(&mut candidate_a, 50);
+        let candidate_b_p50 = percentile(&mut candidate_b, 50);
+        let former_p50 = (former_a_p50 + former_b_p50) as f64 / 2.0;
+        let candidate_p50 = (candidate_a_p50 + candidate_b_p50) as f64 / 2.0;
+        eprintln!(
+            "PERIOD_INDEX_IS_UNIQUE_ATTRIBUTION len={} former_a_p50_ns={former_a_p50} former_b_p50_ns={former_b_p50} candidate_a_p50_ns={candidate_a_p50} candidate_b_p50_ns={candidate_b_p50} ratio={:.6}",
+            index.len(),
+            former_p50 / candidate_p50,
+        );
+        eprintln!("PERIOD_INDEX_IS_UNIQUE_ATTRIBUTION former_a_ns={former_a:?}");
+        eprintln!("PERIOD_INDEX_IS_UNIQUE_ATTRIBUTION former_b_ns={former_b:?}");
+        eprintln!("PERIOD_INDEX_IS_UNIQUE_ATTRIBUTION candidate_a_ns={candidate_a:?}");
+        eprintln!("PERIOD_INDEX_IS_UNIQUE_ATTRIBUTION candidate_b_ns={candidate_b:?}");
     }
 
     #[test]

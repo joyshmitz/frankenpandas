@@ -17041,3 +17041,41 @@ warnings` release Clippy, direct Rustfmt, and `git diff --check` are green. Boun
 finding and reproduced the file's four pre-existing test panic findings. Every explicit Cargo command used fail-closed
 remote RCH; no local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were
 not changed.
+
+### 2026-07-14 IvoryGlacier — referenced-local `fp-expr` contexts: 79.470878x p50 WIN (`br-frankenpandas-o6w31`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). Its ranked
+performance quick wins remained assigned to other agents, and the recent ledger already covered the active columnar,
+index, join, GroupBy, datetime, runtime, IO, and reduction veins. The fresh `fp-expr` seam was the selective expression
+context constructor: it already walked the complete AST to retain only referenced Series, but cloned every caller local
+binding even when the expression referenced one `@local`.
+
+Attribution preceded the production edit. With 4,096 unused string locals plus one referenced scalar, a normal-release
+probe measured the former full selective-context construction at 261,963 ns, `locals.clone()` alone at 274,151 ns, and
+a one-binding selective prototype at 551 ns. The clone accounted for effectively the entire lifecycle and established
+a 475.431942x directional opportunity before touching production code.
+
+The one lever extends the existing complete AST binding walk to collect local names alongside Series names, then clones
+only caller bindings actually referenced by the expression. The public full-context constructors remain unchanged;
+DataFrame column/index shadowing, absent-local `UnknownLocal` errors, expression evaluation, scalar values, output name,
+index, and ordering are unchanged. A permanent parity test covers a mixed Series/local expression, a local-only scalar
+expression, unused NaN and string locals, and the missing-local error path.
+
+The single final foreground same-binary gate ran on strict-remote worker `vmi1149989` with normal `--profile release`:
+a 64-row frame, 4,096 unused locals plus one referenced threshold, one same-arm precondition before every timed batch,
+and nine reversed-ABBA blocks of eight evaluations. Before timing, the public production result matched the exact former
+body in name, index, and values.
+
+| final arm | duplicate p50 A / B | duplicate-p50 mean | A/A spread |
+| --- | ---: | ---: | ---: |
+| former full local-map clone | 209,904 / 225,358 ns | 217,631 ns | 7.1010% |
+| public referenced-local context | 2,818 / 2,659 ns | 2,738.5 ns | 5.8061% |
+
+The public candidate is **79.470878x faster at p50** (**98.742% lower latency**). The complete timed body finished in
+**0.038592 seconds**. RCH discarded the requested worker's nominal warm cache and cold-built the final command in
+2m23s without a timeout; sync, compilation, and artifact transfer remained outside every in-process sample. The exact
+parity/error test and final A/B test pass. Scoped `fp-expr --lib --no-deps -D warnings` normal-release Clippy, direct
+Rustfmt, and `git diff --check` are green. Bounded UBS reproduced the file's broad pre-existing test panic/unwrap/assert
+and heuristic inventory, with no unsafe code or new production correctness finding. Every explicit Cargo command used
+fail-closed remote RCH; no explicit local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched,
+and the 70 stashes were not changed.

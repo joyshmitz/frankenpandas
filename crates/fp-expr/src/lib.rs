@@ -388,15 +388,19 @@ impl EvalContext {
         locals: &BTreeMap<String, Scalar>,
         expr: &Expr,
     ) -> Result<Self, ExprError> {
-        let mut referenced = std::collections::BTreeSet::new();
-        MaterializedView::extract_series(expr, &mut referenced);
+        let mut referenced_series = std::collections::BTreeSet::new();
+        let mut referenced_locals = std::collections::BTreeSet::new();
+        MaterializedView::extract_bindings(expr, &mut referenced_series, &mut referenced_locals);
 
         let mut context = Self {
             series: BTreeMap::new(),
-            locals: locals.clone(),
+            locals: referenced_locals
+                .into_iter()
+                .filter_map(|name| locals.get(&name).cloned().map(|value| (name, value)))
+                .collect(),
             anchor_index: Some(frame.index().clone()),
         };
-        for name in referenced {
+        for name in referenced_series {
             // DataFrame columns shadow the synthetic index aliases, matching
             // `from_dataframe_with_locals`, which inserts columns last.
             if let Some(column) = frame.column(&name) {
@@ -1119,12 +1123,18 @@ impl MaterializedView {
         Ok(&self.result)
     }
 
-    fn extract_series(expr: &Expr, series_set: &mut std::collections::BTreeSet<String>) {
+    fn extract_bindings(
+        expr: &Expr,
+        series_set: &mut std::collections::BTreeSet<String>,
+        local_set: &mut std::collections::BTreeSet<String>,
+    ) {
         match expr {
             Expr::Series { name } => {
                 series_set.insert(name.0.clone());
             }
-            Expr::Local { .. } => {}
+            Expr::Local { name } => {
+                local_set.insert(name.clone());
+            }
             Expr::Add { left, right }
             | Expr::Sub { left, right }
             | Expr::Mul { left, right }
@@ -1136,39 +1146,41 @@ impl MaterializedView {
             | Expr::Or { left, right }
             | Expr::Compare { left, right, .. }
             | Expr::CombineFirst { left, right } => {
-                Self::extract_series(left, series_set);
-                Self::extract_series(right, series_set);
+                Self::extract_bindings(left, series_set, local_set);
+                Self::extract_bindings(right, series_set, local_set);
             }
-            Expr::IsIn { left, .. } => Self::extract_series(left, series_set),
+            Expr::IsIn { left, .. } => Self::extract_bindings(left, series_set, local_set),
             Expr::Not { expr }
             | Expr::Abs { expr }
             | Expr::Round { expr, .. }
             | Expr::Rank { expr, .. } => {
-                Self::extract_series(expr, series_set);
+                Self::extract_bindings(expr, series_set, local_set);
             }
-            Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::FillNa { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::DropNa { expr } => Self::extract_series(expr, series_set),
-            Expr::SortValues { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::SortIndex { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::ArgSort { expr } => Self::extract_series(expr, series_set),
-            Expr::Mode { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::Duplicated { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::DropDuplicates { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::HeadTail { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::TopN { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::Astype { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::IsNull { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::FillNa { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::DropNa { expr } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::SortValues { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::SortIndex { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::ArgSort { expr } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::Mode { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::Duplicated { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::DropDuplicates { expr, .. } => {
+                Self::extract_bindings(expr, series_set, local_set);
+            }
+            Expr::HeadTail { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::TopN { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::Replace { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
+            Expr::Astype { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
             Expr::Where {
                 expr, cond, other, ..
             } => {
-                Self::extract_series(expr, series_set);
-                Self::extract_series(cond, series_set);
+                Self::extract_bindings(expr, series_set, local_set);
+                Self::extract_bindings(cond, series_set, local_set);
                 if let Some(other) = other {
-                    Self::extract_series(other, series_set);
+                    Self::extract_bindings(other, series_set, local_set);
                 }
             }
-            Expr::Between { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Between { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
             Expr::Clip { expr, .. }
             | Expr::Shift { expr, .. }
             | Expr::Diff { expr, .. }
@@ -1176,14 +1188,15 @@ impl MaterializedView {
             | Expr::CumProd { expr }
             | Expr::CumMin { expr }
             | Expr::CumMax { expr }
-            | Expr::PctChange { expr, .. } => Self::extract_series(expr, series_set),
+            | Expr::PctChange { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
             Expr::Literal { .. } => {}
         }
     }
 
     fn is_linear(expr: &Expr) -> bool {
         let mut series_set = std::collections::BTreeSet::new();
-        Self::extract_series(expr, &mut series_set);
+        let mut local_set = std::collections::BTreeSet::new();
+        Self::extract_bindings(expr, &mut series_set, &mut local_set);
         series_set.len() == 1 && Self::is_append_local(expr)
     }
 
@@ -8943,6 +8956,68 @@ mod tests {
     }
 
     #[test]
+    fn referenced_local_context_matches_full_context_o6w31() {
+        let frame = fp_frame::DataFrame::from_series(vec![
+            Series::from_values(
+                "target",
+                vec![10_i64.into(), 20_i64.into(), 30_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .expect("target series"),
+        ])
+        .expect("frame");
+        let locals = BTreeMap::from([
+            ("offset".to_owned(), Scalar::Int64(10)),
+            ("threshold".to_owned(), Scalar::Int64(11)),
+            ("unused_nan".to_owned(), Scalar::Float64(f64::NAN)),
+            ("unused_text".to_owned(), Scalar::Utf8("unused".repeat(32))),
+        ]);
+        let policy = RuntimePolicy::hardened(Some(100));
+
+        for source in ["target + @offset > @threshold", "@offset + 1"] {
+            let expr = super::parse_expr(source).expect("expression");
+            let full_context =
+                EvalContext::from_dataframe_with_locals(&frame, &locals).expect("full context");
+            let selective_context =
+                EvalContext::from_dataframe_for_expr_with_locals(&frame, &locals, &expr)
+                    .expect("selective context");
+            let expected_locals = if source.contains("threshold") {
+                vec!["offset", "threshold"]
+            } else {
+                vec!["offset"]
+            };
+            assert_eq!(
+                selective_context
+                    .locals
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                expected_locals
+            );
+            assert_eq!(full_context.locals.len(), locals.len());
+
+            let mut former_ledger = EvidenceLedger::new();
+            let former = evaluate(&expr, &full_context, &policy, &mut former_ledger)
+                .expect("full evaluation");
+            let mut candidate_ledger = EvidenceLedger::new();
+            let candidate = evaluate(&expr, &selective_context, &policy, &mut candidate_ledger)
+                .expect("selective evaluation");
+            assert_eq!(candidate.name(), former.name());
+            assert_eq!(candidate.index(), former.index());
+            assert_eq!(candidate.values(), former.values());
+        }
+
+        let missing = super::parse_expr("target > @missing").expect("missing expression");
+        let selective = EvalContext::from_dataframe_for_expr_with_locals(&frame, &locals, &missing)
+            .expect("missing context");
+        let mut ledger = EvidenceLedger::new();
+        assert!(matches!(
+            evaluate(&missing, &selective, &policy, &mut ledger),
+            Err(ExprError::UnknownLocal(name)) if name == "missing"
+        ));
+    }
+
+    #[test]
     #[ignore = "foreground performance probe"]
     fn eval_context_referenced_binding_ab_wtdap() {
         const ROWS: usize = 100_000;
@@ -9027,6 +9102,247 @@ mod tests {
         println!(
             "former/candidate ratio: {:.6}x",
             former_mean / candidate_mean
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground attribution probe"]
+    fn eval_context_local_clone_profile_o6w31() {
+        const LOCALS: usize = 4_096;
+        const SAMPLES: usize = 11;
+
+        fn median(mut samples: Vec<u128>) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            Series::from_values(
+                "target",
+                (0..64_i64).map(Into::into).collect(),
+                (0..64_i64).map(Scalar::Int64).collect(),
+            )
+            .expect("target series"),
+        ])
+        .expect("frame");
+        let mut locals = (0..LOCALS)
+            .map(|idx| {
+                (
+                    format!("unused_{idx:04}"),
+                    Scalar::Utf8(format!("unused-value-{idx:04}-{}", "x".repeat(48))),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        locals.insert("threshold".to_owned(), Scalar::Int64(31));
+        let expr = super::parse_expr("target > @threshold").expect("expression");
+        let policy = RuntimePolicy::hardened(Some(100));
+
+        let full = EvalContext::from_dataframe_for_expr_with_locals(&frame, &locals, &expr)
+            .expect("full locals context");
+        let selective_locals = BTreeMap::from([(
+            "threshold".to_owned(),
+            locals.get("threshold").cloned().expect("threshold"),
+        )]);
+        let selective =
+            EvalContext::from_dataframe_for_expr_with_locals(&frame, &selective_locals, &expr)
+                .expect("selective locals context");
+        let mut full_ledger = EvidenceLedger::new();
+        let full_result = evaluate(&expr, &full, &policy, &mut full_ledger).expect("full result");
+        let mut selective_ledger = EvidenceLedger::new();
+        let selective_result =
+            evaluate(&expr, &selective, &policy, &mut selective_ledger).expect("selective result");
+        assert_eq!(selective_result.index(), full_result.index());
+        assert_eq!(selective_result.values(), full_result.values());
+
+        let measure_full = || {
+            let started = std::time::Instant::now();
+            let context = EvalContext::from_dataframe_for_expr_with_locals(
+                std::hint::black_box(&frame),
+                std::hint::black_box(&locals),
+                std::hint::black_box(&expr),
+            )
+            .expect("full locals context");
+            std::hint::black_box(context);
+            started.elapsed().as_nanos()
+        };
+        let measure_clone = || {
+            let started = std::time::Instant::now();
+            let cloned = std::hint::black_box(&locals).clone();
+            std::hint::black_box(cloned);
+            started.elapsed().as_nanos()
+        };
+        let measure_selective = || {
+            let started = std::time::Instant::now();
+            let selective_locals = BTreeMap::from([(
+                "threshold".to_owned(),
+                std::hint::black_box(&locals)
+                    .get("threshold")
+                    .cloned()
+                    .expect("threshold"),
+            )]);
+            let context = EvalContext::from_dataframe_for_expr_with_locals(
+                std::hint::black_box(&frame),
+                &selective_locals,
+                std::hint::black_box(&expr),
+            )
+            .expect("selective locals context");
+            std::hint::black_box(context);
+            started.elapsed().as_nanos()
+        };
+
+        for _ in 0..2 {
+            std::hint::black_box(measure_full());
+            std::hint::black_box(measure_clone());
+            std::hint::black_box(measure_selective());
+        }
+        let full_ns = median((0..SAMPLES).map(|_| measure_full()).collect());
+        let clone_ns = median((0..SAMPLES).map(|_| measure_clone()).collect());
+        let selective_ns = median((0..SAMPLES).map(|_| measure_selective()).collect());
+        println!(
+            "FP_EXPR_LOCAL_PROFILE locals={} rows=64 full_context_ns={full_ns} locals_clone_ns={clone_ns} selective_context_ns={selective_ns} clone_share={:.6} directional_ratio={:.6}",
+            locals.len(),
+            clone_ns as f64 / full_ns as f64,
+            full_ns as f64 / selective_ns as f64
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground release A/B harness"]
+    fn eval_context_referenced_local_ab_o6w31() {
+        const LOCALS: usize = 4_096;
+        const BATCH: usize = 8;
+        const BLOCKS: usize = 9;
+
+        fn former_context(
+            frame: &fp_frame::DataFrame,
+            locals: &BTreeMap<String, Scalar>,
+            expr: &Expr,
+        ) -> Result<EvalContext, ExprError> {
+            let mut referenced_series = std::collections::BTreeSet::new();
+            let mut ignored_locals = std::collections::BTreeSet::new();
+            MaterializedView::extract_bindings(expr, &mut referenced_series, &mut ignored_locals);
+            let mut context = EvalContext {
+                series: BTreeMap::new(),
+                locals: locals.clone(),
+                anchor_index: Some(frame.index().clone()),
+            };
+            for name in referenced_series {
+                if let Some(column) = frame.column(&name) {
+                    let series = Series::new(name, frame.index().clone(), column.clone())?;
+                    context.insert_series(series);
+                } else if name == "index"
+                    || name == "ilevel_0"
+                    || frame.index().name() == Some(name.as_str())
+                {
+                    context.insert_index_series(&name, frame.index())?;
+                }
+            }
+            Ok(context)
+        }
+
+        fn evaluate_arm(
+            frame: &fp_frame::DataFrame,
+            locals: &BTreeMap<String, Scalar>,
+            expr: &Expr,
+            policy: &RuntimePolicy,
+            candidate: bool,
+        ) -> Series {
+            let mut ledger = EvidenceLedger::new();
+            if candidate {
+                super::evaluate_on_dataframe_with_locals(expr, frame, locals, policy, &mut ledger)
+                    .expect("candidate evaluation")
+            } else {
+                let context = former_context(frame, locals, expr).expect("former context");
+                evaluate(expr, &context, policy, &mut ledger).expect("former evaluation")
+            }
+        }
+
+        fn elapsed_ns(
+            frame: &fp_frame::DataFrame,
+            locals: &BTreeMap<String, Scalar>,
+            expr: &Expr,
+            policy: &RuntimePolicy,
+            candidate: bool,
+        ) -> u128 {
+            std::hint::black_box(evaluate_arm(frame, locals, expr, policy, candidate));
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(evaluate_arm(frame, locals, expr, policy, candidate));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(mut samples: Vec<u128>) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        fn spread(a: u128, b: u128) -> f64 {
+            a.abs_diff(b) as f64 / ((a + b) as f64 / 2.0)
+        }
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            Series::from_values(
+                "target",
+                (0..64_i64).map(Into::into).collect(),
+                (0..64_i64).map(Scalar::Int64).collect(),
+            )
+            .expect("target series"),
+        ])
+        .expect("frame");
+        let mut locals = (0..LOCALS)
+            .map(|idx| {
+                (
+                    format!("unused_{idx:04}"),
+                    Scalar::Utf8(format!("unused-value-{idx:04}-{}", "x".repeat(48))),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        locals.insert("threshold".to_owned(), Scalar::Int64(31));
+        let expr = super::parse_expr("target > @threshold").expect("expression");
+        let policy = RuntimePolicy::hardened(Some(100));
+
+        let former = evaluate_arm(&frame, &locals, &expr, &policy, false);
+        let candidate = evaluate_arm(&frame, &locals, &expr, &policy, true);
+        assert_eq!(candidate.name(), former.name());
+        assert_eq!(candidate.index(), former.index());
+        assert_eq!(candidate.values(), former.values());
+
+        let body_started = std::time::Instant::now();
+        let mut former_a = Vec::with_capacity(BLOCKS);
+        let mut former_b = Vec::with_capacity(BLOCKS);
+        let mut candidate_a = Vec::with_capacity(BLOCKS);
+        let mut candidate_b = Vec::with_capacity(BLOCKS);
+        for block in 0..BLOCKS {
+            let order = if block.is_multiple_of(2) {
+                [(false, 0), (true, 0), (true, 1), (false, 1)]
+            } else {
+                [(true, 1), (false, 1), (false, 0), (true, 0)]
+            };
+            for (candidate, duplicate) in order {
+                let elapsed = elapsed_ns(&frame, &locals, &expr, &policy, candidate);
+                match (candidate, duplicate) {
+                    (false, 0) => former_a.push(elapsed),
+                    (false, _) => former_b.push(elapsed),
+                    (true, 0) => candidate_a.push(elapsed),
+                    (true, _) => candidate_b.push(elapsed),
+                }
+            }
+        }
+
+        let former_a = median(former_a) / BATCH as u128;
+        let former_b = median(former_b) / BATCH as u128;
+        let candidate_a = median(candidate_a) / BATCH as u128;
+        let candidate_b = median(candidate_b) / BATCH as u128;
+        let former_mean = (former_a + former_b) as f64 / 2.0;
+        let candidate_mean = (candidate_a + candidate_b) as f64 / 2.0;
+        println!(
+            "FP_EXPR_LOCAL_AB locals={} rows=64 former_a_ns={former_a} former_b_ns={former_b} candidate_a_ns={candidate_a} candidate_b_ns={candidate_b} former_spread={:.6} candidate_spread={:.6} speedup={:.6} body_seconds={:.6}",
+            locals.len(),
+            spread(former_a, former_b),
+            spread(candidate_a, candidate_b),
+            former_mean / candidate_mean,
+            body_started.elapsed().as_secs_f64()
         );
     }
 

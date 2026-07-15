@@ -716,6 +716,38 @@ impl ValidityMask {
         if self.all() && other.all() {
             return Self::all_valid(total);
         }
+
+        // Nullable packed masks already store the exact bit stream needed by
+        // the result. Append whole words, merging only across the one boundary
+        // word when the left length is not word-aligned. Sparse-range masks
+        // keep the representation-preserving fallback below, while all-valid
+        // sentinels retain their existing handling.
+        if self.invalid_ranges.is_none()
+            && other.invalid_ranges.is_none()
+            && !self.is_all_valid_sentinel()
+            && !other.is_all_valid_sentinel()
+        {
+            let word_count = total.div_ceil(64);
+            let mut words = vec![0_u64; word_count];
+            words[..self.words.len()].copy_from_slice(&self.words);
+
+            let output_word = self.len / 64;
+            let shift = self.len % 64;
+            for (idx, &word) in other.words.iter().enumerate() {
+                words[output_word + idx] |= word << shift;
+                if shift != 0 && output_word + idx + 1 < word_count {
+                    words[output_word + idx + 1] |= word >> (64 - shift);
+                }
+            }
+
+            let remainder = total % 64;
+            if remainder > 0 {
+                *words.last_mut().expect("non-empty concatenated validity") &=
+                    (1_u64 << remainder) - 1;
+            }
+            return Self::from_words(words, total);
+        }
+
         let mut out = Self::all_invalid(total);
         for i in 0..self.len {
             if self.get(i) {
@@ -28518,6 +28550,95 @@ mod tests {
         assert!(!merged.get(1));
         assert!(merged.get(2));
         assert!(merged.get(3));
+    }
+
+    fn former_validity_mask_concat(left: &ValidityMask, right: &ValidityMask) -> ValidityMask {
+        let mut out = ValidityMask::all_invalid(left.len() + right.len());
+        for idx in 0..left.len() {
+            if left.get(idx) {
+                out.set(idx, true);
+            }
+        }
+        for idx in 0..right.len() {
+            if right.get(idx) {
+                out.set(left.len() + idx, true);
+            }
+        }
+        out
+    }
+
+    fn patterned_validity_mask(len: usize, salt: u64) -> ValidityMask {
+        let mut words = Vec::with_capacity(len.div_ceil(64));
+        for idx in 0..len.div_ceil(64) {
+            words.push(0xd6b5_8a3c_79e1_4f20_u64.rotate_left((idx as u32) ^ salt as u32));
+        }
+        if !len.is_multiple_of(64) {
+            *words.last_mut().expect("non-empty patterned validity") &= (1_u64 << (len % 64)) - 1;
+        }
+        ValidityMask::from_words(words, len)
+    }
+
+    #[test]
+    fn validity_mask_concat_packed_boundaries_match_former_path() {
+        for left_len in [1, 2, 63, 64, 65, 127, 128, 129] {
+            for right_len in [1, 3, 63, 64, 65, 130] {
+                let left = patterned_validity_mask(left_len, left_len as u64);
+                let right = patterned_validity_mask(right_len, right_len as u64 + 19);
+                assert_eq!(
+                    left.concat(&right),
+                    former_validity_mask_concat(&left, &right)
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release A/B only"]
+    fn validity_mask_concat_packed_ab() {
+        use std::{hint::black_box, time::Instant};
+
+        const LEFT_LEN: usize = 1_000_003;
+        const RIGHT_LEN: usize = 1_000_061;
+        const SAMPLES: usize = 10;
+
+        let left = patterned_validity_mask(LEFT_LEN, 7);
+        let right = patterned_validity_mask(RIGHT_LEN, 29);
+        let expected = former_validity_mask_concat(&left, &right);
+        assert_eq!(left.concat(&right), expected);
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut packed_ns = Vec::with_capacity(SAMPLES);
+        let measure_former = || {
+            let start = Instant::now();
+            let output = former_validity_mask_concat(black_box(&left), black_box(&right));
+            black_box(output.count_valid());
+            start.elapsed().as_nanos()
+        };
+        let measure_packed = || {
+            let start = Instant::now();
+            let output = black_box(&left).concat(black_box(&right));
+            black_box(output.count_valid());
+            start.elapsed().as_nanos()
+        };
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_ns.push(measure_former());
+                packed_ns.push(measure_packed());
+            } else {
+                packed_ns.push(measure_packed());
+                former_ns.push(measure_former());
+            }
+        }
+        former_ns.sort_unstable();
+        packed_ns.sort_unstable();
+        let former_p50 = former_ns[SAMPLES / 2];
+        let packed_p50 = packed_ns[SAMPLES / 2];
+        println!(
+            "validity_mask_concat_packed_ab left={LEFT_LEN} right={RIGHT_LEN} samples={SAMPLES} former_p50_ns={former_p50} packed_p50_ns={packed_p50} speedup={:.6}x",
+            former_p50 as f64 / packed_p50 as f64
+        );
+        println!("former_samples_ns={former_ns:?}");
+        println!("packed_samples_ns={packed_ns:?}");
     }
 
     #[test]

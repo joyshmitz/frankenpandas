@@ -17191,3 +17191,33 @@ clean; whole-file Rustfmt and scoped Clippy remain blocked by the file's pre-exi
 with no diagnostic at either touched hunk. Bounded UBS entered the known broad scanner path and produced no focused
 finding before its 180-second bound. Every Cargo command used fail-closed remote RCH; no explicit local Cargo or
 `release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.
+
+### 2026-07-15 IvoryGlacier — packed-word `ValidityMask::concat`: 93.542929x p50 WIN (`br-frankenpandas-h0ilf`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). Its ranked
+performance picks were stale, resolved, fenced, or assigned to other agents. The adjacent validity-bitmap vein still
+had a distinct unmeasured seam: concatenating two already-packed nullable masks rebuilt the result with one branchy
+`get` and possible `set` per input bit.
+
+Attribution preceded the production edit. The former path performs `left.len + right.len` bit probes and mutations;
+the candidate copies and merges `ceil((left.len + right.len) / 64)` words, touching at most one split boundary per
+source word. The one production lever is gated to two ordinary packed masks. All-valid sentinels and sparse invalid-
+range masks retain their former handling, preserving compact representations and every existing semantic branch.
+
+The single final foreground same-binary A/B ran fail-closed on strict-remote worker `vmi1149989` with normal
+`--profile release`. It concatenated 1,000,003 and 1,000,061 patterned nullable bits, performed exact full-mask parity
+before timing, and collected ten alternating-order samples. The in-process measurement body completed in 0.04 seconds.
+
+| final arm | p50 | samples (ns) |
+| --- | ---: | --- |
+| former per-bit `get` + `set` | 3,589,897 ns | 2,783,102 / 3,004,225 / 3,025,807 / 3,193,600 / 3,460,151 / 3,589,897 / 3,594,393 / 3,789,378 / 4,118,343 / 4,401,630 |
+| public packed-word concat | 38,377 ns | 26,320 / 26,750 / 30,847 / 36,395 / 37,998 / 38,377 / 38,908 / 43,746 / 47,121 / 59,069 |
+
+The public candidate is **93.542929x faster at p50** (**98.931% lower latency**). Focused correctness is green for the
+existing mixed-representation append plus 48 packed length pairs spanning aligned and misaligned 64-bit boundaries;
+the timed test also re-proved complete-mask equality. `git diff --check` and Rustfmt on the touched hunks are clean.
+Scoped normal-release Clippy reached `fp-columnar` and stopped on 23 pre-existing diagnostics at lines 6009–21931,
+with none in either touched hunk. Bounded UBS entered the known broad scanner path and emitted no focused finding.
+RCH rebuilt the final release test after a cache miss in 49.0 seconds; sync, compilation, and artifact retrieval were
+outside every in-process sample. Every Cargo command used fail-closed remote RCH; no explicit local Cargo or
+`release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.

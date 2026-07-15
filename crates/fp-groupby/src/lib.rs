@@ -3230,22 +3230,25 @@ impl KllSketch {
         let offset = (self.compact_count + level) % 2;
         self.compact_count = self.compact_count.wrapping_add(1);
 
-        // Promote every other element to the next level; discard the rest.
-        // Standard KLL: compactor is cleared after compaction.
-        let promoted: Vec<f64> = self.compactors[level]
-            .iter()
-            .copied()
-            .enumerate()
-            .filter_map(|(i, v)| if i % 2 == offset { Some(v) } else { None })
-            .collect();
-
-        self.compactors[level].clear();
-
         // Ensure next level exists.
         if level + 1 >= self.compactors.len() {
             self.compactors.push(Vec::with_capacity(self.k * 2));
         }
-        self.compactors[level + 1].extend(promoted);
+
+        // Promote every other element to the next level; discard the rest.
+        // The disjoint borrows let us stream directly into the destination,
+        // retaining the current level's capacity without a temporary Vec.
+        let (through_current, after_current) = self.compactors.split_at_mut(level + 1);
+        let current = &mut through_current[level];
+        let next = &mut after_current[0];
+        next.extend(
+            current
+                .iter()
+                .copied()
+                .enumerate()
+                .filter_map(|(i, v)| if i % 2 == offset { Some(v) } else { None }),
+        );
+        current.clear();
 
         // Recursively compact if next level overflows.
         if self.compactors[level + 1].len() >= self.capacity_at_level(level + 1) {
@@ -7463,6 +7466,306 @@ mod tests {
             assert!(
                 q25 <= q50 && q50 <= q75,
                 "quantiles not monotonic: q25={q25}, q50={q50}, q75={q75}"
+            );
+        }
+
+        #[test]
+        #[ignore = "foreground attribution probe"]
+        fn kll_compaction_promotion_allocation_profile_xagv2() {
+            const K: usize = 32;
+            const VALUES: usize = 131_072;
+            const SAMPLES: usize = 9;
+
+            #[derive(Debug, PartialEq)]
+            struct ProbeKll {
+                compactors: Vec<Vec<f64>>,
+                size: usize,
+                compact_count: usize,
+            }
+
+            impl ProbeKll {
+                fn new() -> Self {
+                    Self {
+                        compactors: vec![Vec::with_capacity(K * 2)],
+                        size: 0,
+                        compact_count: 0,
+                    }
+                }
+
+                fn insert(&mut self, value: f64, stream: bool) {
+                    self.compactors[0].push(value);
+                    self.size += 1;
+                    if self.compactors[0].len() >= K * 2 {
+                        self.compact(0, stream);
+                    }
+                }
+
+                fn compact(&mut self, level: usize, stream: bool) {
+                    self.compactors[level]
+                        .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+                    let offset = (self.compact_count + level) % 2;
+                    self.compact_count = self.compact_count.wrapping_add(1);
+
+                    if level + 1 >= self.compactors.len() {
+                        self.compactors.push(Vec::with_capacity(K * 2));
+                    }
+                    if stream {
+                        let (through_current, after_current) =
+                            self.compactors.split_at_mut(level + 1);
+                        let current = &mut through_current[level];
+                        let next = &mut after_current[0];
+                        next.extend(
+                            current
+                                .iter()
+                                .copied()
+                                .enumerate()
+                                .filter_map(|(idx, value)| (idx % 2 == offset).then_some(value)),
+                        );
+                        current.clear();
+                    } else {
+                        let promoted = self.compactors[level]
+                            .iter()
+                            .copied()
+                            .enumerate()
+                            .filter_map(|(idx, value)| (idx % 2 == offset).then_some(value))
+                            .collect::<Vec<_>>();
+                        self.compactors[level].clear();
+                        self.compactors[level + 1].extend(promoted);
+                    }
+
+                    if self.compactors[level + 1].len() >= K * 2 {
+                        self.compact(level + 1, stream);
+                    }
+                }
+            }
+
+            fn build(values: &[f64], stream: bool) -> ProbeKll {
+                let mut sketch = ProbeKll::new();
+                for &value in values {
+                    sketch.insert(value, stream);
+                }
+                sketch
+            }
+
+            fn elapsed(values: &[f64], stream: bool) -> (u128, ProbeKll) {
+                let started = std::time::Instant::now();
+                let sketch = build(std::hint::black_box(values), stream);
+                (started.elapsed().as_nanos(), sketch)
+            }
+
+            fn median(mut samples: Vec<u128>) -> u128 {
+                samples.sort_unstable();
+                samples[samples.len() / 2]
+            }
+
+            let mut state = 0xD1B5_4A32_D192_ED03_u64;
+            let values = (0..VALUES)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    ((state >> 24) & 0x00ff_ffff) as f64
+                })
+                .collect::<Vec<_>>();
+
+            let former = build(&values, false);
+            let candidate = build(&values, true);
+            assert_eq!(candidate, former);
+
+            for _ in 0..2 {
+                std::hint::black_box(elapsed(&values, false));
+                std::hint::black_box(elapsed(&values, true));
+            }
+            let mut former_samples = Vec::with_capacity(SAMPLES);
+            let mut candidate_samples = Vec::with_capacity(SAMPLES);
+            for sample in 0..SAMPLES {
+                let order = if sample.is_multiple_of(2) {
+                    [false, true]
+                } else {
+                    [true, false]
+                };
+                for stream in order {
+                    let (elapsed, sketch) = elapsed(&values, stream);
+                    assert_eq!(sketch, former);
+                    if stream {
+                        candidate_samples.push(elapsed);
+                    } else {
+                        former_samples.push(elapsed);
+                    }
+                }
+            }
+            let former_ns = median(former_samples);
+            let candidate_ns = median(candidate_samples);
+            println!(
+                "KLL_PROMOTION_PROFILE values={VALUES} k={K} compactions={} former_ns={former_ns} candidate_ns={candidate_ns} directional_ratio={:.6}",
+                former.compact_count,
+                former_ns as f64 / candidate_ns as f64
+            );
+        }
+
+        fn former_kll_compact(sketch: &mut KllSketch, level: usize) {
+            sketch.compactors[level]
+                .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+            let offset = (sketch.compact_count + level) % 2;
+            sketch.compact_count = sketch.compact_count.wrapping_add(1);
+            let promoted = sketch.compactors[level]
+                .iter()
+                .copied()
+                .enumerate()
+                .filter_map(|(idx, value)| (idx % 2 == offset).then_some(value))
+                .collect::<Vec<_>>();
+            sketch.compactors[level].clear();
+            if level + 1 >= sketch.compactors.len() {
+                sketch.compactors.push(Vec::with_capacity(sketch.k * 2));
+            }
+            sketch.compactors[level + 1].extend(promoted);
+            if sketch.compactors[level + 1].len() >= sketch.capacity_at_level(level + 1) {
+                former_kll_compact(sketch, level + 1);
+            }
+        }
+
+        fn former_kll_insert(sketch: &mut KllSketch, value: f64) {
+            sketch.compactors[0].push(value);
+            sketch.size += 1;
+            if sketch.compactors[0].len() >= sketch.capacity_at_level(0) {
+                former_kll_compact(sketch, 0);
+            }
+        }
+
+        fn build_kll(values: &[f64], k: usize, candidate: bool) -> KllSketch {
+            let mut sketch = KllSketch::new(k);
+            for &value in values {
+                if candidate {
+                    sketch.insert(value);
+                } else {
+                    former_kll_insert(&mut sketch, value);
+                }
+            }
+            sketch
+        }
+
+        fn assert_kll_bits_equal(candidate: &KllSketch, former: &KllSketch) {
+            assert_eq!(candidate.k, former.k);
+            assert_eq!(candidate.size, former.size);
+            assert_eq!(candidate.compact_count, former.compact_count);
+            assert_eq!(candidate.compactors.len(), former.compactors.len());
+            for (candidate_level, former_level) in
+                candidate.compactors.iter().zip(&former.compactors)
+            {
+                assert_eq!(candidate_level.len(), former_level.len());
+                assert!(
+                    candidate_level
+                        .iter()
+                        .zip(former_level)
+                        .all(|(candidate, former)| candidate.to_bits() == former.to_bits())
+                );
+            }
+            for quantile in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                assert_eq!(
+                    candidate.quantile(quantile).map(f64::to_bits),
+                    former.quantile(quantile).map(f64::to_bits)
+                );
+            }
+        }
+
+        #[test]
+        fn kll_streamed_promotion_matches_former_bits_xagv2() {
+            for k in [8, 32, 256] {
+                let mut former = KllSketch::new(k);
+                let mut candidate = KllSketch::new(k);
+                for idx in 0..4_097_u64 {
+                    let value = match idx % 257 {
+                        0 => f64::NEG_INFINITY,
+                        1 => f64::INFINITY,
+                        2 => -0.0,
+                        3 => 0.0,
+                        _ => idx.wrapping_mul(6_364_136_223_846_793_005) as i64 as f64,
+                    };
+                    former_kll_insert(&mut former, value);
+                    candidate.insert(value);
+                    if idx < 20 || idx.is_power_of_two() || idx == 4_096 {
+                        assert_kll_bits_equal(&candidate, &former);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "foreground release A/B harness"]
+        fn kll_streamed_promotion_public_ab_xagv2() {
+            const K: usize = 32;
+            const VALUES: usize = 131_072;
+            const BATCH: usize = 4;
+            const BLOCKS: usize = 9;
+
+            fn elapsed(values: &[f64], candidate: bool) -> u128 {
+                std::hint::black_box(build_kll(values, K, candidate));
+                let started = std::time::Instant::now();
+                for _ in 0..BATCH {
+                    let sketch = build_kll(std::hint::black_box(values), K, candidate);
+                    std::hint::black_box(sketch.quantile(0.5));
+                    std::hint::black_box(sketch);
+                }
+                started.elapsed().as_nanos()
+            }
+
+            fn median(mut samples: Vec<u128>) -> u128 {
+                samples.sort_unstable();
+                samples[samples.len() / 2]
+            }
+
+            fn spread(left: u128, right: u128) -> f64 {
+                left.abs_diff(right) as f64 / ((left + right) as f64 / 2.0)
+            }
+
+            let mut state = 0xD1B5_4A32_D192_ED03_u64;
+            let values = (0..VALUES)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    ((state >> 24) & 0x00ff_ffff) as f64
+                })
+                .collect::<Vec<_>>();
+            let former = build_kll(&values, K, false);
+            let candidate = build_kll(&values, K, true);
+            assert_kll_bits_equal(&candidate, &former);
+
+            let body_started = std::time::Instant::now();
+            let mut former_a = Vec::with_capacity(BLOCKS);
+            let mut former_b = Vec::with_capacity(BLOCKS);
+            let mut candidate_a = Vec::with_capacity(BLOCKS);
+            let mut candidate_b = Vec::with_capacity(BLOCKS);
+            for block in 0..BLOCKS {
+                let order = if block.is_multiple_of(2) {
+                    [(false, 0), (true, 0), (true, 1), (false, 1)]
+                } else {
+                    [(true, 1), (false, 1), (false, 0), (true, 0)]
+                };
+                for (candidate, duplicate) in order {
+                    let sample = elapsed(&values, candidate);
+                    match (candidate, duplicate) {
+                        (false, 0) => former_a.push(sample),
+                        (false, _) => former_b.push(sample),
+                        (true, 0) => candidate_a.push(sample),
+                        (true, _) => candidate_b.push(sample),
+                    }
+                }
+            }
+
+            let former_a = median(former_a) / BATCH as u128;
+            let former_b = median(former_b) / BATCH as u128;
+            let candidate_a = median(candidate_a) / BATCH as u128;
+            let candidate_b = median(candidate_b) / BATCH as u128;
+            let former_mean = (former_a + former_b) as f64 / 2.0;
+            let candidate_mean = (candidate_a + candidate_b) as f64 / 2.0;
+            println!(
+                "KLL_STREAM_AB values={VALUES} k={K} compactions={} former_a_ns={former_a} former_b_ns={former_b} candidate_a_ns={candidate_a} candidate_b_ns={candidate_b} former_spread={:.6} candidate_spread={:.6} speedup={:.6} body_seconds={:.6}",
+                former.compact_count,
+                spread(former_a, former_b),
+                spread(candidate_a, candidate_b),
+                former_mean / candidate_mean,
+                body_started.elapsed().as_secs_f64()
             );
         }
 

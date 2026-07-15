@@ -17079,3 +17079,40 @@ Rustfmt, and `git diff --check` are green. Bounded UBS reproduced the file's bro
 and heuristic inventory, with no unsafe code or new production correctness finding. Every explicit Cargo command used
 fail-closed remote RCH; no explicit local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched,
 and the 70 stashes were not changed.
+
+### 2026-07-15 IvoryGlacier — KLL compaction streams promotions: 1.260748x p50 WIN (`br-frankenpandas-xagv2`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). Ranked index,
+columnar, and GroupBy quick wins were assigned to `cc` or `cod-b`, and the only pre-existing in-progress lane remained
+`cod_fp`'s transpose work. The ledger contained no KLL/approximate-quantile compactor result. The fresh sketch seam was
+`KllSketch::compact`: every level compaction sorted its resident values, allocated a temporary `Vec<f64>` for alternating
+promotions, extended the next level, and immediately dropped that temporary allocation.
+
+Attribution preceded the production edit. An exact former body and a direct-extension prototype built bit-identical
+internal sketch state over 131,072 deterministic values at `k=32`. Across 4,095 real compactions, the former path took
+2,926,924 ns and the allocation-free prototype took 2,126,370 ns p50, a **1.376489x** directional win.
+
+The one lever uses disjoint `split_at_mut` borrows to stream the same alternating sorted values directly into the next
+level, then clears the current level while retaining its capacity. Sort comparator, offset selection, append order,
+`compact_count` wrapping, recursive thresholds, weights, public APIs, and stored values are unchanged. A permanent gate
+matches every stored `f64::to_bits`, level length, size/counter field, and five quantile results against the exact former
+implementation across `k={8,32,256}`, compaction boundaries, infinities, signed zero, and finite values. A first test
+attempt also confirmed the existing sorter rejects NaN before the changed promotion stage; that pre-existing behavior is
+unchanged.
+
+The single final foreground same-binary gate ran on strict-remote worker `vmi1149989` with normal `--profile release`:
+131,072 values, `k=32`, one same-arm precondition before every timed batch, four sketches per sample, and nine reversed-
+ABBA blocks. Before timing, the public candidate matched the exact former state and quantile bits.
+
+| final arm | duplicate p50 A / B | duplicate-p50 mean | A/A spread |
+| --- | ---: | ---: | ---: |
+| former temporary-promotion `Vec` | 2,441,173 / 2,676,988 ns | 2,559,080.5 ns | 9.2148% |
+| public streamed promotion | 1,978,043 / 2,081,581 ns | 2,029,812 ns | 5.1009% |
+
+The public candidate is **1.260748x faster at p50** (**20.682% lower latency**). The complete timed body finished in
+**0.418544 seconds**. RCH again discarded the requested worker's nominal warm cache and cold-built the final command in
+2m20s without a timeout; sync, compilation, and artifact transfer remained outside every in-process sample. The exact
+state/quantile gate and final A/B pass. Scoped `fp-groupby --lib --no-deps -D warnings` normal-release Clippy, direct
+Rustfmt, and `git diff --check` are green. Bounded UBS completed with zero critical findings and only the file's broad
+pre-existing heuristic inventory. Every explicit Cargo command used fail-closed remote RCH; no explicit local Cargo or
+`release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.

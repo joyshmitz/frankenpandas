@@ -17394,3 +17394,34 @@ explicitly outside the in-process timing and are not performance evidence. An ea
 the two-minute dead-worker threshold, and an exact-filter typo ran zero tests; neither is evidence. Every Cargo command
 was fail-closed remote, no explicit local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched,
 and the 70 stashes were not changed.
+
+### 2026-07-15 IvoryGlacier — fused `nankurt` central moments: 1.046058x p50 WIN (`br-frankenpandas-idka7`)
+
+Negative-ledger-first routing began with `bv --robot-triage`. The ranked perf work was assigned or concentrated in the
+already-mined transpose, `to_dict`, and giant `fp-frame` lanes, so the no-ceiling pivot selected the small `fp-types`
+reduction surface. Source attribution found that `nankurt` collected numeric values, computed their mean, then traversed
+the same collected buffer once for `m2` and again for `m4`. The two moment accumulations are independent and consume
+terms in identical order, making their separate traversal the live cost rather than a semantic requirement.
+
+The one production lever accumulates `m2` and `m4` together while the collected values are hot. Each accumulator still
+receives the exact same `delta.powi(2)` or `delta.powi(4)` terms in the exact former order. The permanent same-binary
+harness retains the former two-pass body as an oracle and proves bit identity for empty, undersized, constant,
+mixed-dtype/missing, and 65,536-row numeric inputs before timing.
+
+The single final foreground A/B ran fail-closed through RCH on worker `vmi1227854` with normal `--profile release`, LTO
+disabled, 65,536 input rows, four calls per sample, two in-process warmups, and ten alternating-order samples per arm.
+The in-process test body completed in 0.04 seconds.
+
+| final arm | p50 | samples (ns) |
+| --- | ---: | --- |
+| former separate `m2` then `m4` traversals | 1,450,474 ns | 1,410,304 / 1,412,136 / 1,422,922 / 1,424,806 / 1,433,189 / 1,450,474 / 1,454,201 / 1,490,505 / 1,495,662 / 1,754,971 |
+| fused central-moment traversal | 1,386,609 ns | 1,285,087 / 1,309,122 / 1,330,215 / 1,335,101 / 1,350,104 / 1,386,609 / 1,397,295 / 1,424,805 / 1,427,000 / 4,760,786 |
+
+The fused candidate is **1.046058x faster at p50** (**4.403% lower latency**); seven of ten candidate samples are below
+the fastest former sample. Full strict-remote normal-release `fp-types` tests are **280 passed / 0 failed / 8 ignored**,
+and scoped all-target normal-release Clippy is clean under `-D warnings`. Direct Rustfmt and `git diff --check` are
+clean. Bounded UBS reproduced only the file's broad pre-existing test panic/assert/indexing inventory, with no finding
+in either touched hunk. RCH evicted the release target between invocations and drifted worker placement during warm-up;
+those 15–19 second rebuilds completed before the test process and are not performance evidence. Every Cargo command was
+fail-closed remote, no explicit local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched, and
+the 70 stashes were not changed.

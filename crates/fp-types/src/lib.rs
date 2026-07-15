@@ -3682,8 +3682,15 @@ pub fn nankurt(values: &[Scalar]) -> Scalar {
         return Scalar::Null(NullKind::NaN);
     }
     let mean = nums.iter().sum::<f64>() / n;
-    let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
-    let m4: f64 = nums.iter().map(|x| (x - mean).powi(4)).sum();
+    // Accumulate both central moments while the collected values are hot. Each
+    // sum still observes the same terms in the same order as the former two
+    // iterator passes, preserving floating-point results bit-for-bit.
+    let (mut m2, mut m4) = (0.0_f64, 0.0_f64);
+    for x in nums {
+        let delta = x - mean;
+        m2 += delta.powi(2);
+        m4 += delta.powi(4);
+    }
     let s2 = m2 / (n - 1.0);
     if s2 == 0.0 {
         return Scalar::Float64(0.0);
@@ -5645,6 +5652,108 @@ mod tests {
         );
         eprintln!("NANSKEW_FUSED_AB former_samples_ns={former_samples:?}");
         eprintln!("NANSKEW_FUSED_AB candidate_samples_ns={candidate_samples:?}");
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn nankurt_fused_moment_scan_ab_idka7() {
+        const ROWS: usize = 65_536;
+        const BATCH: usize = 4;
+
+        fn former(values: &[Scalar]) -> Scalar {
+            let nums = super::collect_finite(values);
+            let n = nums.len() as f64;
+            if n < 4.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = nums.iter().sum::<f64>() / n;
+            let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+            let m4: f64 = nums.iter().map(|x| (x - mean).powi(4)).sum();
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+            Scalar::Float64(adj * (m4 / (s2 * s2)) - sub)
+        }
+
+        fn assert_bits_eq(former: Scalar, candidate: Scalar) {
+            match (former, candidate) {
+                (Scalar::Float64(a), Scalar::Float64(b)) => assert_eq!(a.to_bits(), b.to_bits()),
+                (a, b) => assert_eq!(a, b),
+            }
+        }
+
+        fn elapsed(values: &[Scalar], kurt: fn(&[Scalar]) -> Scalar) -> u128 {
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(kurt(std::hint::black_box(values)));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        for values in [
+            vec![],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            vec![Scalar::Int64(7); 16],
+            vec![
+                Scalar::Int64(-3),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.5),
+                Scalar::Utf8("skip".to_owned()),
+                Scalar::Int64(11),
+                Scalar::Float64(-7.25),
+            ],
+        ] {
+            assert_bits_eq(former(&values), super::nankurt(&values));
+        }
+
+        let values = (0..ROWS)
+            .map(|i| {
+                if i % 257 == 0 {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Int64(((i * 37 + i / 11) % 10_003) as i64 - 5_001)
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_bits_eq(former(&values), super::nankurt(&values));
+
+        for _ in 0..2 {
+            std::hint::black_box(elapsed(&values, former));
+            std::hint::black_box(elapsed(&values, super::nankurt));
+        }
+
+        let mut former_samples = Vec::with_capacity(10);
+        let mut candidate_samples = Vec::with_capacity(10);
+        for block in 0_usize..5 {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, super::nankurt));
+                candidate_samples.push(elapsed(&values, super::nankurt));
+                former_samples.push(elapsed(&values, former));
+            } else {
+                candidate_samples.push(elapsed(&values, super::nankurt));
+                former_samples.push(elapsed(&values, former));
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, super::nankurt));
+            }
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        eprintln!(
+            "NANKURT_FUSED_AB rows={ROWS} batch={BATCH} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6}",
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("NANKURT_FUSED_AB former_samples_ns={former_samples:?}");
+        eprintln!("NANKURT_FUSED_AB candidate_samples_ns={candidate_samples:?}");
     }
 
     /// behind astype/promotion. Property test of its confirmed identity +

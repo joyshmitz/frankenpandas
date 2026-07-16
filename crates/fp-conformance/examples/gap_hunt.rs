@@ -750,4 +750,25 @@ fn main() {
     time_it("gb.value_counts", 1, 10, || {
         let _ = gkeyed.groupby(&["key"]).unwrap().value_counts().unwrap();
     });
+    // Realistic value_counts: a LOW-cardinality Int64 first value column (20
+    // distinct) — the common case, where output-building doesn't dominate.
+    {
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let mut cols = std::collections::BTreeMap::new();
+        let mut order = Vec::new();
+        let groups = (n / 100).max(2);
+        let keys: Vec<i64> = (0..n)
+            .map(|i| ((i as u64).wrapping_mul(2_654_435_761) % groups as u64) as i64)
+            .collect();
+        cols.insert("key".to_string(), Column::from_i64_values(keys));
+        order.push("key".to_string());
+        let v0: Vec<i64> = (0..n).map(|i| (i % 20) as i64).collect();
+        cols.insert("v0".to_string(), Column::from_i64_values(v0));
+        order.push("v0".to_string());
+        let gvc = DataFrame::new_with_column_order(Index::new(labels), cols, order)
+            .expect("locard vc frame");
+        time_it("gb.value_counts_locard", 1, 10, || {
+            let _ = gvc.groupby(&["key"]).unwrap().value_counts().unwrap();
+        });
+    }
 }

@@ -17738,3 +17738,59 @@ backlog but reported no diff in either touched line range. Bounded UBS completed
 panic/assert/indexing/allocation inventory; it reported no focused production defect in the `trapz` hunk. Every
 explicit Cargo invocation was fail-closed remote; no direct local Cargo, `force_local`, LTO, or `release-perf` command
 ran. Unrelated peer work was left untouched, and all 70 stashes remain.
+
+### 2026-07-16 BlackThrush — direct-day `Timestamp::normalize`: 7.522528x p50 WIN (`br-frankenpandas-dk721`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (364 open, 348 actionable, four blocked, no dependency
+cycles). The ranked performance recommendations were assigned or stale. A fresh `fp-runtime` artifact-transport idea
+(`br-frankenpandas-3nzz3`) was deferred before any edit or build because moving the clone outside the mutex would also
+move its allocator-panic poisoning behavior; its source remained byte-identical. The successful fresh pivot selected
+the unledgered fixed-alias path in `fp-types`: `Timestamp::normalize()` called `floor_to_unit("D")`, whose generic unit
+conversion lowercases the unit string before dispatching to the same day-floor kernel.
+
+Profile-first attribution left production unchanged and compared the exact former public path with
+`floor_to(Timedelta::NANOS_PER_DAY)`. The harness checked exact `Timestamp` equality for NaT, `i64::MIN + 1`,
+pre-epoch day boundaries, signed-near-zero values, day boundaries, `i64::MAX`, and two timezone-bearing timestamps,
+then checked all 16,384 deterministic timed inputs before sampling. Three untimed in-process warmups preceded twenty
+alternating-order samples per arm; construction and compilation were outside every sample.
+
+| profile-first arm | p50 | p95 | p99 | speedup |
+| --- | ---: | ---: | ---: | ---: |
+| former generic `floor_to_unit("D")` | 792,958 ns | 841,540 ns | 879,793 ns | 1.000000x |
+| direct day-floor kernel | 75,160 ns | 110,060 ns | 121,063 ns | **10.550266x / 7.646193x / 7.267233x** |
+
+Profile-first former samples were 792,958 / 725,670 / 824,758 / 792,615 / 784,384 / 801,148 / 746,762 /
+755,782 / 879,793 / 800,870 / 798,196 / 817,521 / 774,708 / 791,648 / 810,778 / 767,529 / 824,764 /
+838,583 / 841,540 / 769,906 ns; candidate samples were 72,111 / 69,949 / 75,700 / 74,799 / 75,754 / 74,909 /
+76,000 / 110,060 / 72,960 / 75,160 / 83,724 / 73,441 / 121,063 / 77,787 / 96,689 / 76,472 / 74,561 /
+76,572 / 72,797 / 71,938 ns.
+
+The one production lever routes `normalize()` directly to `floor_to(Timedelta::NANOS_PER_DAY)`. This removes only the
+fixed-unit string normalization and lookup; NaT propagation, overflow behavior, Euclidean pre-epoch flooring,
+timezone cloning, and the terminal floor implementation remain identical. The existing normalization test now also
+freezes exact equality with the former generic path across the integer edge corpus, and the retained ignored release
+harness compares the former path with the public candidate.
+
+The final foreground public-path A/B ran remotely on `vmi1227854` with normal `--profile release`, explicit
+`CARGO_PROFILE_RELEASE_LTO=false`, an uncapped cold compile outside the samples, and a 120-second cap only on the spawned
+test binary. It passed all parity assertions and completed the timed body in 0.01 seconds.
+
+| final arm | p50 | p95 | p99 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| former generic `floor_to_unit("D")` | 140,581 ns | 233,981 ns | 293,639 ns | 1.000000x | — |
+| public direct-day `normalize()` | 18,688 ns | 26,981 ns | 32,398 ns | **7.522528x / 8.672066x / 9.063492x** | **86.706596% / 88.468722% / 88.966724%** |
+
+Final former samples were 141,112 / 140,530 / 142,494 / 140,240 / 200,039 / 148,383 / 140,601 / 140,581 /
+140,510 / 180,130 / 175,153 / 233,981 / 140,200 / 139,659 / 140,120 / 293,639 / 144,847 / 139,339 /
+139,498 / 139,459 ns; public samples were 18,688 / 18,688 / 18,668 / 18,658 / 32,398 / 25,639 / 18,758 /
+18,708 / 18,738 / 18,718 / 20,020 / 18,607 / 18,558 / 18,388 / 22,504 / 26,981 / 18,498 / 18,458 /
+18,508 / 18,478 ns.
+
+The final exact-former release test is **1 passed / 0 failed**, and the release build completed without warnings.
+Warmup-plus-adjacent-measurement attempts on `vmi1293453`, `vmi1156319`, and `ovh-b` repeatedly discarded their release
+pools; each redundant rebuild was stopped, workers were switched, and none of those canceled jobs is benchmark
+evidence. The accepted cold lifecycle compiled before invoking the runner, while the harness's own three warmups were
+untimed. Every Cargo invocation was fail-closed remote; no local Cargo, `force_local`, LTO, or `release-perf` command
+ran. Direct Rustfmt and `git diff --check` are clean. Bounded UBS reproduced the file's broad pre-existing test-only
+panic/unwrap/assert/indexing inventory and reported no focused defect in the production `normalize()` hunk. Unrelated
+peer work and all 70 stashes remained untouched.

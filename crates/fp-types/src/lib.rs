@@ -2630,7 +2630,7 @@ impl Timestamp {
     /// Normalize to midnight/day boundary, matching `pd.Timestamp.normalize()`.
     #[must_use]
     pub fn normalize(&self) -> Self {
-        self.floor_to_unit("D")
+        self.floor_to(Timedelta::NANOS_PER_DAY)
     }
 
     /// Replace timestamp components with new values.
@@ -10972,6 +10972,117 @@ mod tests {
         assert_eq!(normalized.nanos, Timedelta::NANOS_PER_DAY * 3);
         assert_eq!(normalized.tz.as_deref(), Some("US/Eastern"));
         assert!(Timestamp::nat().normalize().is_nat());
+        for nanos in [
+            i64::MIN + 1,
+            -Timedelta::NANOS_PER_DAY - 1,
+            -Timedelta::NANOS_PER_DAY,
+            -1,
+            0,
+            Timedelta::NANOS_PER_DAY - 1,
+            Timedelta::NANOS_PER_DAY,
+            i64::MAX,
+        ] {
+            let timestamp = Timestamp::from_nanos(nanos);
+            assert_eq!(timestamp.normalize(), timestamp.floor_to_unit("D"));
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground profile-first A/B"]
+    fn timestamp_normalize_direct_day_profile_dk721() {
+        use std::{hint::black_box, time::Instant};
+
+        fn former(timestamp: &Timestamp) -> Timestamp {
+            timestamp.floor_to_unit("D")
+        }
+
+        fn candidate(timestamp: &Timestamp) -> Timestamp {
+            timestamp.normalize()
+        }
+
+        fn elapsed(input: &[Timestamp], normalize: impl Fn(&Timestamp) -> Timestamp) -> u128 {
+            let started = Instant::now();
+            let mut checksum = 0_u64;
+            for timestamp in input {
+                let normalized = normalize(black_box(timestamp));
+                checksum = checksum.rotate_left(7) ^ normalized.nanos as u64;
+            }
+            black_box(checksum);
+            started.elapsed().as_nanos()
+        }
+
+        fn percentile(samples: &mut [u128], percent: usize) -> u128 {
+            samples.sort_unstable();
+            let rank = (samples.len() * percent).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        }
+
+        let parity_cases = [
+            Timestamp::nat(),
+            Timestamp::from_nanos(i64::MIN + 1),
+            Timestamp::from_nanos(-Timedelta::NANOS_PER_DAY - 1),
+            Timestamp::from_nanos(-Timedelta::NANOS_PER_DAY),
+            Timestamp::from_nanos(-1),
+            Timestamp::from_nanos(0),
+            Timestamp::from_nanos(Timedelta::NANOS_PER_DAY - 1),
+            Timestamp::from_nanos(Timedelta::NANOS_PER_DAY),
+            Timestamp::from_nanos(i64::MAX),
+            Timestamp::from_nanos_tz(-1, "US/Eastern"),
+            Timestamp::from_nanos_tz(
+                Timedelta::NANOS_PER_DAY + Timedelta::NANOS_PER_HOUR,
+                "Asia/Tokyo",
+            ),
+        ];
+        for timestamp in &parity_cases {
+            assert_eq!(former(timestamp), candidate(timestamp));
+            assert_eq!(timestamp.normalize(), former(timestamp));
+        }
+
+        const ROWS: usize = 16_384;
+        const SAMPLES: usize = 20;
+        let input = (0..ROWS)
+            .map(|index| {
+                let day = index as i64 % 4_096 - 2_048;
+                let offset = ((index as u64).wrapping_mul(6_364_136_223_846_793_005_u64)
+                    % Timedelta::NANOS_PER_DAY as u64) as i64;
+                Timestamp::from_nanos(day * Timedelta::NANOS_PER_DAY + offset)
+            })
+            .collect::<Vec<_>>();
+        for timestamp in &input {
+            assert_eq!(former(timestamp), candidate(timestamp));
+        }
+
+        for _ in 0..3 {
+            black_box(elapsed(&input, former));
+            black_box(elapsed(&input, candidate));
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut candidate_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_ns.push(elapsed(&input, former));
+                candidate_ns.push(elapsed(&input, candidate));
+            } else {
+                candidate_ns.push(elapsed(&input, candidate));
+                former_ns.push(elapsed(&input, former));
+            }
+        }
+
+        let mut former_sorted = former_ns.clone();
+        let mut candidate_sorted = candidate_ns.clone();
+        let former_p50 = percentile(&mut former_sorted, 50);
+        let former_p95 = percentile(&mut former_sorted, 95);
+        let former_p99 = percentile(&mut former_sorted, 99);
+        let candidate_p50 = percentile(&mut candidate_sorted, 50);
+        let candidate_p95 = percentile(&mut candidate_sorted, 95);
+        let candidate_p99 = percentile(&mut candidate_sorted, 99);
+        println!(
+            "TIMESTAMP_NORMALIZE_DIRECT_DAY rows={ROWS} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} speedup_p50={:.6} former_p95_ns={former_p95} candidate_p95_ns={candidate_p95} speedup_p95={:.6} former_p99_ns={former_p99} candidate_p99_ns={candidate_p99} speedup_p99={:.6} former_samples={former_ns:?} candidate_samples={candidate_ns:?}",
+            former_p50 as f64 / candidate_p50 as f64,
+            former_p95 as f64 / candidate_p95 as f64,
+            former_p99 as f64 / candidate_p99 as f64,
+        );
     }
 
     #[test]

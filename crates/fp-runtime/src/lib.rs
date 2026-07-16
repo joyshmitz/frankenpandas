@@ -267,10 +267,21 @@ pub struct GalaxyBrainCard {
 impl GalaxyBrainCard {
     #[must_use]
     pub fn render_plain(&self) -> String {
-        format!(
-            "[{}]\n{}\n{}\n{}",
-            self.title, self.equation, self.substitution, self.intuition
-        )
+        let capacity = self.title.len()
+            + self.equation.len()
+            + self.substitution.len()
+            + self.intuition.len()
+            + 5;
+        let mut rendered = String::with_capacity(capacity);
+        rendered.push('[');
+        rendered.push_str(&self.title);
+        rendered.push_str("]\n");
+        rendered.push_str(&self.equation);
+        rendered.push('\n');
+        rendered.push_str(&self.substitution);
+        rendered.push('\n');
+        rendered.push_str(&self.intuition);
+        rendered
     }
 }
 
@@ -900,8 +911,8 @@ mod tests {
     use serde::Serialize;
 
     use super::{
-        ConformalGuard, DecisionAction, EvidenceLedger, RaptorQEnvelope, RuntimeMode,
-        RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord, decision_to_card,
+        ConformalGuard, DecisionAction, EvidenceLedger, GalaxyBrainCard, RaptorQEnvelope,
+        RuntimeMode, RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord, decision_to_card,
     };
 
     const ASUPERSYNC_PACKET_ID: &str = "ASUPERSYNC-E";
@@ -1920,6 +1931,126 @@ mod tests {
         let rendered = card.render_plain();
         assert!(rendered.contains("argmin_a"));
         assert!(rendered.contains("P(compatible|e)"));
+
+        let edge_card = GalaxyBrainCard {
+            title: "brain {card} ]\nnext".into(),
+            equation: "lambda -> integral".into(),
+            substitution: "Unicode: cafe\u{301}, data, 🧠".into(),
+            intuition: "embedded\nnewlines\nremain".into(),
+        };
+        assert_eq!(
+            edge_card.render_plain(),
+            "[brain {card} ]\nnext]\nlambda -> integral\nUnicode: cafe\u{301}, data, 🧠\nembedded\nnewlines\nremain"
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground profile-first A/B"]
+    fn galaxy_brain_card_render_plain_profile_lzy5c() {
+        #[inline(never)]
+        fn former(card: &GalaxyBrainCard) -> String {
+            format!(
+                "[{}]\n{}\n{}\n{}",
+                card.title, card.equation, card.substitution, card.intuition
+            )
+        }
+
+        #[inline(never)]
+        fn candidate(card: &GalaxyBrainCard) -> String {
+            card.render_plain()
+        }
+
+        fn elapsed(cards: &[GalaxyBrainCard], renderer: fn(&GalaxyBrainCard) -> String) -> u128 {
+            let started = Instant::now();
+            let rendered = black_box(cards).iter().map(renderer).collect::<Vec<_>>();
+            black_box(&rendered);
+            let elapsed = started.elapsed().as_nanos();
+            black_box(rendered);
+            elapsed
+        }
+
+        fn percentile(samples: &[u128], percent: usize) -> u128 {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            let rank = (sorted.len() * percent).div_ceil(100).saturating_sub(1);
+            sorted[rank]
+        }
+
+        let edge_cards = [
+            GalaxyBrainCard {
+                title: String::new(),
+                equation: String::new(),
+                substitution: String::new(),
+                intuition: String::new(),
+            },
+            GalaxyBrainCard {
+                title: "csv::Reject".into(),
+                equation: "argmin_a sum_s L(a,s) P(s|evidence)".into(),
+                substitution: "P(compatible|e)=0.1250, E[allow]=9.5".into(),
+                intuition: "Lower expected loss wins.".into(),
+            },
+            GalaxyBrainCard {
+                title: "brain {card} ]\nnext".into(),
+                equation: "lambda -> integral".into(),
+                substitution: "Unicode: cafe\u{301}, data, 🧠".into(),
+                intuition: "embedded\nnewlines\nremain".into(),
+            },
+        ];
+        for card in &edge_cards {
+            assert_eq!(candidate(card), former(card));
+        }
+
+        const CARDS: usize = 4_096;
+        const SAMPLES: usize = 12;
+        let cards = (0..CARDS)
+            .map(|index| GalaxyBrainCard {
+                title: format!("packet-{index:04}::{:?}", index % 3),
+                equation: "argmin_a sum_s L(a,s) P(s|evidence)".into(),
+                substitution: format!(
+                    "P(compatible|e)=0.{:04}, E[allow]={:.4}, E[reject]={:.4}",
+                    index % 10_000,
+                    (index % 97) as f64 / 7.0,
+                    (index % 89) as f64 / 11.0
+                ),
+                intuition: if index % 7 == 0 {
+                    "Strict mode may force fail-closed. 🧠".into()
+                } else {
+                    "Lower expected loss wins; evidence remains auditable.".into()
+                },
+            })
+            .collect::<Vec<_>>();
+        for card in &cards {
+            assert_eq!(candidate(card), former(card));
+        }
+
+        for _ in 0..2 {
+            black_box(elapsed(&cards, former));
+            black_box(elapsed(&cards, candidate));
+        }
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut candidate_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_ns.push(elapsed(&cards, former));
+                candidate_ns.push(elapsed(&cards, candidate));
+            } else {
+                candidate_ns.push(elapsed(&cards, candidate));
+                former_ns.push(elapsed(&cards, former));
+            }
+        }
+
+        let former_p50 = percentile(&former_ns, 50);
+        let former_p95 = percentile(&former_ns, 95);
+        let former_p99 = percentile(&former_ns, 99);
+        let candidate_p50 = percentile(&candidate_ns, 50);
+        let candidate_p95 = percentile(&candidate_ns, 95);
+        let candidate_p99 = percentile(&candidate_ns, 99);
+        println!(
+            "GALAXY_CARD_RENDER cards={CARDS} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} speedup_p50={:.6} former_p95_ns={former_p95} candidate_p95_ns={candidate_p95} speedup_p95={:.6} former_p99_ns={former_p99} candidate_p99_ns={candidate_p99} speedup_p99={:.6} former_samples={former_ns:?} candidate_samples={candidate_ns:?}",
+            former_p50 as f64 / candidate_p50 as f64,
+            former_p95 as f64 / candidate_p95 as f64,
+            former_p99 as f64 / candidate_p99 as f64,
+        );
     }
 
     // === Conformal Calibration Tests (bd-2t5e.9) ===

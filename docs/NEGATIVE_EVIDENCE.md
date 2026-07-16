@@ -17840,3 +17840,49 @@ diff in either touched source range. Bounded UBS completed with zero critical fi
 pre-existing unwrap/assert/indexing/allocation inventory; it reported no focused production defect in the hash-set
 hunk. Every explicit Cargo invocation was fail-closed remote; no direct local Cargo, `force_local`, LTO, or
 `release-perf` command ran. Unrelated peer work and all 70 stashes remained untouched.
+
+### 2026-07-16 RainyGlen — exact-buffer `GalaxyBrainCard::render_plain`: 4.099256x p50 WIN (`br-frankenpandas-lzy5c`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (365 open, 350 actionable, four blocked, two in progress,
+and no dependency cycles). Ranked work was stale, assigned, or correctness-oriented, while the newest frame, index,
+join, IO, and typed-runtime veins were already heavily mined. The fresh, previously unledgered runtime seam was
+`GalaxyBrainCard::render_plain`: every rendered decision card used `format!("[{}]\\n{}\\n{}\\n{}", ...)` even though
+the four borrowed field lengths and the exact five delimiter bytes are known before allocation.
+
+Profile-first attribution left production unchanged and compared a frozen transcription of that formatter with one
+`String::with_capacity(title.len() + equation.len() + substitution.len() + intuition.len() + 5)` followed by ordered
+`push`/`push_str` calls. Before timing, the harness asserted exact string equality for an all-empty card, a realistic
+decision card, and a card containing braces, a closing bracket, embedded newlines, combining Unicode, and emoji. It
+then asserted exact equality for all 4,096 deterministic timed cards. Input construction was outside every sample;
+two untimed in-process warmups preceded twelve alternating-order samples per arm.
+
+| profile-first arm | p50 | p95 | p99 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| former `format!` renderer | 2,027,689 ns | 2,462,436 ns | 2,462,436 ns | 1.000000x | — |
+| exact-capacity buffer | 494,648 ns | 1,265,657 ns | 1,265,657 ns | **4.099256x / 1.945579x / 1.945579x** | **75.605332% / 48.601426% / 48.601426%** |
+
+Former samples were 1,965,264 / 2,005,980 / 2,019,013 / 1,884,545 / 2,462,436 / 2,027,689 / 2,039,813 /
+1,973,550 / 2,028,772 / 2,049,461 / 2,339,348 / 2,053,648 ns; candidate samples were 1,265,657 /
+518,140 / 506,188 / 450,836 / 787,850 / 486,432 / 536,725 / 485,470 / 494,648 / 480,261 / 505,577 /
+486,753 ns.
+
+The one production lever is the exact profiled candidate: allocate the final byte length once, then append the same
+opening bracket, fields, closing bracket, and three newline delimiters in the former order. No escaping, normalization,
+field ownership, byte content, or newline behavior changes. The permanent correctness test freezes the complete
+public output for the adversarial Unicode/embedded-newline card, while the retained ignored release harness keeps the
+former formatter as an executable oracle and routes the candidate through `GalaxyBrainCard::render_plain`.
+
+The accepted foreground A/B ran fail-closed remote on `vmi1167313` under normal `--profile release` with explicit
+`CARGO_PROFILE_RELEASE_LTO=false`; its uncapped 57.21-second cold compile completed before Cargo invoked the target
+runner, and only that spawned test binary carried the 120-second cap. The exact-parity measurement completed in 0.05
+seconds with **1 passed / 0 failed**. A final shipped-source release compile plus exact-output test completed on remote
+worker `ovh-b` with **1 passed / 0 failed** and no warning; focused release-profile `cargo clippy -p fp-runtime --lib
+-- -D warnings` also completed green there. The initial uncapped warm-up on `vmi1156319` and the adjacent public-path
+rerun on `vmi1167313` each lost their just-populated target pool and began redownloading/rebuilding dependencies; both
+redundant routes were stopped or switched, and neither cancellation is benchmark evidence.
+
+`git diff --check` and direct Rustfmt on `crates/fp-runtime/src/lib.rs` are clean. Workspace `cargo fmt --check`
+reproduces the broad pre-existing formatting backlog outside this file. Bounded UBS completed with zero critical
+findings and reproduced the file's broad pre-existing test panic/assert/indexing inventory; it reported no focused
+production defect in the renderer hunk. Every Cargo invocation was fail-closed remote; no direct local Cargo,
+`force_local`, LTO, or `release-perf` command ran. Unrelated peer work and all 70 stashes remained untouched.

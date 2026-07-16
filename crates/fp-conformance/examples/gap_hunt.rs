@@ -928,5 +928,16 @@ fn main() {
         time_it("sgb.pct_change_i64", 1, 10, || {
             let _ = val.groupby(&key).unwrap().pct_change(1).unwrap();
         });
+        time_it("sgb.rolling_mean", 1, 10, || {
+            let _ = val.groupby(&key).unwrap().rolling(10).mean().unwrap();
+        });
+        time_it("sgb.expanding_mean", 1, 10, || {
+            let _ = val
+                .groupby(&key)
+                .unwrap()
+                .expanding(Some(1))
+                .mean()
+                .unwrap();
+        });
     }
 }

@@ -4213,13 +4213,21 @@ impl Index {
             };
             return self.propagate_name(Self::from_i64_values(kept));
         }
-        self.propagate_name(Self::new(
+        let kept = if labels_to_drop.len() < 8 {
             self.labels
                 .iter()
-                .filter(|l| !labels_to_drop.contains(l))
+                .filter(|label| !labels_to_drop.contains(label))
                 .cloned()
-                .collect(),
-        ))
+                .collect()
+        } else {
+            let drop_set: FxHashSet<&IndexLabel> = labels_to_drop.iter().collect();
+            self.labels
+                .iter()
+                .filter(|label| !drop_set.contains(label))
+                .cloned()
+                .collect()
+        };
+        self.propagate_name(Self::new(kept))
     }
 
     /// Convert all labels to Int64 (if possible) or Utf8.
@@ -19193,7 +19201,7 @@ mod tests {
 
     use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
 
-    use crate::Int64TwoAffineLabels;
+    use crate::{Int64TwoAffineLabels, OrderedF64};
 
     #[test]
     fn unsorted_unique_int64_positions_gating_and_resolution() {
@@ -21909,6 +21917,172 @@ mod tests {
         assert_eq!(dropped.len(), 2);
         assert_eq!(dropped.labels()[0], IndexLabel::Utf8("a".into()));
         assert_eq!(dropped.labels()[1], IndexLabel::Utf8("c".into()));
+    }
+
+    #[test]
+    fn generic_drop_labels_hash_preserves_mixed_identity_arboe() {
+        let labels = vec![
+            IndexLabel::Utf8("duplicate".into()),
+            IndexLabel::Int64(7),
+            IndexLabel::Float64(OrderedF64(f64::NAN)),
+            IndexLabel::Float64(OrderedF64(-0.0)),
+            IndexLabel::Float64(OrderedF64(0.0)),
+            IndexLabel::Bool(true),
+            IndexLabel::Datetime64(i64::MIN),
+            IndexLabel::Timedelta64(Timedelta::NAT),
+            IndexLabel::Null(fp_types::NullKind::Null),
+            IndexLabel::Utf8("duplicate".into()),
+            IndexLabel::Utf8("keep".into()),
+        ];
+        let drops = vec![
+            IndexLabel::Utf8("duplicate".into()),
+            IndexLabel::Float64(OrderedF64(f64::from_bits(0x7ff8_0000_0000_0001))),
+            IndexLabel::Float64(OrderedF64(0.0)),
+            IndexLabel::Datetime64(i64::MIN),
+            IndexLabel::Null(fp_types::NullKind::NaN),
+            IndexLabel::Utf8("absent".into()),
+            IndexLabel::Int64(999),
+            IndexLabel::Bool(false),
+            IndexLabel::Timedelta64(123),
+        ];
+        let expected = labels
+            .iter()
+            .filter(|label| !drops.contains(label))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let dropped = Index::new(labels).set_name("mixed").drop_labels(&drops);
+
+        assert_eq!(dropped.labels(), expected.as_slice());
+        assert_eq!(dropped.name(), Some("mixed"));
+    }
+
+    #[test]
+    #[ignore = "foreground profile-first A/B"]
+    fn generic_drop_labels_hash_profile_arboe() {
+        use std::{hint::black_box, time::Instant};
+
+        fn former(input: &Index, drops: &[IndexLabel]) -> Index {
+            let kept = input
+                .labels
+                .iter()
+                .filter(|label| !drops.contains(label))
+                .cloned()
+                .collect();
+            input.propagate_name(Index::new(kept))
+        }
+
+        fn candidate(input: &Index, drops: &[IndexLabel]) -> Index {
+            input.drop_labels(drops)
+        }
+
+        fn elapsed(
+            input: &Index,
+            drops: &[IndexLabel],
+            dropper: fn(&Index, &[IndexLabel]) -> Index,
+        ) -> u128 {
+            let started = Instant::now();
+            let output = dropper(black_box(input), black_box(drops));
+            black_box(&output);
+            let elapsed = started.elapsed().as_nanos();
+            black_box(output);
+            elapsed
+        }
+
+        fn samples(input: &Index, drops: &[IndexLabel]) -> (Vec<u128>, Vec<u128>) {
+            const SAMPLES: usize = 12;
+            for _ in 0..2 {
+                black_box(elapsed(input, drops, former));
+                black_box(elapsed(input, drops, candidate));
+            }
+            let mut former_ns = Vec::with_capacity(SAMPLES);
+            let mut candidate_ns = Vec::with_capacity(SAMPLES);
+            for sample in 0..SAMPLES {
+                if sample % 2 == 0 {
+                    former_ns.push(elapsed(input, drops, former));
+                    candidate_ns.push(elapsed(input, drops, candidate));
+                } else {
+                    candidate_ns.push(elapsed(input, drops, candidate));
+                    former_ns.push(elapsed(input, drops, former));
+                }
+            }
+            (former_ns, candidate_ns)
+        }
+
+        fn percentile(samples: &[u128], percent: usize) -> u128 {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            let rank = (sorted.len() * percent).div_ceil(100).saturating_sub(1);
+            sorted[rank]
+        }
+
+        let parity_input = vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Int64(7),
+            IndexLabel::Float64(OrderedF64(f64::NAN)),
+            IndexLabel::Float64(OrderedF64(-0.0)),
+            IndexLabel::Float64(OrderedF64(0.0)),
+            IndexLabel::Bool(true),
+            IndexLabel::Datetime64(i64::MIN),
+            IndexLabel::Timedelta64(Timedelta::NAT),
+            IndexLabel::Null(fp_types::NullKind::Null),
+            IndexLabel::Utf8("a".into()),
+        ];
+        let parity_drops = vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Float64(OrderedF64(f64::from_bits(0x7ff8_0000_0000_0001))),
+            IndexLabel::Float64(OrderedF64(0.0)),
+            IndexLabel::Datetime64(i64::MIN),
+            IndexLabel::Null(fp_types::NullKind::NaN),
+            IndexLabel::Utf8("absent".into()),
+            IndexLabel::Int64(999),
+            IndexLabel::Bool(false),
+            IndexLabel::Timedelta64(123),
+        ];
+        let parity_input = Index::new(parity_input).set_name("mixed");
+        let expected = former(&parity_input, &parity_drops);
+        let actual = candidate(&parity_input, &parity_drops);
+        assert_eq!(actual.labels(), expected.labels());
+        assert_eq!(actual.name(), expected.name());
+
+        const ROWS: usize = 16_384;
+        const DROP_COUNT: usize = 4_096;
+        let input = Index::new(
+            (0..ROWS)
+                .map(|index| IndexLabel::Utf8(format!("key-{:08}", index % (ROWS / 2))))
+                .collect::<Vec<_>>(),
+        )
+        .set_name("bench");
+        let large_drops = (0..DROP_COUNT)
+            .map(|index| IndexLabel::Utf8(format!("key-{:08}", index * 2)))
+            .collect::<Vec<_>>();
+        let small_drops = large_drops[..4].to_vec();
+        let large_expected = former(&input, &large_drops);
+        let large_actual = candidate(&input, &large_drops);
+        assert_eq!(large_actual.labels(), large_expected.labels());
+        assert_eq!(large_actual.name(), large_expected.name());
+        let small_expected = former(&input, &small_drops);
+        let small_actual = candidate(&input, &small_drops);
+        assert_eq!(small_actual.labels(), small_expected.labels());
+        assert_eq!(small_actual.name(), small_expected.name());
+
+        let (large_former, large_candidate) = samples(&input, &large_drops);
+        let (small_former, small_candidate) = samples(&input, &small_drops);
+        let large_former_p50 = percentile(&large_former, 50);
+        let large_former_p95 = percentile(&large_former, 95);
+        let large_former_p99 = percentile(&large_former, 99);
+        let large_candidate_p50 = percentile(&large_candidate, 50);
+        let large_candidate_p95 = percentile(&large_candidate, 95);
+        let large_candidate_p99 = percentile(&large_candidate, 99);
+        let small_former_p50 = percentile(&small_former, 50);
+        let small_candidate_p50 = percentile(&small_candidate, 50);
+        println!(
+            "GENERIC_DROP_HASH rows={ROWS} drops={DROP_COUNT} former_p50_ns={large_former_p50} candidate_p50_ns={large_candidate_p50} speedup_p50={:.6} former_p95_ns={large_former_p95} candidate_p95_ns={large_candidate_p95} speedup_p95={:.6} former_p99_ns={large_former_p99} candidate_p99_ns={large_candidate_p99} speedup_p99={:.6} small_drops=4 small_former_p50_ns={small_former_p50} small_candidate_p50_ns={small_candidate_p50} small_speedup_p50={:.6} former_samples={large_former:?} candidate_samples={large_candidate:?} small_former_samples={small_former:?} small_candidate_samples={small_candidate:?}",
+            large_former_p50 as f64 / large_candidate_p50 as f64,
+            large_former_p95 as f64 / large_candidate_p95 as f64,
+            large_former_p99 as f64 / large_candidate_p99 as f64,
+            small_former_p50 as f64 / small_candidate_p50 as f64,
+        );
     }
 
     #[test]

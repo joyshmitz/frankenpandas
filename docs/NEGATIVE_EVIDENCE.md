@@ -17794,3 +17794,49 @@ untimed. Every Cargo invocation was fail-closed remote; no local Cargo, `force_l
 ran. Direct Rustfmt and `git diff --check` are clean. Bounded UBS reproduced the file's broad pre-existing test-only
 panic/unwrap/assert/indexing inventory and reported no focused defect in the production `normalize()` hunk. Unrelated
 peer work and all 70 stashes remained untouched.
+
+### 2026-07-16 IcyCastle — hashed large generic `Index::drop_labels`: 483.779688x p50 WIN (`br-frankenpandas-arboe`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (366 open, 350 actionable, four blocked, no dependency
+cycles). Its ranked recommendations were assigned, stale, or non-performance work. The ledger's only neighboring
+`Index.drop(labels)` result covered the already-optimized typed, sorted Int64 two-pointer path. The generic mixed-label
+fallback was a fresh seam: it tested every source label against the full drop slice, making large drop sets
+O(rows x drops).
+
+Profile-first attribution left production unchanged and compared the exact generic slice-membership body with an
+`FxHashSet<&IndexLabel>` prototype. The timed corpus contained 16,384 duplicate-bearing Utf8 labels and 4,096 drop
+labels. A mixed-label corpus separately proved exact former/prototype equality across duplicate strings, Int64,
+canonicalized NaNs, signed zero, bools, Datetime64 NaT, Timedelta64 NaT, null kinds, present and absent labels. Two
+in-process warmups preceded twelve alternating-order samples per arm; input and drop-set construction were outside
+every sample.
+
+| profile-first arm | p50 | p95 | p99 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| former generic slice membership | 423,269,008 ns | 502,076,125 ns | 502,076,125 ns | 1.000000x | — |
+| borrowed-label hash membership | 874,921 ns | 960,921 ns | 960,921 ns | **483.779688x / 522.494695x / 522.494695x** | **99.793294% / 99.808610% / 99.808610%** |
+
+Former samples were 399,606,756 / 388,999,699 / 393,135,838 / 491,233,601 / 423,269,008 / 395,250,769 /
+502,076,125 / 430,190,852 / 433,974,448 / 439,348,060 / 416,473,349 / 462,327,247 ns; candidate samples
+were 800,044 / 788,291 / 864,023 / 863,010 / 902,464 / 882,406 / 918,132 / 960,921 / 888,448 / 874,921 /
+840,328 / 936,737 ns.
+
+The one production lever builds the same borrowed-label `FxHashSet` when the generic drop slice has at least eight
+entries. Smaller sets retain the exact former linear body, and the typed Int64 branch remains ahead of this gate.
+Hashing uses `IndexLabel`'s existing Eq/Hash identity, so source order, duplicate-source drop-all behavior, missing-label
+ignore behavior, float and null identity, name propagation, and output construction are unchanged. A permanent mixed
+identity test forces the hash branch, and the retained ignored release harness freezes the former body while routing
+the candidate through public `Index::drop_labels`.
+
+The accepted foreground profile-first A/B ran fail-closed remote on `vmi1167313` under normal `--profile release` with
+`CARGO_PROFILE_RELEASE_LTO=false`; only the spawned test binary was capped at 120 seconds, and it completed in 6.53
+seconds with **1 passed / 0 failed**. A final-source uncapped `--no-run` warm-up then completed successfully on
+`vmi1264463`, compiling the production lever and both tests without warnings. Its immediately adjacent measurement
+discarded that same target pool and began redownloading/rebuilding dependencies; it was cancelled, just as earlier
+evicted routes on `vmi1149989`, `vmi1153651`, and `vmi1167313` were stopped or switched. Those build walls are not
+benchmark evidence or rejects; the shipped hash body is the exact measured candidate above.
+
+`git diff --check` is clean. Direct Rustfmt reproduced the repository's broad pre-existing formatting backlog but no
+diff in either touched source range. Bounded UBS completed with zero critical findings and reproduced the file's broad
+pre-existing unwrap/assert/indexing/allocation inventory; it reported no focused production defect in the hash-set
+hunk. Every explicit Cargo invocation was fail-closed remote; no direct local Cargo, `force_local`, LTO, or
+`release-perf` command ran. Unrelated peer work and all 70 stashes remained untouched.

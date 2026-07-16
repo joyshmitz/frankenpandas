@@ -721,6 +721,14 @@ fn main() {
     time_it("gb.rolling_sum", 1, 10, || {
         let _ = gkeyed.groupby(&["key"]).unwrap().rolling(10).sum().unwrap();
     });
+    time_it("gb.expanding_mean", 1, 10, || {
+        let _ = gkeyed
+            .groupby(&["key"])
+            .unwrap()
+            .expanding(Some(1))
+            .mean()
+            .unwrap();
+    });
     time_it("gb.cumprod", 1, 10, || {
         let _ = gkeyed.groupby(&["key"]).unwrap().cumprod().unwrap();
     });

@@ -529,6 +529,21 @@ fn main() {
     time_it("pct_change(1)", 1, 20, || {
         let _ = f.pct_change(1).unwrap();
     });
+    time_it("df.append", 1, 20, || {
+        let _ = f.append(&f).unwrap();
+    });
+    time_it("df.to_records", 1, 20, || {
+        let _ = f.to_records();
+    });
+    time_it("df.nunique_axis1", 1, 10, || {
+        let _ = f.nunique_axis(1).unwrap();
+    });
+    time_it("df.corr", 1, 20, || {
+        let _ = f.corr().unwrap();
+    });
+    time_it("df.cov", 1, 20, || {
+        let _ = f.cov().unwrap();
+    });
     time_it("corrwith", 1, 20, || {
         let _ = f.corrwith(&other).unwrap();
     });

@@ -17425,3 +17425,47 @@ in either touched hunk. RCH evicted the release target between invocations and d
 those 15–19 second rebuilds completed before the test process and are not performance evidence. Every Cargo command was
 fail-closed remote, no explicit local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched, and
 the 70 stashes were not changed.
+
+### 2026-07-15 BlackThrush — normalized conformal quantile window: 1.608232x p50 WIN (`br-frankenpandas-qckka`)
+
+Negative-ledger-first routing began with `bv --robot-triage`. The first unowned ranked candidate was the unmeasured
+`ffill_axis1` half of `br-frankenpandas-3seq1`, but consecutive RCH invocations discarded the release cache before a
+timed path was reached. Its temporary harness was removed, the bead was returned open, and no build result was treated
+as a performance verdict. The fresh pivot selected the small `fp-runtime` conformal-calibration surface. Attribution
+found that `ConformalGuard::evaluate` first calls `normalize_runtime_config`, which removes every non-finite score and
+trims the rolling window, then calls the public `conformal_quantile`, which allocates and tests every score for
+finiteness again before running the existing selection algorithm.
+
+The one production lever extracts the unchanged rank/`select_nth_unstable_by` body and lets `evaluate` clone its
+already-normalized score window directly. The public `conformal_quantile` retains its defensive finite-score filter for
+callers and malformed persisted state. Selection still operates on a clone, so it cannot scramble the age order used
+by rolling eviction; alpha normalization, rank arithmetic, threshold timing, score insertion, action selection,
+coverage counters, and serialization are unchanged. Permanent tests compare quantile bits across empty, undersized,
+non-finite, signed-zero, duplicate, extreme, overlong, zero-window, and 1,000-score inputs, and compare the complete
+prediction set plus serialized guard state against the former robust route.
+
+The foreground same-binary attribution probe ran fail-closed through RCH on `vmi1264463` with normal
+`--profile release` and LTO disabled. It used a 1,000-score normalized window, 128 quantile calls per sample, three
+in-process warmups, and 30 alternating/reversed-order samples per arm. It proved exact threshold-bit parity before
+timing. The candidate arm was the exact helper body subsequently extracted into production unchanged.
+
+| final arm | p50 | p95 |
+| --- | ---: | ---: |
+| former public finite-filter route | 3,321 ns | 4,130 ns |
+| normalized-window selection route | 2,065 ns | 2,528 ns |
+
+The normalized route is **1.608232x faster at p50** (**37.8199% lower latency**) and **1.633703x faster at p95**
+(**38.7893% lower latency**). Former distributions were 3,079 / 3,090 / 3,094 / 3,101 / 3,103 / 3,135 / 3,184 /
+3,202 / 3,208 / 3,225 / 3,256 / 3,278 / 3,280 / 3,313 / 3,321 / 3,377 / 3,413 / 3,473 / 3,499 / 3,542 / 3,589 /
+3,625 / 3,669 / 3,705 / 3,791 / 3,836 / 3,996 / 4,118 / 4,130 / 4,181 ns; normalized distributions were 1,881 /
+1,886 / 1,892 / 1,906 / 1,911 / 1,920 / 1,969 / 1,970 / 1,987 / 2,007 / 2,015 / 2,023 / 2,051 / 2,058 / 2,065 /
+2,068 / 2,074 / 2,085 / 2,166 / 2,172 / 2,197 / 2,198 / 2,218 / 2,270 / 2,294 / 2,325 / 2,344 / 2,425 / 2,528 /
+2,571 ns.
+
+The full strict-remote normal-release `fp-runtime` library suite is **43 passed / 0 failed / 5 ignored**. Direct
+Rustfmt and `git diff --check` are clean. Bounded UBS exited zero with no critical finding; its broad pre-existing
+test-panic, assertion, indexing, and allocation inventories include the intentional score clone required to preserve
+rolling-window order. A scoped remote Clippy attempt was stopped when RCH again discarded the just-built release cache
+and began downloading the dependency graph, so no Clippy result is claimed. Compilation, sync, and artifact retrieval
+were outside every in-process sample. Every explicit Cargo command was fail-closed remote; no explicit local Cargo,
+`force_local`, or `release-perf` command ran, unrelated artifact dirt was untouched, and no stash was changed.

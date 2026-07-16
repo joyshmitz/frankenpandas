@@ -695,6 +695,19 @@ fn normalize_conformal_alpha(alpha: f64) -> f64 {
     }
 }
 
+fn select_conformal_quantile(mut scores: Vec<f64>, alpha: f64) -> Option<f64> {
+    if scores.len() < 2 {
+        return None;
+    }
+    // Quantile at level (1 - alpha)(1 + 1/n) per split conformal prediction.
+    let n = scores.len() as f64;
+    let level = (1.0 - normalize_conformal_alpha(alpha)) * (1.0 + 1.0 / n);
+    let idx = (level * n).ceil() as usize;
+    let idx = idx.min(scores.len()).saturating_sub(1);
+    let (_, quantile, _) = scores.select_nth_unstable_by(idx, f64::total_cmp);
+    Some(*quantile)
+}
+
 /// Conformal prediction set: which actions are admissible at significance level alpha.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConformalPredictionSet {
@@ -749,22 +762,13 @@ impl ConformalGuard {
     /// Returns None if the window has fewer than 2 scores.
     #[must_use]
     pub fn conformal_quantile(&self) -> Option<f64> {
-        let mut finite: Vec<f64> = self
+        let finite = self
             .scores
             .iter()
             .copied()
             .filter(|score| score.is_finite())
             .collect();
-        if finite.len() < 2 {
-            return None;
-        }
-        // Quantile at level (1 - alpha)(1 + 1/n) per split conformal prediction
-        let n = finite.len() as f64;
-        let level = (1.0 - normalize_conformal_alpha(self.alpha)) * (1.0 + 1.0 / n);
-        let idx = (level * n).ceil() as usize;
-        let idx = idx.min(finite.len()).saturating_sub(1);
-        let (_, quantile, _) = finite.select_nth_unstable_by(idx, f64::total_cmp);
-        Some(*quantile)
+        select_conformal_quantile(finite, self.alpha)
     }
 
     /// Evaluate a decision record against the conformal guard.
@@ -773,7 +777,8 @@ impl ConformalGuard {
         self.normalize_runtime_config();
         let score = nonconformity_score(record);
 
-        let quantile = self.conformal_quantile();
+        debug_assert!(self.scores.iter().all(|score| score.is_finite()));
+        let quantile = select_conformal_quantile(self.scores.clone(), self.alpha);
 
         // Add score to calibration window (rolling)
         if self.scores.len() >= self.window_size {
@@ -2062,6 +2067,101 @@ mod tests {
     }
 
     #[test]
+    fn conformal_normalized_quantile_matches_robust_path_qckka() {
+        let mut state = 0xa076_1d64_78bd_642f_u64;
+        let random_scores = (0..1_000)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 11) as f64 / ((1_u64 << 53) as f64)
+            })
+            .collect::<Vec<_>>();
+        let cases = [
+            (Vec::new(), 0, f64::NAN),
+            (vec![f64::NAN, 1.0, f64::INFINITY], 8, 0.1),
+            (
+                vec![f64::NEG_INFINITY, -0.0, 0.0, 1.0, 1.0, f64::MAX],
+                4,
+                f64::INFINITY,
+            ),
+            (random_scores, 257, 0.99),
+        ];
+
+        for (scores, window_size, alpha) in cases {
+            let mut guard = ConformalGuard {
+                scores,
+                window_size,
+                alpha,
+                in_set_count: 9,
+                total_count: 4,
+            };
+            guard.normalize_runtime_config();
+            let former = guard.conformal_quantile().map(f64::to_bits);
+            let candidate = super::select_conformal_quantile(guard.scores.clone(), guard.alpha)
+                .map(f64::to_bits);
+            assert_eq!(candidate, former, "window_size={window_size} alpha={alpha}");
+        }
+    }
+
+    #[test]
+    fn conformal_evaluate_preserves_observables_qckka() {
+        let mut ledger = EvidenceLedger::new();
+        RuntimePolicy::hardened(Some(100_000)).decide_join_admission(1_000, &mut ledger);
+        let record = &ledger.records()[0];
+        let mut guard = ConformalGuard {
+            scores: vec![f64::NAN, 0.25, 1.5, f64::INFINITY, -0.0, 2.5],
+            window_size: 4,
+            alpha: f64::NAN,
+            in_set_count: 9,
+            total_count: 4,
+        };
+        let mut expected_guard = guard.clone();
+        expected_guard.normalize_runtime_config();
+        let expected_threshold = expected_guard
+            .conformal_quantile()
+            .expect("normalized fixture is calibrated");
+        let expected_score = super::nonconformity_score(record);
+        if expected_guard.scores.len() >= expected_guard.window_size {
+            expected_guard.scores.remove(0);
+        }
+        expected_guard.scores.push(expected_score);
+        let expected_in_set = expected_score <= expected_threshold;
+        let expected_actions = if expected_in_set {
+            vec![record.action]
+        } else {
+            vec![
+                DecisionAction::Allow,
+                DecisionAction::Reject,
+                DecisionAction::Repair,
+            ]
+        };
+        expected_guard.total_count += 1;
+        if expected_in_set {
+            expected_guard.in_set_count += 1;
+        }
+        let expected_set = super::ConformalPredictionSet {
+            quantile_threshold: expected_threshold,
+            current_score: expected_score,
+            bayesian_action_in_set: expected_in_set,
+            admissible_actions: expected_actions,
+            empirical_coverage: expected_guard.in_set_count as f64
+                / expected_guard.total_count as f64,
+        };
+
+        let actual_set = guard.evaluate(record);
+        assert_eq!(actual_set, expected_set);
+        assert_eq!(
+            serde_json::to_vec(&actual_set).expect("serialize actual prediction set"),
+            serde_json::to_vec(&expected_set).expect("serialize expected prediction set")
+        );
+        assert_eq!(
+            serde_json::to_vec(&guard).expect("serialize actual guard"),
+            serde_json::to_vec(&expected_guard).expect("serialize expected guard")
+        );
+    }
+
+    #[test]
     fn conformal_guard_quantile_is_deterministic() {
         let mut guard = ConformalGuard::new(100, 0.1);
         let mut ledger = EvidenceLedger::new();
@@ -2095,6 +2195,90 @@ mod tests {
         let idx = (level * n).ceil() as usize;
         let idx = idx.min(sorted.len()).saturating_sub(1);
         Some(sorted[idx])
+    }
+
+    #[test]
+    #[ignore = "foreground normal-release attribution probe"]
+    fn conformal_normalized_window_profile_qckka() {
+        const WINDOW: usize = 1_000;
+        const BATCH: usize = 128;
+        const SAMPLES: usize = 15;
+
+        fn normalized_quantile(guard: &ConformalGuard) -> Option<f64> {
+            super::select_conformal_quantile(guard.scores.clone(), guard.alpha)
+        }
+
+        fn elapsed(guard: &ConformalGuard, normalized: bool) -> u128 {
+            let started = Instant::now();
+            let mut digest = 0_u64;
+            for _ in 0..BATCH {
+                let quantile = if normalized {
+                    normalized_quantile(black_box(guard))
+                } else {
+                    black_box(guard).conformal_quantile()
+                };
+                digest = digest.wrapping_add(quantile.map_or(0, f64::to_bits));
+            }
+            black_box(digest);
+            started.elapsed().as_nanos() / BATCH as u128
+        }
+
+        fn percentile(samples: &mut [u128], pct: usize) -> u128 {
+            samples.sort_unstable();
+            let rank = (samples.len() * pct).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        }
+
+        let mut state = 0xa076_1d64_78bd_642f_u64;
+        let scores = (0..WINDOW)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 11) as f64 / ((1_u64 << 53) as f64)
+            })
+            .collect::<Vec<_>>();
+        let guard = ConformalGuard {
+            scores,
+            window_size: WINDOW,
+            alpha: 0.1,
+            in_set_count: 0,
+            total_count: 0,
+        };
+        assert_eq!(
+            guard.conformal_quantile().map(f64::to_bits),
+            normalized_quantile(&guard).map(f64::to_bits)
+        );
+
+        for _ in 0..3 {
+            black_box(elapsed(&guard, false));
+            black_box(elapsed(&guard, true));
+        }
+        let mut filtered = Vec::with_capacity(SAMPLES * 2);
+        let mut normalized = Vec::with_capacity(SAMPLES * 2);
+        for sample in 0_usize..SAMPLES {
+            if sample.is_multiple_of(2) {
+                filtered.push(elapsed(&guard, false));
+                normalized.push(elapsed(&guard, true));
+                normalized.push(elapsed(&guard, true));
+                filtered.push(elapsed(&guard, false));
+            } else {
+                normalized.push(elapsed(&guard, true));
+                filtered.push(elapsed(&guard, false));
+                filtered.push(elapsed(&guard, false));
+                normalized.push(elapsed(&guard, true));
+            }
+        }
+        let filtered_p50 = percentile(&mut filtered, 50);
+        let normalized_p50 = percentile(&mut normalized, 50);
+        let filtered_p95 = percentile(&mut filtered, 95);
+        let normalized_p95 = percentile(&mut normalized, 95);
+        eprintln!(
+            "CONFORMAL_NORMALIZED_PROFILE window={WINDOW} batch={BATCH} filtered_p50_ns={filtered_p50} normalized_p50_ns={normalized_p50} ratio={:.6} filtered_p95_ns={filtered_p95} normalized_p95_ns={normalized_p95}",
+            filtered_p50 as f64 / normalized_p50 as f64
+        );
+        eprintln!("CONFORMAL_NORMALIZED_PROFILE filtered_distribution_ns={filtered:?}");
+        eprintln!("CONFORMAL_NORMALIZED_PROFILE normalized_distribution_ns={normalized:?}");
     }
 
     #[test]

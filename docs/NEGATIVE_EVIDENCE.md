@@ -17841,6 +17841,61 @@ pre-existing unwrap/assert/indexing/allocation inventory; it reported no focused
 hunk. Every explicit Cargo invocation was fail-closed remote; no direct local Cargo, `force_local`, LTO, or
 `release-perf` command ran. Unrelated peer work and all 70 stashes remained untouched.
 
+### 2026-07-16 RainyGlen — typed-length `PeriodIndex::any()`: 99,038.533333x p50 WIN (`br-frankenpandas-8blqp`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (365 open, 349 actionable, four blocked, one in progress,
+and no dependency cycles). The ranked picks were stale, assigned, correctness-oriented, or infrastructure work. An
+initial fresh `fp-groupby` profile route never reached a benchmark binary because multiple workers discarded or
+rebuilt their release pools; those cancelled builds supplied no timing and are neither evidence nor a reject. The
+no-ceiling pivot selected a fresh `fp-index` seam: `PeriodIndex::any()` rendered every typed period into an owned
+string through `to_flat_index()` before asking whether any rendered label was truthy.
+
+Profile-first attribution left production unchanged and compared the exact former public body with a typed-length
+prototype. Every rendered period label is a nonempty string, including the `i64::MIN`/NaT spelling `"NaT"`, so the
+former result is false exactly when `values` is empty. Before timing, the harness asserted exact boolean equality for
+empty, named, NaT, mixed-frequency, negative, zero, and extreme-ordinal inputs. The timed 16,384-element Minutely
+corpus was constructed outside every sample; two untimed in-process warmups preceded twelve alternating-order samples
+per arm.
+
+| profile-first arm | p50 | p95 | p99 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| former rendered-flat-index `any()` | 3,037,384 ns | 4,397,207 ns | 4,397,207 ns | 1.000000x | — |
+| typed nonempty prototype | 30 ns | 130 ns | 130 ns | **101,246.133333x / 33,824.669231x / 33,824.669231x** | **99.999012% / 99.997044% / 99.997044%** |
+
+Profile-first former samples were 2,282,014 / 2,909,812 / 2,984,786 / 2,997,675 / 3,031,916 / 3,037,384 /
+3,039,267 / 3,044,886 / 3,062,170 / 3,081,040 / 3,113,548 / 4,397,207 ns; candidate samples were 30 / 30 /
+30 / 30 / 30 / 30 / 30 / 30 / 30 / 31 / 40 / 130 ns.
+
+The one production lever returns `!self.values.is_empty()` directly. It removes only period formatting, string
+allocation, and generic label truthiness; values, frequency, name, ordering, NaT handling, and the vacuous empty result
+remain unchanged. The permanent forwarding test freezes empty and NaT parity against the former flat-index result,
+while the retained ignored release harness keeps the former body executable and routes its candidate arm through the
+public production method.
+
+| final production-path arm | p50 | p95 | p99 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| former rendered-flat-index `any()` | 2,971,156 ns | 4,441,344 ns | 4,441,344 ns | 1.000000x | — |
+| public typed-length `PeriodIndex::any()` | 30 ns | 40 ns | 40 ns | **99,038.533333x / 111,033.600000x / 111,033.600000x** | **99.998990% / 99.999099% / 99.999099%** |
+
+Final former samples were 2,515,433 / 2,720,830 / 2,867,180 / 2,889,372 / 2,964,444 / 2,971,156 /
+3,187,939 / 3,605,013 / 3,893,544 / 3,962,950 / 4,051,160 / 4,441,344 ns; public samples were 20 / 30 /
+30 / 30 / 30 / 30 / 30 / 40 / 40 / 40 / 40 / 40 ns.
+
+Both foreground A/Bs ran on remote worker `vmi1293453` under normal `--profile release` with explicit
+`CARGO_PROFILE_RELEASE_LTO=false`; only the spawned test binary carried the 120-second cap, and each timed body
+completed in 0.05 seconds with **1 passed / 0 failed**. Exact uncapped normal-release warmups had already completed
+while switching among `vmi1264463`, `ovh-b`, and `vmi1152480`, but the shared RCH pool repeatedly evicted before the
+adjacent measurement. The accepted lifecycles therefore compiled outside the timed samples before invoking the
+runner; all cancelled or rebuilt routes remain infrastructure observations, not benchmark evidence.
+
+The full `fp-index` normal-release library suite passed **540 / 540** non-ignored tests, and focused normal-release
+Clippy passed with `-D warnings` on a fresh `vmi1149989` worker. `git diff --check` is clean. Direct Rustfmt reproduced
+only the repository's broad pre-existing formatting drift outside the touched ranges. Bounded UBS completed with zero
+critical findings and reproduced the file's broad pre-existing test panic/assert/indexing/allocation inventory; it
+reported no focused defect in the production length check. Every Cargo invocation was fail-closed remote; no direct
+local Cargo, `force_local`, LTO, or `release-perf` command ran. Unrelated peer work and all 70 stashes remained
+untouched.
+
 ### 2026-07-16 RainyGlen — direct-digit `Timestamp` fraction parsing: 1.701571x p50 WIN (`br-frankenpandas-pdiku`)
 
 Negative-ledger-first routing began with `bv --robot-triage` (365 open, 349 actionable, four blocked, one in progress,

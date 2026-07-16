@@ -10922,7 +10922,7 @@ impl PeriodIndex {
     /// Whether any period label coerces to true.
     #[must_use]
     pub fn any(&self) -> bool {
-        self.to_flat_index().any()
+        !self.values.is_empty()
     }
 
     /// Whether all period labels coerce to true.
@@ -29264,6 +29264,14 @@ mod tests {
         assert!(pi.any());
         assert!(pi.all());
 
+        let empty_pi = super::PeriodIndex::new(Vec::new());
+        assert_eq!(empty_pi.any(), empty_pi.to_flat_index().any());
+        assert!(!empty_pi.any());
+
+        let nat_pi = super::PeriodIndex::new(vec![Period::new(i64::MIN, PeriodFreq::Daily)]);
+        assert_eq!(nat_pi.any(), nat_pi.to_flat_index().any());
+        assert!(nat_pi.any());
+
         let range = super::RangeIndex::new(0, 3, 1).unwrap();
         let range_flat = range.to_flat_index();
         assert_eq!(range.any(), range_flat.any());
@@ -29281,6 +29289,94 @@ mod tests {
         assert_eq!(cat.all(), cat_flat.all());
         assert!(cat.any());
         assert!(!cat.all());
+    }
+
+    #[test]
+    #[ignore = "profile harness for br-frankenpandas-8blqp"]
+    fn period_index_any_nonempty_profile_8blqp() {
+        use fp_types::{Period, PeriodFreq};
+
+        fn former(index: &super::PeriodIndex) -> bool {
+            index.to_flat_index().any()
+        }
+
+        fn candidate(index: &super::PeriodIndex) -> bool {
+            index.any()
+        }
+
+        fn percentile(sorted_samples: &[u128], percentile: usize) -> u128 {
+            let rank = sorted_samples
+                .len()
+                .saturating_mul(percentile)
+                .div_ceil(100)
+                .saturating_sub(1);
+            sorted_samples[rank]
+        }
+
+        let parity_cases = [
+            super::PeriodIndex::new(Vec::new()),
+            super::PeriodIndex::new(vec![Period::new(i64::MIN, PeriodFreq::Daily)]),
+            super::PeriodIndex::new(vec![Period::new(0, PeriodFreq::Annual)]).set_name("annual"),
+            super::PeriodIndex::new(vec![
+                Period::new(i64::MIN, PeriodFreq::Monthly),
+                Period::new(-1, PeriodFreq::Quarterly),
+                Period::new(0, PeriodFreq::Daily),
+                Period::new(i64::MAX, PeriodFreq::Secondly),
+            ]),
+        ];
+        for index in &parity_cases {
+            assert_eq!(candidate(index), former(index));
+        }
+
+        let index =
+            super::PeriodIndex::from_range(Period::new(-8_192, PeriodFreq::Minutely), 16_384)
+                .set_name("minute");
+        assert_eq!(candidate(&index), former(&index));
+
+        for _ in 0..2 {
+            std::hint::black_box(former(std::hint::black_box(&index)));
+            std::hint::black_box(candidate(std::hint::black_box(&index)));
+        }
+
+        let mut former_ns = Vec::with_capacity(12);
+        let mut candidate_ns = Vec::with_capacity(12);
+        for sample in 0..12 {
+            let (former_elapsed, candidate_elapsed) = if sample % 2 == 0 {
+                let started = std::time::Instant::now();
+                std::hint::black_box(former(std::hint::black_box(&index)));
+                let former_elapsed = started.elapsed().as_nanos();
+
+                let started = std::time::Instant::now();
+                std::hint::black_box(candidate(std::hint::black_box(&index)));
+                (former_elapsed, started.elapsed().as_nanos())
+            } else {
+                let started = std::time::Instant::now();
+                std::hint::black_box(candidate(std::hint::black_box(&index)));
+                let candidate_elapsed = started.elapsed().as_nanos();
+
+                let started = std::time::Instant::now();
+                std::hint::black_box(former(std::hint::black_box(&index)));
+                (started.elapsed().as_nanos(), candidate_elapsed)
+            };
+            former_ns.push(former_elapsed);
+            candidate_ns.push(candidate_elapsed);
+        }
+
+        former_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let former_p50 = percentile(&former_ns, 50);
+        let candidate_p50 = percentile(&candidate_ns, 50);
+        println!(
+            "PERIOD_INDEX_ANY former_ns={former_ns:?} candidate_ns={candidate_ns:?} \
+             former_p50_ns={former_p50} former_p95_ns={} former_p99_ns={} \
+             candidate_p50_ns={candidate_p50} candidate_p95_ns={} candidate_p99_ns={} \
+             ratio={:.6}",
+            percentile(&former_ns, 95),
+            percentile(&former_ns, 99),
+            percentile(&candidate_ns, 95),
+            percentile(&candidate_ns, 99),
+            former_p50 as f64 / candidate_p50 as f64,
+        );
     }
 
     #[test]

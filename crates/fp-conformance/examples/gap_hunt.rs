@@ -710,6 +710,17 @@ fn main() {
     time_it("gb.cumsum", 1, 10, || {
         let _ = gkeyed.groupby(&["key"]).unwrap().cumsum().unwrap();
     });
+    time_it("gb.rolling_mean", 1, 10, || {
+        let _ = gkeyed
+            .groupby(&["key"])
+            .unwrap()
+            .rolling(10)
+            .mean()
+            .unwrap();
+    });
+    time_it("gb.rolling_sum", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().rolling(10).sum().unwrap();
+    });
     time_it("gb.cumprod", 1, 10, || {
         let _ = gkeyed.groupby(&["key"]).unwrap().cumprod().unwrap();
     });

@@ -898,5 +898,8 @@ fn main() {
         time_it("sgb.cumsum_i64", 1, 10, || {
             let _ = val.groupby(&key).unwrap().cumsum().unwrap();
         });
+        time_it("sgb.pct_change_i64", 1, 10, || {
+            let _ = val.groupby(&key).unwrap().pct_change(1).unwrap();
+        });
     }
 }

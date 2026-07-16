@@ -710,4 +710,13 @@ fn main() {
     time_it("gb.cumsum", 1, 10, || {
         let _ = gkeyed.groupby(&["key"]).unwrap().cumsum().unwrap();
     });
+    time_it("gb.cumprod", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().cumprod().unwrap();
+    });
+    time_it("gb.cummax", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().cummax().unwrap();
+    });
+    time_it("gb.cummin", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().cummin().unwrap();
+    });
 }

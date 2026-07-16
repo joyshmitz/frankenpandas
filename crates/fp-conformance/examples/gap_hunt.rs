@@ -870,4 +870,30 @@ fn main() {
             let _ = gi.groupby(&["key"]).unwrap().shift(1).unwrap();
         });
     }
+
+    // SeriesGroupBy cumsum on Int64 (parallel dead pattern: SeriesGroupBy's own
+    // try_cum_dense also gated on as_f64_slice).
+    {
+        let idx = Index::new((0..n).map(|i| IndexLabel::Int64(i as i64)).collect());
+        let groups = (n / 100).max(2);
+        let key = fp_frame::Series::new(
+            "key",
+            idx.clone(),
+            Column::from_i64_values(
+                (0..n)
+                    .map(|i| ((i as u64).wrapping_mul(2_654_435_761) % groups as u64) as i64)
+                    .collect(),
+            ),
+        )
+        .expect("sgb key");
+        let val = fp_frame::Series::new(
+            "v",
+            idx,
+            Column::from_i64_values((0..n).map(|i| ((i * 7) % 9973) as i64).collect()),
+        )
+        .expect("sgb val");
+        time_it("sgb.cumsum_i64", 1, 10, || {
+            let _ = val.groupby(&key).unwrap().cumsum().unwrap();
+        });
+    }
 }

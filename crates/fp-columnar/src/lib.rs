@@ -22423,6 +22423,13 @@ impl Column {
         if n < 2 {
             return Ok(Scalar::Float64(0.0));
         }
+        if let Some(vals) = self.as_f64_slice() {
+            let mut sum = 0.0;
+            for i in 1..n {
+                sum += (vals[i - 1] + vals[i]) / 2.0 * dx;
+            }
+            return Ok(Scalar::Float64(sum));
+        }
         let vals: Vec<f64> = self
             .values
             .iter()
@@ -26641,6 +26648,153 @@ mod tests {
         ArithmeticOp, BoolAffineSelectionWitness, Column, ColumnData, ColumnError, ScalarValues,
         SparseColumn, ValidityMask,
     };
+
+    #[test]
+    #[ignore = "foreground profile-first A/B"]
+    fn trapz_raw_float64_profile_gc20b() {
+        use std::{hint::black_box, time::Instant};
+
+        fn former(column: &Column, dx: f64) -> Scalar {
+            let n = column.values.len();
+            if n < 2 {
+                return Scalar::Float64(0.0);
+            }
+            let vals = column
+                .values
+                .iter()
+                .map(|value| value.to_f64().unwrap_or(0.0))
+                .collect::<Vec<_>>();
+            let mut sum = 0.0;
+            for i in 1..n {
+                sum += (vals[i - 1] + vals[i]) / 2.0 * dx;
+            }
+            Scalar::Float64(sum)
+        }
+
+        fn float_bits(value: Scalar) -> u64 {
+            match value {
+                Scalar::Float64(value) => value.to_bits(),
+                other => panic!("expected Float64 trapz result, got {other:?}"),
+            }
+        }
+
+        fn elapsed(input: &[f64], dx: f64, candidate_arm: bool) -> u128 {
+            let column = Column::from_f64_values(input.to_vec());
+            let started = Instant::now();
+            let result = if candidate_arm {
+                black_box(&column)
+                    .trapz(dx)
+                    .expect("public candidate trapz")
+            } else {
+                former(black_box(&column), dx)
+            };
+            black_box(float_bits(result));
+            started.elapsed().as_nanos()
+        }
+
+        fn percentile(samples: &mut [u128], percent: usize) -> u128 {
+            samples.sort_unstable();
+            samples[(samples.len().saturating_sub(1) * percent) / 100]
+        }
+
+        for (values, dx) in [
+            (Vec::new(), 1.0),
+            (vec![-0.0], -0.0),
+            (vec![-0.0, 0.0], 1.0),
+            (vec![f64::NEG_INFINITY, -1.0, 1.0], 0.5),
+            (vec![-f64::MAX, f64::MAX], f64::INFINITY),
+            (vec![1.0, 2.0, 4.0, 8.0], f64::NAN),
+        ] {
+            let column = Column::from_f64_values(values);
+            assert_eq!(
+                float_bits(former(&column, dx)),
+                float_bits(column.trapz(dx).expect("public candidate trapz")),
+            );
+        }
+
+        const ROWS: usize = 262_144;
+        const SAMPLES: usize = 16;
+        let input = (0..ROWS)
+            .map(|index| ((index % 1_009) as f64 - 504.0) * 0.25)
+            .collect::<Vec<_>>();
+        let dx = 0.125;
+        let column = Column::from_f64_values(input.clone());
+        assert_eq!(
+            float_bits(former(&column, dx)),
+            float_bits(column.trapz(dx).expect("public candidate trapz")),
+        );
+
+        for _ in 0..2 {
+            black_box(elapsed(&input, dx, false));
+            black_box(elapsed(&input, dx, true));
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut candidate_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_ns.push(elapsed(&input, dx, false));
+                candidate_ns.push(elapsed(&input, dx, true));
+            } else {
+                candidate_ns.push(elapsed(&input, dx, true));
+                former_ns.push(elapsed(&input, dx, false));
+            }
+        }
+
+        let mut former_sorted = former_ns.clone();
+        let mut candidate_sorted = candidate_ns.clone();
+        let former_p50 = percentile(&mut former_sorted, 50);
+        let former_p95 = percentile(&mut former_sorted, 95);
+        let candidate_p50 = percentile(&mut candidate_sorted, 50);
+        let candidate_p95 = percentile(&mut candidate_sorted, 95);
+        println!(
+            "TRAPZ_RAW_FLOAT64_PROFILE rows={ROWS} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} speedup_p50={:.6} former_p95_ns={former_p95} candidate_p95_ns={candidate_p95} speedup_p95={:.6} former_samples={former_ns:?} candidate_samples={candidate_ns:?}",
+            former_p50 as f64 / candidate_p50 as f64,
+            former_p95 as f64 / candidate_p95 as f64,
+        );
+    }
+
+    #[test]
+    fn trapz_raw_float64_matches_scalar_path_gc20b() {
+        fn former(column: &Column, dx: f64) -> Scalar {
+            let n = column.values.len();
+            if n < 2 {
+                return Scalar::Float64(0.0);
+            }
+            let vals = column
+                .values
+                .iter()
+                .map(|value| value.to_f64().unwrap_or(0.0))
+                .collect::<Vec<_>>();
+            let mut sum = 0.0;
+            for i in 1..n {
+                sum += (vals[i - 1] + vals[i]) / 2.0 * dx;
+            }
+            Scalar::Float64(sum)
+        }
+
+        fn float_bits(value: Scalar) -> u64 {
+            match value {
+                Scalar::Float64(value) => value.to_bits(),
+                other => panic!("expected Float64 trapz result, got {other:?}"),
+            }
+        }
+
+        for (values, dx) in [
+            (Vec::new(), 1.0),
+            (vec![-0.0], -0.0),
+            (vec![-0.0, 0.0], 1.0),
+            (vec![f64::NEG_INFINITY, -1.0, 1.0], 0.5),
+            (vec![-f64::MAX, f64::MAX], f64::INFINITY),
+            (vec![1.0, 2.0, 4.0, 8.0], f64::NAN),
+        ] {
+            let column = Column::from_f64_values(values);
+            assert_eq!(
+                float_bits(column.trapz(dx).expect("public candidate trapz")),
+                float_bits(former(&column, dx)),
+            );
+        }
+    }
 
     #[test]
     fn validity_mask_slice_packed_matches_bit_reference_y7i9g() {

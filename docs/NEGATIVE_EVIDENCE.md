@@ -17690,3 +17690,51 @@ neither is performance evidence. Every explicit Cargo command was fail-closed re
 Shared-index concurrency co-landed this reserved parser, harness, ledger, and bead bundle in `36df51406` alongside
 `br-frankenpandas-1ko71`; the dedicated provenance follow-up names `br-frankenpandas-81jjv` without rewriting the
 already-pushed peer commit.
+
+### 2026-07-16 BlackThrush — raw-backed Float64 `trapz`: 10.259061x p50 WIN (`br-frankenpandas-gc20b`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (362 open, 346 actionable, no dependency cycles). The
+ranked performance work was stale, assigned, or already present on `main`, and recent `fp-frame`, `fp-io`, index,
+join, groupby, timestamp, and reduction veins were already heavily mined. A first fresh `fp-join` validation probe
+(`br-frankenpandas-dh5ye`) never reached a timed path because two workers entered long cold `fp-frame` release
+codegen; its temporary harness was removed and the bead returned open with a routing HOLD. Those interrupted builds
+are not performance rejects. The successful pivot selected the previously unledgered, Arrow-free `fp-columnar`
+`Column::trapz` path: an all-valid Float64 column was materialized into `Scalar` values and then copied into a temporary
+`Vec<f64>` before the integration fold.
+
+Profile-first attribution left production unchanged and compared an exact transcription of the former public body
+against a test-local fold over `as_f64_slice()`. Before timing, the harness asserted exact `f64::to_bits()` parity for
+empty and singleton inputs, signed zero, infinities, overflow cancellation, and NaN/infinite `dx`. The timed corpus
+contained 262,144 deterministic finite Float64 values, with column construction outside each sample, two in-process
+warmups, and sixteen alternating-order samples per arm. The foreground run was fail-closed remote on `vmi1264463`,
+used normal `--profile release` with `CARGO_PROFILE_RELEASE_LTO=false`, and capped only the spawned test binary at 120
+seconds. Its cold release compile was outside every sample, and the exact-parity measurement body completed in 0.12
+seconds.
+
+| profiled arm | p50 | p95 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: |
+| former Scalar materialization plus temporary `Vec<f64>` | 2,640,354 ns | 2,914,333 ns | 1.000000x | — |
+| borrowed raw Float64 backing | 257,368 ns | 297,863 ns | **10.259061x p50 / 9.784139x p95** | **90.252519% p50 / 89.779377% p95** |
+
+Former samples were 2,695,646 / 2,627,481 / 2,474,727 / 2,628,051 / 2,576,135 / 2,881,782 / 2,834,334 /
+2,888,285 / 2,811,662 / 2,957,333 / 2,883,316 / 2,914,333 / 2,629,814 / 2,634,083 / 2,561,628 / 2,640,354 ns;
+borrowed-backing samples were 291,312 / 251,697 / 289,567 / 251,587 / 318,572 / 255,656 / 292,443 / 251,497 /
+297,863 / 251,657 / 251,767 / 284,969 / 277,966 / 257,368 / 287,094 / 251,017 ns.
+
+The one production lever gates on `as_f64_slice()` and executes the identical ordered trapezoid expression directly
+over the borrowed all-valid Float64 backing. The empty/singleton return, accumulation order, IEEE-754 operations,
+signed-zero behavior, and returned `Scalar::Float64` bits are unchanged. Every dtype, nullable column, and noncontiguous
+backing retains the exact former Scalar-conversion fallback. The permanent correctness test freezes the former body as
+an oracle across the adversarial corpus, and the retained ignored release harness makes the measured comparison
+reproducible against the public candidate.
+
+The post-edit untimed `fp-columnar` normal-release build completed successfully on remote worker `ovh-b`, with four
+pre-existing unused-import/unused-mut warnings outside both touched hunks. Adjacent follow-up jobs on `vmi1264463` and
+`ovh-b` each discarded the release pool and began rebuilding the same small dependency set, so the redundant
+public-method rerun was stopped under the explicit cache-eviction rule; no timeout or canceled build is claimed as
+benchmark evidence. The shipped loop is the exact profiled candidate, and the real profile-first A/B above is the
+landing evidence. `git diff --check` is clean. Direct Rustfmt reproduced the file's broad pre-existing formatting
+backlog but reported no diff in either touched line range. Bounded UBS completed and reproduced the known whole-file
+panic/assert/indexing/allocation inventory; it reported no focused production defect in the `trapz` hunk. Every
+explicit Cargo invocation was fail-closed remote; no direct local Cargo, `force_local`, LTO, or `release-perf` command
+ran. Unrelated peer work was left untouched, and all 70 stashes remain.

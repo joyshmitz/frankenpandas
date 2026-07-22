@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::{collections::BTreeMap, hint::black_box, time::Instant};
 
 use fp_columnar::{Column, ValidityMask};
+use fp_types::{DType, NullKind, Scalar};
 use fp_frame::{DataFrame, Series, to_datetime};
 use fp_index::{DuplicateKeep, Index, IndexLabel, RangeIndex};
 use fp_join::{JoinType, merge_dataframes_on_with};
@@ -149,6 +150,32 @@ fn build_frame(rows: usize, cols: usize, dtype: &str) -> (DataFrame, Vec<Vec<f64
                         data,
                         ValidityMask::all_valid(rows),
                     ),
+                );
+            }
+            // Nullable Int64: every 7th cell is Null. Exercises the
+            // single-valued-missing nullable transpose shape.
+            "int64_nullable" => {
+                let data = gen_i64_column(&mut rng, rows);
+                raw.push(
+                    data.iter()
+                        .enumerate()
+                        .map(|(i, &value)| if i % 7 == 0 { f64::NAN } else { value as f64 })
+                        .collect(),
+                );
+                let scalars: Vec<Scalar> = data
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &value)| {
+                        if i % 7 == 0 {
+                            Scalar::Null(NullKind::Null)
+                        } else {
+                            Scalar::Int64(value)
+                        }
+                    })
+                    .collect();
+                columns.insert(
+                    name.clone(),
+                    Column::new(DType::Int64, scalars).expect("nullable i64 column"),
                 );
             }
             // All-valid contiguous-Utf8 columns (the representation string

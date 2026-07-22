@@ -18209,3 +18209,28 @@ insert()-loop sites qualify.** Bonus finding for the graveyard: my first digit-w
 row 0 (0*10+0=0) → infinite recursion/stack overflow at any n — caught by the test suite SIGABRT before any
 bench; the eager transpose original avoids it by pushing row 0 directly. Code fully reverted (no residue,
 grep-verified); to_dict tests re-green. Consecutive-REJECT count: 1 (lever 5 was a WIN).
+
+### 2026-07-22 DustySummit (cc pane 2, seventh lever) — nullable-Int64 lazy transpose view arm — WIN ~43.7x @100k (all arms CV<2%)
+
+The queued nullable lever, scoped to the ONE numeric dtype whose missing representation is SINGLE-VALUED
+(`Scalar::Null(NullKind::Null)`) per [[typed-validity-backing-lever]] — Float64/temporal nullable shapes stay
+excluded (non-single-valued missing reps, documented traps). New `HomogeneousTransposeColumns::NullableInt64`
+arm carries `(values, validity)` pairs via `as_i64_slice_with_validity` (covers LazyNullableInt64 + the
+clone-carried Eager cache); `LazyTransposeFramePlan`'s Int64 materialize arm tries the all-typed path first,
+else routes the row through **`Column::from_values` — the exact eager constructor — so `Null(Null)` cells AND
+the all-null-row dtype-inference edge are bit-identical by using the identical function.** Mixed
+all-valid+nullable Int64 frames are admitted (the all-valid arm returns first for pure frames).
+
+Gates: transpose set 16/0 incl. new
+`dataframe_transpose_nullable_int64_lazy_matches_eager_dustysummit` (serde + PartialEq parity, an ALL-null
+output row, per-cell Null probes); full fp-frame **3180/0**; clippy only the 4 pre-existing (b96kr);
+`git diff --check` clean; env gate `FP_TV_NO_NULLI64` stripped pre-commit. Perf (ONE binary, env-gated arms,
+5 interleaved C→O→C2 blocks, `taskset -c 2`, new fp-bench dtype `int64_nullable` = every-7th-cell Null,
+workload `df_transpose_materialize`): **100k×10 lazy 1 296–1 367 µs vs eager 57 996–60 724 µs, medians
+1 349 vs 58 881 = 43.65×, both arms CV <2%, A/A nulls 0.97–1.02 — gate-clean in one run.**
+
+Lane coverage after seven levers: default lazy `df.T` now serves dense homogeneous
+Float64/Int64/Bool/Datetime64/Timedelta64, mixed all-valid Int64+Float64 (46.3×), all-valid contiguous-Utf8
+(69.8×), and nullable/mixed-validity Int64 (43.7×). Still eager: nullable Float64/temporal (trap-documented),
+Eager-Utf8 sources, Bool/temporal/Utf8 mixes, duplicate-label indexes (correctly rejected). to_dict side:
+typed-cell + parallel materialization landed (2.80×); from_iter key-ordering RULE ledgered.

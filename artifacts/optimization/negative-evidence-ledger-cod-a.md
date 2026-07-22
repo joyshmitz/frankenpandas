@@ -430,3 +430,25 @@ retry failed levers without a concrete retry predicate.
   and null-B all below 5% CV, while a 10k and 100k targeted public harness
   rerun also clears 5% CV and shows no 100k regression. Until that predicate
   holds, do not ship or cite the apparent 2.08-2.92x median effect.
+
+## 2026-07-22 - groupby/read frontier measurement blocker
+
+- The current `vs_pandas_harness.py` groupby run at 10k/100k produced no
+  admissible loss: valid cells were `groupby_sum_int64` 7.41x faster at 100k
+  and `groupby_mean_float64` 8.64x faster at 10k; all other groupby cells were
+  high-CV. The IO run likewise had a valid `csv_write` 10k win (FP p50
+  4420.82 us, pandas 91082.05 us, 20.603x, FP/pandas CV 2.38%/3.89%).
+- No fresh groupby or CSV write lever is justified. `csv_read` was an apparent
+  FP win (p50 48.21 us vs 8046.00 us at 10k; 1183.69 us vs 102602.87 us at
+  100k), but CV was 11.53% and 5.18%, so both rows were dropped. `csv_write`
+  at 100k was also dropped (CV 10.49%/13.39%).
+- Genuine blocker: all four parquet read/write cells are `INCOMPLETE` because
+  the current `fp-bench` reports `unsupported io/parquet_*`; the public
+  harness therefore cannot supply a measured parquet frontier. This is not a
+  source-performance rejection and no speculative code was changed.
+- Retry predicate: resume this vein only after fp-bench has an admitted
+  parquet read/write workload (or a fixture-bound equivalent) and a pinned or
+  isolated worker yields CV <5% for both sides on 10k and 100k; then profile
+  the admitted hotspot and preflight its exact ledger/log family before one
+  lever. Until then, route to a different measured surface rather than
+  inventing a parquet result.

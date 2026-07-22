@@ -151,6 +151,19 @@ fn build_frame(rows: usize, cols: usize, dtype: &str) -> (DataFrame, Vec<Vec<f64
                     ),
                 );
             }
+            // Alternating all-valid Int64/Float64 columns: the mixed-numeric
+            // transpose shape that promotes to Float64 output.
+            "mixed_i64_f64" => {
+                if c % 2 == 0 {
+                    let data = gen_i64_column(&mut rng, rows);
+                    raw.push(data.iter().map(|&value| value as f64).collect());
+                    columns.insert(name.clone(), Column::from_i64_values_owned(data));
+                } else {
+                    let data = gen_f64_column(&mut rng, rows, "float64");
+                    raw.push(data.clone());
+                    columns.insert(name.clone(), Column::from_f64_values(data));
+                }
+            }
             _ => {
                 let data = gen_f64_column(&mut rng, rows, dtype);
                 raw.push(data.clone());

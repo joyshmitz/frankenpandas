@@ -18068,3 +18068,51 @@ so the peer's in-flight lever is neither committed nor disturbed.
 Headline transpose ratios remain the certified 2026-07-10 rows (31.927x–60.074x vs pandas 2.2.3 at 10k,
 778.93x–4473.52x vs the eager path, CV<5%) — now describing the DEFAULT build. Fresh official-harness rows
 under the default build: bead br-frankenpandas-adqfs.
+
+### 2026-07-22 DustySummit (cc pane 2, follow-up lever) — br-frankenpandas-l4vzc: PromotedFloat64 mixed-numeric lazy transpose view — WIN 46.3x @100k / 39.1x @10k, CV<2.3%
+
+**Lever.** Widen the (now-default) lazy transpose view to the most common real transpose shape the certified
+arms missed: MIXED all-valid Int64/Float64 frames. The eager fallback promotes this shape to Float64 output via
+`from_values` dtype inference (one `Vec<Scalar>` + inference PER SOURCE ROW — the representation-cardinality wall
+plus a per-cell Scalar boxing tax). New `HomogeneousTransposeColumns::PromotedFloat64(Vec<NumericTransposeSource>)`
+arm carries the typed source slices and casts Int64 cells at materialization, reproducing the eager promotion
+bit-for-bit. Ledger-grep first: no prior verdict on a mixed-dtype view arm; the four historical construction
+rejects were not retried; this is a view-eligibility widening, not a construction tweak.
+
+**Eligibility guards (deliberate scope):** every source must be `validity().all()` AND expose
+`as_f64_slice`/`as_i64_slice`. This excludes: nullable Int64 (cached-raw-buffer hazard, same as the Datetime64
+guard), nullable/NaN-bearing Float64 (`from_f64_values` marks NaN slots invalid, so the guard closes the
+NaN-vs-Null representation question BY CONSTRUCTION — the trap in [[typed-validity-backing-lever]] never
+reaches the promoted arm; a dedicated test proves the NaN mix declines to eager), Bool/temporal/Utf8 mixes
+(different eager promotion semantics — still eager, unchanged).
+
+**Correctness gates:** fp-frame transpose set 14/0 (incl. new
+`dataframe_transpose_promoted_mixed_numeric_lazy_matches_eager_dustysummit`: full serde + PartialEq parity vs
+`transpose_materialized()`, promoted dtype Float64 asserted per column, bool-mix + nullable-i64-mix + NaN-mix
+fallback cases); full fp-frame lib **3178/0**; two prior-contract assertions updated (mixed was asserted
+NOT-lazy — behavior documentation, not semantics; equality assertions retained). clippy fp-frame --no-deps:
+zero new lints (only the 4 pre-existing cfg-independent `question_mark` errors, bead b96kr). One test-authoring
+lesson recorded: `assert_eq!` on NaN-bearing frames is ALWAYS false (IEEE `Float64(NaN) != Float64(NaN)`) —
+for declined-view cases assert the decline + probe the NaN cell's dtype/validity instead.
+
+**Perf (substrate: ONE binary, env-gated arms `FP_TV_NO_MIXED` — gate REMOVED before commit per the 8b3ca76f
+precedent; interleaved C→O→C2 × 7 blocks, `taskset -c 2`, sha256-provenanced artifact
+`artifacts/bench/cc_fp_l4vzc_promoted_mixed_transpose_ab_2026-07-22.json`; new fp-bench dtype
+`mixed_i64_f64` = alternating all-valid i64/f64 columns, workload `df_transpose_materialize` = FULL
+observation):**
+
+| size | eager (pre-lever) p50 | promoted lazy p50 | ratio | A/A null | CVs |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 100k×10 | 63 402.9 µs | 1 368.7 µs | **46.32×** | 1.032 | C 2.06% / O 0.87% / C2 2.23% |
+| 10k×10 | 4 892.5 µs | 125.0 µs | **39.14×** | 0.997 | C 2.09% / O 0.47% / C2 0.93% |
+
+All CVs under the 5% gate. A first run was REJECTED for CV (120–188%): one block was hit by a peer compile
+storm (load avg 28; eager p50 439 297 µs vs ~64 000 typical). Its medians already agreed with the clean rerun
+(46.5×/39.5× vs 46.3×/39.1×) — retained inside the artifact for transparency. Note the mixed-eager baseline
+(63.4 ms) is ~4.1× worse than the pure-f64 eager baseline (15.4 ms, previous entry): the per-cell
+`from_values` inference tax stacks on the cardinality wall, which is why THIS shape gains 46× where pure-f64
+gained 5.9×.
+
+**Remaining lane scope after this increment:** all-Utf8 transpose (contiguous-Utf8 view arm), nullable
+numeric views (needs per-source validity in the plan), Bool-mixed promotion (needs eager-semantics
+verification first), to_dict lazy/materialization boundary, official-harness mixed rows (fold into adqfs).

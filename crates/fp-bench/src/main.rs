@@ -151,6 +151,21 @@ fn build_frame(rows: usize, cols: usize, dtype: &str) -> (DataFrame, Vec<Vec<f64
                     ),
                 );
             }
+            // All-valid contiguous-Utf8 columns (the representation string
+            // ops and typed readers produce; plain from_values Utf8 is Eager
+            // and takes different paths).
+            "utf8" => {
+                let mut bytes = Vec::new();
+                let mut offsets = Vec::with_capacity(rows + 1);
+                offsets.push(0);
+                for _ in 0..rows {
+                    let value = format!("value_{:016x}", rng.next_u64());
+                    bytes.extend_from_slice(value.as_bytes());
+                    offsets.push(bytes.len());
+                }
+                raw.push(vec![0.0; rows]);
+                columns.insert(name.clone(), Column::from_utf8_contiguous(bytes, offsets));
+            }
             // Alternating all-valid Int64/Float64 columns: the mixed-numeric
             // transpose shape that promotes to Float64 output.
             "mixed_i64_f64" => {

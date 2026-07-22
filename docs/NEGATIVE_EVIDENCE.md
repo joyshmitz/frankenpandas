@@ -18116,3 +18116,43 @@ gained 5.9×.
 **Remaining lane scope after this increment:** all-Utf8 transpose (contiguous-Utf8 view arm), nullable
 numeric views (needs per-source validity in the plan), Bool-mixed promotion (needs eager-semantics
 verification first), to_dict lazy/materialization boundary, official-harness mixed rows (fold into adqfs).
+
+### 2026-07-22 DustySummit (cc pane 2, third lever) — br-frankenpandas-l4vzc: contiguous-Utf8 lazy transpose view arm — WIN 69.8x @100k (CV-valid) / ~43x @10k (3-run agreement)
+
+**Lever.** The Utf8 arm cod_fp's 2026-07-10 widening explicitly left "for the cc-owned lane": all-valid
+contiguous-Utf8 frames now take the lazy view. The eager fallback pays one `String` clone + one `Scalar` box
+PER CELL plus per-row `from_values` re-inference; the new `HomogeneousTransposeColumns::Utf8` arm carries the
+`(bytes, offsets)` span pairs and builds each output column as contiguous-Utf8 directly
+(`from_utf8_contiguous` is documented "semantically identical to `Column::new(DType::Utf8, scalars)`" — the
+parity contract). Eager-Utf8 sources (plain `from_values` construction, no contiguous backing) keep the eager
+fallback; so do nullable and Utf8/numeric-mixed shapes. Ledger-grep first: no prior Utf8-transpose verdict;
+construction rejects not retried.
+
+**Correctness gates:** transpose set 15/0 incl. new
+`dataframe_transpose_contiguous_utf8_lazy_matches_eager_dustysummit` (full serde + PartialEq parity vs
+`transpose_materialized`, empty strings + multi-byte UTF-8 probes, Eager-Utf8 fallback case, Utf8/numeric-mix
+fallback case); full fp-frame lib **3179/0**; clippy fp-frame --no-deps zero new lints (only the 4
+pre-existing `question_mark` errors, bead b96kr); `git diff --check` clean; env gate `FP_TV_NO_UTF8` removed
+before commit.
+
+**Perf (substrate: ONE binary, env-gated arms, interleaved C→O→C2 × 7 blocks, `taskset -c 2`,
+sha256-provenanced artifact `artifacts/bench/cc_fp_l4vzc_utf8_transpose_ab_2026-07-22.json`; new fp-bench
+dtype `utf8` = all-valid contiguous-Utf8 columns of 22-char strings; workload `df_transpose_materialize` =
+FULL observation):**
+
+| size | eager (pre-lever) p50 | lazy p50 | ratio | A/A null | CVs | status |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| 100k×10 | 94 644.6 µs | 1 355.5 µs | **69.82×** | 1.024 | C 3.96% / O 2.80% / C2 4.25% | **CV-VALID** |
+| 10k×10 | 5 402.4 µs | 125.3 µs | **43.13×** | 0.997 | O arm 35.48% (one spiked block) | 3-run agreement (46.98/43.51/43.13×), not a CV-valid single row |
+
+Two earlier runs were load-spiked by peer compile storms and retained inside the artifact; all three runs'
+medians agree (100k: 72.01/68.64/69.82×). The Utf8-eager baseline (94.6 ms) is the worst of the three shapes
+measured today (pure-f64 15.4 ms, mixed-numeric 63.4 ms) — per-cell String cloning stacks on the inference tax
+and the cardinality wall, which is why this arm gains 70× where pure-f64 gained 5.9×.
+
+**Lane scoreboard after three levers (all same-day):** default flip (538c03d6f) + PromotedFloat64 mixed
+(3ccd78f60) + contiguous-Utf8 (this commit). The default `df.T` lazy view now covers: dense homogeneous
+Float64 / Int64 / Bool / Datetime64 / Timedelta64, mixed all-valid Int64+Float64 (46.3×), all-valid
+contiguous-Utf8 (69.8×). Remaining eager shapes: Eager-Utf8 sources, nullable anything, Bool/temporal/Utf8
+mixes, duplicate-label indexes (correctly rejected), non-unit-range indexes at view level. Next candidates:
+nullable views (needs per-source validity in the plan; Float64 missing-rep trap), to_dict boundary.

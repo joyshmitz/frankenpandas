@@ -2245,6 +2245,16 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         ("dataframe_ops", "df_to_dict_index") => time_us(|| {
             let _ = df.to_dict("index").expect("to_dict");
         }),
+        // BENCHMARK-INTEGRITY SIBLING: `df_to_dict_index` above drops the
+        // IndexMappingLazy result without calling `as_mapping()`, so it
+        // measures ONLY construction of the lazy shell (cf. `df_transpose`
+        // vs `df_transpose_materialize`). This row forces the
+        // materialization boundary a real consumer pays.
+        ("dataframe_ops", "df_to_dict_index_materialize") => time_us(|| {
+            let result = df.to_dict("index").expect("to_dict");
+            let (keys, values) = result.as_mapping().expect("index mapping");
+            black_box(keys.len() + values.len());
+        }),
         ("dataframe_ops", "df_to_records") => time_us(|| {
             let _ = df.to_records();
         }),

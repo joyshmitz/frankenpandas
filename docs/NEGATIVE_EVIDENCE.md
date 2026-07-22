@@ -18156,3 +18156,23 @@ Float64 / Int64 / Bool / Datetime64 / Timedelta64, mixed all-valid Int64+Float64
 contiguous-Utf8 (69.8×). Remaining eager shapes: Eager-Utf8 sources, nullable anything, Bool/temporal/Utf8
 mixes, duplicate-label indexes (correctly rejected), non-unit-range indexes at view level. Next candidates:
 nullable views (needs per-source validity in the plan; Float64 missing-rep trap), to_dict boundary.
+
+### 2026-07-22 DustySummit (cc pane 2, fourth lever) — to_dict("index") parallel lazy-materialization — REJECT (~1.0x); benchmark-integrity sibling SHIPPED
+
+**Attempt:** restore the fac9907ae parallel pair-build inside `materialize_index_mapping` (the IndexMappingLazy
+refactor had left the as_mapping() boundary serial). **Verdict: NO-OP.** Interleaved same-binary env-gated A/B
+(`FP_TODICT_SERIAL_MAT`), df_to_dict_index_materialize float64: 100k = **0.975x** (null 1.009); 1M first A/B
+showed 1.34x but with a BROKEN A/A null (0.760, CVs 30-40%) — inadmissible; hand-interleaved 1M pairs:
+parallel 211178/222000/211476 vs serial 233917/219763/214192 µs = **~1.0x**. Decomposition: construction
+15-24 ms vs full 205-224 ms → materialization is ~90% of cost, BUT the parallelized pair-build section is a
+minority of IT: the hoisted SERIAL `Column::values()` Scalar-cache materialization (10 × 1M lazy-f64 → Scalar)
+plus the serial unsorted BTreeMap collect (memcmp-heavy O(n log n)) dominate — Amdahl kills the pair-build
+gain. Code REVERTED to the exact serial HEAD state (verified: empty diff + check clean). **RETRY PREDICATE:**
+typed-slice cell reads (all-valid-gated `as_f64_slice`/`as_i64_slice` → `Scalar::Float64(v)` per cell, values()
+fallback otherwise — skips the 10×1M cache materialization entirely) COMBINED with the parallel build, re-A/B
+at 1M with a clean null; or a samply profile proving pair-build share >50% first. **SHIPPED from this attempt:**
+the `df_to_dict_index_materialize` fp-bench sibling — `df_to_dict_index` drops IndexMappingLazy without
+`as_mapping()` and measures ONLY the lazy shell (~15 ms of a ~210 ms real cost, the same dead-benchmark class
+as pre-ffcd93014 `df_transpose`), exactly as the l4vzc bead's 2026-07-10 correction warned. Also measured:
+lever-relevant baseline df_to_dict_index_materialize 1M ≈ 205-224 ms — the to_dict half of the lane's wall,
+now measurable.

@@ -18259,3 +18259,15 @@ Lane coverage: default lazy `df.T` now serves homogeneous Float64/Int64/Bool/Dat
 mixed all-valid numeric (46.3×), contiguous-Utf8 (69.8×), nullable Int64 (43.7×), canonical nullable/
 mixed-validity Float64 (38.2×). Remaining eager: Eager-backed nullable columns (unreconstructible NullKinds —
 correct), Eager-Utf8, Bool/temporal/Utf8 mixes, nullable temporals (NaT trap), duplicate-label indexes.
+
+### 2026-07-22 DustySummit — official vs_pandas_harness refresh under the DEFAULT build (partial: all rows CV-dropped under load; directional p50s recorded)
+
+Harness gained the `df_to_dict_index_materialize` pandas counterpart (plain `to_dict('index')` — pandas is
+fully materialized, so the bare call is the honest boundary row). Run at load avg ~16 (shared host): **every
+row DROPPED_HIGH_CV** — no ratio is claimed. Directional p50s, retry-at-quiet-host predicate for adqfs:
+df_transpose (batched both sides) fp 1 111/1 322 µs vs pandas 1 854 902/1 963 517 µs (~1 670×/~1 485×
+directionally); df_to_dict_index_materialize fp 1 163/20 990 µs vs pandas 114 575/1 132 969 µs (~98×/~54×
+directionally); df_transpose_materialize 10k fp 126 vs pd 157 µs, **100k fp 1 382 vs pd 1 000 µs — the ONE
+potentially-close row** (pandas' blockwise `.T` + single-column read is cheap; CVs 101%/174% make it
+undecidable here). adqfs stays open for the CV-valid rerun + pandas-side generators for the four new fp-bench
+dtypes (mixed_i64_f64/utf8/int64_nullable/float64_nullable).

@@ -768,3 +768,11 @@ can subsume this two-run special case without regressing construction latency.
 ## 2026-07-22 - IO frontier cycle
 
 - CSV read 10k surfaced a 184.739x result (CV 3.90%/4.22%), but 100k was high-CV and parquet workloads remain unsupported. No KEEP claim is made without profile-first and conformance evidence.
+
+---
+## 2026-07-22 cross-reference (DustySummit, sole producer while cod is weekly-capped)
+This per-agent ledger is stale by ~5 weeks. All 2026-07-22 verdicts (8 transpose/to_dict lane levers: 6 WINS
+including the lazy-transpose-view DEFAULT flip, PromotedFloat64 46.3x, contiguous-Utf8 69.8x, nullable-i64
+43.7x, canonical-nullable-f64 38.2x, to_dict typed-cell 2.80x; 2 REJECTs with retry predicates/rules; 3
+RangeIndex correctness closures; official-harness partial refresh) are recorded in docs/NEGATIVE_EVIDENCE.md
+under the dated DustySummit entries — that file is the single active ledger for this period.

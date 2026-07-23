@@ -256,6 +256,16 @@ def bench_df_transpose_materialize_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(op)
 
 
+def bench_df_to_dict_index_materialize_pandas(df: pd.DataFrame) -> list[float]:
+    # Counterpart to fp-bench dataframe_ops/df_to_dict_index_materialize:
+    # to_dict('index') is fully materialized in pandas, so the plain call is
+    # the honest boundary-crossing row (the fp side forces as_mapping()).
+    def op():
+        return len(df.to_dict("index"))
+
+    return time_operation(op)
+
+
 def bench_astype_str_f64_pandas(df: pd.DataFrame) -> list[float]:
     # Mirrors fp-bench dataframe_ops/astype_str_f64 exactly: a Float64 column
     # holding i * 1.5 for i in 0..rows, cast to str. Built here (not taken from
@@ -497,6 +507,7 @@ PANDAS_WORKLOADS = {
         "cumsum": bench_cumsum_pandas,
         "df_transpose": bench_df_transpose_pandas,
         "df_transpose_materialize": bench_df_transpose_materialize_pandas,
+        "df_to_dict_index_materialize": bench_df_to_dict_index_materialize_pandas,
         "astype_str_f64": bench_astype_str_f64_pandas,
     },
     "groupby": {

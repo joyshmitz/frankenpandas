@@ -18617,3 +18617,21 @@ var/mean/sum computation and output are NOT bottlenecks. The ONLY groupby loss i
 floor (hashbrown-vs-khash, ledgered above).** No beatable non-factorization groupby lever exists. The groupby
 lane is now fully characterized: str-key aggs floor-bound, everything else (int-key aggs, transforms, wide-key,
 cumulative) an FP win. No code lever attempted (profile + coverage only).
+
+### 2026-07-23 DustySummit — str-groupby factorization: packed-u64 FxHashMap (5th attempt) — REJECT, ABSOLUTELY CONCLUSIVE
+
+Fifth and final str-groupby factorization approach, and the only one that wasn't a hand-rolled table: keep
+hashbrown's SIMD probing but drop the `FxHashMap<&[u8]>` per-compare pointer-chase by packing each ≤ 7-byte key
+into a `u64` (`bytes | len<<56`) and using `FxHashMap<u64,u32>`. **A/B (FP_GB_UTF8_FXMAP, 5 blocks, taskset,
+100k): packed ~1677 µs vs FxHashMap<&[u8]> ~1147 µs = ~46% SLOWER.** The pointer-chase hypothesis was WRONG —
+FxHashMap<&[u8]> hashes the span IN PLACE (no copy), and the per-row `copy_from_slice`+pack overhead of the
+packed path exceeds any compare savings; the byte buffer is cache-hot so the &[u8] compare is cheap. Reverted.
+
+**FIVE attempts, ALL slower than `FxHashMap<&[u8]>`: byte-loop open-addr +13%, low-bit-hash +7.7×,
+oversized-fibonacci +68%, cache-resident-growth +21%, packed-u64-FxHashMap +46%.** `FxHashMap<&[u8]>` is
+CONCLUSIVELY the optimal Rust factorization for str-groupby; its ~10.5 ns/row over 100k lookups of 1000
+distinct short keys is the genuine floor, and pandas' khash ~2.5 ns is a C-level advantage (specialized string
+hash, no bounds checks) NOT reachable by any safe-Rust hash-table variant. **The str-groupby str-key loss vein
+is a HARD LEDGERED BLOCKER: closing it needs an upstream faster short-string hasher in hashbrown/rustc-hash or a
+khash-class C dependency — not an agent-level fp-frame lever. Do NOT attempt a 6th factorization variant.** The
+harness coverage (d9a0901ec, fdaf551c6) quantifying the whole groupby lane stands as the deliverable.

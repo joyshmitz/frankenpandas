@@ -18520,3 +18520,20 @@ dispatch + SSE2 fallback (AGENTS.md §56 permits narrow audited unsafe, but this
 **df_dot is CLOSED for agent levers: 2 shipped wins (AXPY 16× + A-panel 1.31× = ~19×); the residual is ISA-bound
 and needs a maintainer target-cpu/unsafe-SIMD decision.** Consecutive REJECTs remain 2 (this is a
 feasibility-probe finding + a ledgered blocker, not a code-lever reject).
+
+### 2026-07-23 DustySummit — str-keyed groupby aggregations: HARNESS COVERAGE surfaces a LOSS VEIN (dense path is Int64-key-only)
+
+Added 9 pandas counterparts (median/std/var/min/max/prod/sem/skew/nunique str-keyed groupby) that fp-bench
+supported but the harness never compared. Profile (artifact `cc_fp_groupby_str_agg_profile_2026-07-23.json`,
+key = `g{col_0%1000:04}` ~1000 groups, value col_1 f64): **a LOSS VEIN — groupby_min_str 0.155× @1M,
+prod_str 0.169×, sem_str 0.23×, var_str 0.26×, std_str 0.29×, skew_str 0.33×, median_str 0.55×, max_str
+similar (all CV-valid or fp≪... wait fp>pd)**; only nunique_str wins (1.22×). **ROOT CAUSE (profiled):** fp's
+string-keyed groupby aggregations are all ~1150 µs @100k REGARDLESS of the agg — because
+`compute_dense_group_ids` (fp-frame:34181) only factorizes `as_i64_slice()` (Int64) keys; a Utf8 key column
+returns None, so `dense_group_fold` bails and every agg falls to the slow `agg_numeric` (SipHash `build_groups`
++ per-group `Vec<usize>`/`Vec<f64>`). `groupby_mean_str` "wins" (2.8×) ONLY because pandas' string-keyed mean
+is coincidentally slow (3241 µs) while its min is fast (251 µs) — fp mean_str and min_str are the SAME ~1150 µs.
+**LEVER (in progress): add a Utf8-key dense-factorization arm to `compute_dense_group_ids` — open-addressing
+hash of the contiguous-Utf8 keys → first-seen dense codes (mirroring the existing wide-i64 open-addressing arm)
+— which enables the dense fast path for min/max/prod/std/var/sem/skew/mean/count on string keys at once.** No
+consecutive rejects (this is a profile finding + coverage; the fix follows).

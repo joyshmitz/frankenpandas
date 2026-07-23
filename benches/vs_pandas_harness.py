@@ -300,6 +300,51 @@ def bench_groupby_mean_str_pandas(df: pd.DataFrame) -> list[float]:
     df["key"] = ("g" + (df["col_0"] % 1000).astype("int64").map(lambda v: f"{v:04}"))
     return time_operation(lambda: df.groupby("key")["col_1"].mean())
 
+
+def _groupby_str_op_pandas(df: pd.DataFrame, op):
+    """Shared setup for str-keyed groupby aggregation benches: key =
+    'g{col_0 % 1000:04}' (~1000 distinct), value = col_1 (matches fp-bench)."""
+    df = df.copy()
+    df["key"] = ("g" + (df["col_0"] % 1000).astype("int64").map(lambda v: f"{v:04}"))
+    g = df.groupby("key")["col_1"]
+    return time_operation(lambda: op(g))
+
+
+def bench_groupby_median_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.median())
+
+
+def bench_groupby_std_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.std())
+
+
+def bench_groupby_var_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.var())
+
+
+def bench_groupby_min_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.min())
+
+
+def bench_groupby_max_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.max())
+
+
+def bench_groupby_prod_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.prod())
+
+
+def bench_groupby_sem_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.sem())
+
+
+def bench_groupby_skew_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.skew())
+
+
+def bench_groupby_nunique_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.nunique())
+
 def bench_groupby_transform_mean_str_pandas(df: pd.DataFrame) -> list[float]:
     df = df.copy()
     df["key"] = ("g" + (df["col_0"] % 1000).astype("int64").map(lambda v: f"{v:04}"))
@@ -519,6 +564,15 @@ PANDAS_WORKLOADS = {
         "groupby_transform_mean_str": bench_groupby_transform_mean_str_pandas,
         "groupby_cumcount": bench_groupby_cumcount_pandas,
         "groupby_count": bench_groupby_count_pandas,
+        "groupby_median_str": bench_groupby_median_str_pandas,
+        "groupby_std_str": bench_groupby_std_str_pandas,
+        "groupby_var_str": bench_groupby_var_str_pandas,
+        "groupby_min_str": bench_groupby_min_str_pandas,
+        "groupby_max_str": bench_groupby_max_str_pandas,
+        "groupby_prod_str": bench_groupby_prod_str_pandas,
+        "groupby_sem_str": bench_groupby_sem_str_pandas,
+        "groupby_skew_str": bench_groupby_skew_str_pandas,
+        "groupby_nunique_str": bench_groupby_nunique_str_pandas,
     },
     "rolling": {
         "rolling_mean_w10": bench_rolling_mean_w10_pandas,

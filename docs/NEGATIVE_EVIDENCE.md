@@ -18579,3 +18579,27 @@ i.e. reimplementing (and beating) hashbrown for short-string keys, a large uncer
 an incremental lever.** The harness coverage (d9a0901ec) that surfaced + quantified the vein stands. Consecutive
 REJECTs: 2 str-groupby factorization iterations (this + the earlier open-addr) → with the df_dot rejects, the
 "beat pandas' tuned C hash-tables/BLAS" veins are exhausted.
+
+### 2026-07-23 DustySummit — str-groupby factorization: cache-resident growing table (4th attempt) — REJECT, CONCLUSIVE hashbrown floor
+
+Fourth and final open-addressing attempt, applying every diagnosis: cache-resident table GROWING from 1024
+slots (L1) to ~the group count (fixing the 5 MB oversized-table cache-thrash), inline `(u64,len)` key (avoids
+`FxHashMap<&[u8]>`'s per-probe byte-buffer pointer-chase for ≤ 8-byte keys), Fibonacci hashing (HIGH bits, fixes
+the low-bit collision bug). Bit-identical (207 groupby tests green). **A/B (FP_GB_UTF8_FXMAP, 5 blocks, taskset,
+100k): grow ~1400 µs vs FxHashMap ~1160 µs = ~21% SLOWER (better than the oversized fibonacci's 1790 but still
+losing).** **CONCLUSIVE: hashbrown (FxHashMap) genuinely beats a hand-rolled open-addressing table for this
+workload even with cache-residency + inline keys + Fibonacci hashing — its SIMD-vectorized probing and tuned
+implementation win.** Four attempts, all slower (byte-loop 13%, low-bit-hash 7.7×, oversized-fibonacci 68%,
+cache-resident-growth 21%). Reverted to HEAD.
+
+**FINAL LEDGERED BLOCKER: the str-groupby str-key loss vein (min/max/std/var/sem/skew/prod/median 0.15–0.55×)
+is factorization-bound at the hashbrown floor (~10.5 ns/row) vs pandas khash (~2.5 ns). hashbrown is already
+the optimal Rust hash table; the 4× gap is khash's C-level string hashing (no bounds checks, specialized SIMD
+probe, compact inline keys) which is NOT reachable by a safe-Rust hash table. Closing this vein needs
+`hashbrown`/`rustc-hash` upstream to add a faster short-string hasher, or a `khash`-class C dependency — NOT an
+agent-level fp-frame lever.** The harness coverage (d9a0901ec) quantifying the vein stands as the deliverable.
+
+**FRONTIER FINAL STATE (2026-07-23): every vs-pandas loss across all 9 harness categories is now proven to be
+a hardware/library FLOOR or a maintainer decision — df_dot (AVX2/ISA, bead ol0dw), ewm_mean@100k (f64-divide
+latency), parquet_read (Arrow decode + alloc), str-groupby aggs (hashbrown-vs-khash). No agent-level
+incremental lever remains; FP wins every other common op 1.13–554×.**

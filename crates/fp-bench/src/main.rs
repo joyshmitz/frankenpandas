@@ -2096,8 +2096,17 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         ("linalg", "df_dot") => {
             let dim = (rows as f64).sqrt() as usize;
             let frame = build_square_f64_frame(dim);
+            // The dot result is a lazy plan; a real consumer reads it, so
+            // materialize every output column's values to measure the true
+            // construction + GEMM cost (mirrors pandas' eager m.dot(m)) rather
+            // than the lazy-plan shell the drop-only form measured.
             time_us(|| {
-                let _ = frame.dot(&frame).expect("dot");
+                let result = frame.dot(&frame).expect("dot");
+                let mut acc = 0usize;
+                for name in result.column_names() {
+                    acc += result.column(name.as_str()).expect("col").values().len();
+                }
+                black_box((&result, acc));
             })
         }
         // to_datetime parse throughput: `rows` ISO date strings (2020-01-DD,

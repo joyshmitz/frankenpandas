@@ -18382,3 +18382,33 @@ micro-opts. The only paths that could move it: (a) a numerically-equivalent refo
 critical dependency chain (e.g. hoisting `new_wt*x` and restructuring the fdiv operands) IF it stays
 bit-identical to pandas' aggregations.pyx recurrence — high risk to the bit-lock; (b) accept it as a
 small-frame codegen floor since @1M it already wins 2.18×.** Consecutive REJECTs: 2 (parquet copy-method, this).
+
+### 2026-07-23 DustySummit (cc pane 2, tenth lever) — df_dot materialization kernel: AXPY loop reorder — WIN 16× on the (previously 3.4 s) materialized GEMM + honest bench
+
+Completed the frontier survey (linalg, artifact `cc_fp_linalg_profile_2026-07-23.json`): the ONLY removable
+loss on the whole harness is `df_dot` (matrix multiply). Profile-first (`FP_DOT_MATERIALIZE` gate) exposed a
+**dead benchmark hiding a catastrophe**: the dot result is a lazy per-output-column plan; the bench dropped it,
+measuring only lazy CONSTRUCTION (~24.6 ms) — so the reported "0.687× loss" never ran the GEMM. **Materializing
+the 1000×1000 result took ~3.42 SECONDS (0.59 GFLOP/s, ~200× pandas' 17 ms).** Root cause in
+`materialize_float64_dot`: the DOT loop order (outer row, inner column) read `a_cols[j].value_at(row)` — a
+strided, per-access-bounds-checked hop across `k` separate `Arc<[f64]>` column allocations = 1 cache miss per
+(row, col), 1e9 of them.
+
+**LEVER (KEEP):** AXPY loop reorder — outer over the k A-columns, inner streaming `out[row] += a_col[row]*b_j`
+over a contiguous column slice formed ONCE. Unit-stride reads/writes, auto-vectorized SIMD FMA. **Bit-identical:
+the per-output summation order (j = 0..k per `out[row]`) is unchanged** — fp-columnar 591/0, fp-frame dot 16/0,
+4 dot kernel tests incl. `dot_typed_pairwise_match_scalar_reference`. Measured (FP_DOT_MATERIALIZE, 3 blocks,
+taskset -c 2,3, 1000×1000): **3 416 804 µs → 211 025 µs = 16.2× faster** (0.59 → 9.5 GFLOP/s).
+
+**Bench made HONEST (same commit):** `df_dot` now materializes every output column (mirroring pandas' eager
+`m.dot(m)`), so the harness measures the real construction + GEMM cost, not the lazy shell. **⚠️ CONSEQUENCE:
+the df_dot harness row now reads ~0.08× @1M / 0.15× @100k (fp ~235 ms vs pd 17 ms), REPLACING the old
+misleading 0.687×/0.864×. This is NOT a regression — the old number measured only lazy construction; the
+underlying materialized compute got 16× FASTER. The honest row exposes the true remaining gap.** Artifact
+`cc_fp_dot_axpy_official_2026-07-23.json`.
+
+**REMAINING GEMM gap (next levers):** FP ~9.5 GFLOP/s vs pandas ~118 (blocked, multi-threaded OpenBLAS). Two
+open removable costs: (1) CONSTRUCTION ~24.6 ms — `dot()` clones the full `a_views` Vec (k Arc bumps) PER
+output column (n×k Arc ops); share ONE `Arc<[Float64DotInput]>` A-panel across all n columns → ~0. (2) COMPUTE
+211 ms is L3-bandwidth-bound (each output column re-reads all of A from L3); needs cache-blocking (L1/L2 tiles)
++ parallelizing the serial output-column loop across cores. Consecutive REJECTs reset to 0 (this is a WIN).

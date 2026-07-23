@@ -18555,3 +18555,27 @@ and pandas' 251 µs comes from a tuned Cython factorize+agg over the WHOLE path.
 WHERE fp's str-groupby ~1140 µs goes (factorize vs fold vs label-reconstruction vs output) before any further
 lever; a hash-table swap alone cannot close it. The harness coverage (d9a0901ec) that surfaced the vein
 stands.** Consecutive REJECTs: 3 (df_dot parallelize, df_dot N-block, this) → SWITCH VEIN per alien graveyard.
+
+### 2026-07-23 DustySummit — str-groupby factorization: INSTRUMENTED profile + fibonacci open-addressing — REJECT, FxHashMap is the floor (khash-hard)
+
+Instrumented `dense_group_fold` (env FP_GB_PROFILE) resolved the earlier inference guesswork. **Per-phase
+breakdown, groupby_min_str @100k (1000 groups): `dense_group_ids` (factorization) ~1050 µs = ~90%; labels
+~65 µs; fold ~90 µs; out ~4 µs.** So the factorization IS the bottleneck (the earlier FxHashMap-vs-open-addr
+A/B only gave the DIFFERENCE, not the absolute). FxHashMap<&[u8]> is ~10.5 ns/row; pandas' khash ~2.5 ns.
+
+Third factorization attempt (after the byte-loop and low-bit-hash rejects): a fibonacci-hashed inline
+open-addressing table (high bits for the slot, `(u64,len)` short-key identity — the diagnosed low-bit bug
+fixed). **A/B: fib ids ~1790 µs vs FxHashMap ~1050 µs; full min_str fib 1914 vs 1142 µs = 68% SLOWER.**
+**Root cause of ALL open-addressing losses (now diagnosed): the table was sized to `nrows` (262144 slots ≈ 5 MB)
+but there are only ~1000 distinct keys → the huge SPARSE table thrashes cache, while FxHashMap (hashbrown /
+SwissTable) dynamically sizes to the GROUP COUNT (~1000 entries, L1/L2-resident) with SIMD probing.**
+**FxHashMap is already the optimal Rust hash table for this shape; a hand-rolled table cannot beat hashbrown,
+and pandas' 4× edge is khash's C string hash below the hashbrown floor.** Reverted to HEAD.
+
+**LEDGERED BLOCKER: the str-groupby str-key loss vein (min/max/std/var/sem/skew/prod/median 0.15–0.55×) is
+factorization-bound at the FxHashMap/hashbrown floor (~10.5 ns/row). Closing to pandas' khash needs a
+group-count-sized cache-resident open-addressing string table with growth + a SIMD/khash-class string hash —
+i.e. reimplementing (and beating) hashbrown for short-string keys, a large uncertain effort in safe Rust, NOT
+an incremental lever.** The harness coverage (d9a0901ec) that surfaced + quantified the vein stands. Consecutive
+REJECTs: 2 str-groupby factorization iterations (this + the earlier open-addr) → with the df_dot rejects, the
+"beat pandas' tuned C hash-tables/BLAS" veins are exhausted.

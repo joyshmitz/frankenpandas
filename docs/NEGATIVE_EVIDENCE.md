@@ -18537,3 +18537,21 @@ is coincidentally slow (3241 µs) while its min is fast (251 µs) — fp mean_st
 hash of the contiguous-Utf8 keys → first-seen dense codes (mirroring the existing wide-i64 open-addressing arm)
 — which enables the dense fast path for min/max/prod/std/var/sem/skew/mean/count on string keys at once.** No
 consecutive rejects (this is a profile finding + coverage; the fix follows).
+
+### 2026-07-23 DustySummit — str-groupby Utf8 dense factorization: open-addressing table — REJECT (worse than FxHashMap)
+
+Tried to beat the str-groupby loss vein at its root: `compute_dense_group_ids`' Utf8 arm uses
+`FxHashMap<&[u8], usize>`; replaced it with an inline open-addressing table (cached hashes, span-compare on
+hash hit, first-seen gid — bit-identical, 207 groupby tests green). **A/B (FP_GB_UTF8_FXMAP gate, 5 blocks,
+taskset, 100k str-key): (a) per-byte-hash open-addr 1294 µs vs FxHashMap 1164 µs = 13% SLOWER; (b) after
+switching to a single zero-padded-u64 multiply hash for the ≤8-byte keys, 8973 µs = 7.7× SLOWER — the
+multiply's LOW bits (masked for the slot) distribute poorly for the structured "g0000".."g0999" keys, causing
+near-O(n²) probe chains.** FxHashMap already reads 8-byte chunks and finalizes the hash; a naive open-addressing
+table does not beat it. **REJECT — reverted to HEAD (FxHashMap).** Finding: the str-groupby loss (min_str
+0.155× etc.) is NOT a cheaply-beatable factorization swap — FxHashMap is already near-optimal for short-string
+keys, and the factorization is only ~150 µs of fp's ~1140 µs total (swapping it moved the total ~13%). The
+remaining ~1000 µs is the dense fold + `dense_group_labels` string-label reconstruction + output Series build,
+and pandas' 251 µs comes from a tuned Cython factorize+agg over the WHOLE path. **RETRY PREDICATE: profile
+WHERE fp's str-groupby ~1140 µs goes (factorize vs fold vs label-reconstruction vs output) before any further
+lever; a hash-table swap alone cannot close it. The harness coverage (d9a0901ec) that surfaced the vein
+stands.** Consecutive REJECTs: 3 (df_dot parallelize, df_dot N-block, this) → SWITCH VEIN per alien graveyard.

@@ -18307,3 +18307,16 @@ dispositive same-worker proof. Gates: transpose 17/0 (new `assert_column_name_at
 accessor equals materialized `column_names()` at every position, in and out of bounds), full fp-frame 3181/0,
 clippy zero new lints, `git diff --check` clean, env gate stripped pre-commit. Artifact
 `artifacts/bench/cc_fp_l4vzc_tmat_colname_official_2026-07-23.json`.
+
+### 2026-07-23 DustySummit — groupby frontier via vs_pandas_harness: SURFACE DOMINATED, no loss to fix (profile-only, no lever)
+
+Profiled all 8 groupby workloads at 100k + 1M (float64/int64/str keys), load ~7.7, artifact
+`artifacts/bench/cc_fp_groupby_profile_2026-07-23.json`. **Every CV-valid row is a FASTER win, 2.586×–6.656×;
+every DROPPED_HIGH_CV row also has fp ≪ pd (win, CV-noisy).** Ranked worst-margin first (all wins):
+groupby_count@100k 2.586×, groupby_mean_str@100k 2.814×, groupby_mean_float64@100k 3.814×,
+groupby_agg_multi@1M 3.843×, groupby_transform_mean@100k 4.824×, groupby_mean_float64@1M 5.319×,
+groupby_sum_int64@100k 5.741×, groupby_cumcount@100k 6.656×. **No groupby loss exists on this harness** —
+consistent with the 2026-07 groupby lever campaign (dense-Int64 bypass, arena path, typed-output scatter,
+value_counts group-parallel, etc.). Do NOT re-probe groupby for a vs-pandas LOSS; the surface is dominated.
+Retry predicate: only re-open if a NEW groupby workload (a currently-unbenched agg/transform/window op) is
+added to the harness and shows fp > pd. No code touched; this is a profile finding, not a reject.

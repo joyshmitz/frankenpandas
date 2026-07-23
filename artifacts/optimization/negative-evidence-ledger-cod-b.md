@@ -776,3 +776,12 @@ including the lazy-transpose-view DEFAULT flip, PromotedFloat64 46.3x, contiguou
 43.7x, canonical-nullable-f64 38.2x, to_dict typed-cell 2.80x; 2 REJECTs with retry predicates/rules; 3
 RangeIndex correctness closures; official-harness partial refresh) are recorded in docs/NEGATIVE_EVIDENCE.md
 under the dated DustySummit entries — that file is the single active ledger for this period.
+
+## 2026-07-23 update (DustySummit, sole producer while cod capped until Jul 29)
+Full vs_pandas_harness frontier survey completed (all 9 categories). FP dominates pandas 2.2.3 on every common
+op 1.13x-554x. Only non-wins: parquet_read (decode floor), ewm_mean@100k (divide-latency floor), df_dot
+(fixed ~19x this session via AXPY loop reorder + shared A-panel; residual is a scoped blocked+parallel-GEMM
+epic vs OpenBLAS). Full detail + all bench artifacts in docs/NEGATIVE_EVIDENCE.md dated 2026-07-23. Today's
+commits: column_name_at transpose fix (554x), parquet bench coverage, df_dot AXPY(16x)+A-panel(1.31x); 3
+floor/no-op REJECTs with retry predicates. RangeIndex bead lane (uza04.172-.179 + fvvrl/ckbyh/nkivs/tzvt3/
+b7nxg/un6on/k1xts) fully closed on fp-index 540/0.

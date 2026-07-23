@@ -559,10 +559,15 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         // work here, so the two are comparable.
         ("dataframe_ops", "df_transpose_materialize") => time_us(|| {
             let transposed = df.transpose().expect("transpose");
-            // Touch a real column's values: the first value observer crosses the
-            // public-column boundary and materializes.
-            let names = transposed.column_names();
-            let first = names.first().expect("transposed frame has columns");
+            // Touch a real column's values: the first value observer crosses
+            // the public-column boundary and materializes ONE output column.
+            // Mirror the pandas row exactly (`t.columns[0]` then read that
+            // column) — the O(1) positional name accessor, not a full
+            // column-axis label materialization, which pandas' block axis
+            // never does for a single lookup.
+            let first = transposed
+                .column_name_at(0)
+                .expect("transposed frame has columns");
             let col = transposed
                 .column(first.as_str())
                 .expect("named column exists");

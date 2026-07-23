@@ -18271,3 +18271,39 @@ directionally); df_transpose_materialize 10k fp 126 vs pd 157 µs, **100k fp 1 3
 potentially-close row** (pandas' blockwise `.T` + single-column read is cheap; CVs 101%/174% make it
 undecidable here). adqfs stays open for the CV-valid rerun + pandas-side generators for the four new fp-bench
 dtypes (mixed_i64_f64/utf8/int64_nullable/float64_nullable).
+
+### 2026-07-23 DustySummit (cc pane 2, ninth lever) — O(1) positional column-name access for lazy transposed frames — WIN (flips df_transpose_materialize @100k from a near-loss to ~554x), + bench-fairness correction
+
+Profile-first target: the one CV-undecidable close row from the 2026-07-22 official refresh —
+`df_transpose_materialize @100k` fp 1 382 µs vs pandas 1 000 µs. Root cause: the fp-bench observer read the
+first output column's values via `column_names().first()`, which MATERIALIZES all n column-axis label
+`String`s (100k of them for a 100k-row source) just to obtain one name. The pandas counterpart does
+`t.columns[0]` — an O(1) positional label lookup that never materializes the whole axis. So the old bench
+handicapped fp with 100k String allocations pandas never pays: an asymmetry, not a real consumer cost.
+
+Lever: new `LazyDataFrameColumnOrder::name_at(pos)` + public `DataFrame::column_name_at(pos)` that formats a
+single label from the `Int64UnitRange` column order (or indexes the Eager vec), mirroring `df.columns[i]`. The
+bench observer now uses it, matching the pandas op exactly. Both sides still cross the materialization
+boundary (read ONE output column's values); the frame remains fully materialized-equivalent (transpose parity
+tests unchanged).
+
+Same-binary interleaved A/B (`FP_TMAT_ALLNAMES` = pre-lever full-names path; gate removed pre-commit; 7 blocks,
+`taskset -c 2`, 100k×10 f64): **candidate median 1.8 µs vs all-names median 1 302 µs = ~720× FP-side; A/A null
+floor exactly 1.0 (cand/cand2 both 1.8 µs); 6/7 cand blocks identical at 1.8 µs** (one 2.5 µs scheduling blip
+inflates the small-absolute CV — a sub-2 µs measurement-floor artifact, direction unambiguous at 720×). This
+is the LEVER's clean effect.
+
+Consequence — official vs_pandas_harness (load ~7.7, same run):
+| workload | size | fp p50 | pandas p50 | directional | note |
+| --- | --- | ---: | ---: | ---: | --- |
+| df_transpose_materialize | 100k | 1.78 µs (cv 10.3%) | 986.73 µs (cv 2.69%) | **~554×** | fp at measurement floor |
+| df_transpose_materialize | 10k | 1.52 µs (cv 39.2%) | 157.89 µs (cv 3.75%) | **~104×** | fp at measurement floor |
+
+Both DROPPED_HIGH_CV on the FP side ONLY (pandas CVs clean): FP is now sub-2 µs because the lazy transpose
+defers the 100k-column BlockManager materialization that pandas eagerly pays on `.T`. The 2026-07-22 "one
+close row" is resolved — it was a bench asymmetry masking a large architectural win, not a real gap. A
+CV-valid FP row needs a batched observer (like df_transpose's TRANSPOSE_BATCH); the internal 720× A/B is the
+dispositive same-worker proof. Gates: transpose 17/0 (new `assert_column_name_at_matches` verifies the O(1)
+accessor equals materialized `column_names()` at every position, in and out of bounds), full fp-frame 3181/0,
+clippy zero new lints, `git diff --check` clean, env gate stripped pre-commit. Artifact
+`artifacts/bench/cc_fp_l4vzc_tmat_colname_official_2026-07-23.json`.

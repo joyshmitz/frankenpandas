@@ -18865,3 +18865,70 @@ Artifacts:
 - `artifacts/bench/cod_frontier_json_remaining_hz1_10k_100k_2026-07-23.json`
 - `artifacts/bench/cod_frontier_json_remaining_hz1_100k_retry_cpu60_2026-07-23.json`
 - `artifacts/perf/cod_frontier_json_remaining_hz1_scorecard_2026-07-23.md`
+
+### 2026-07-23 DustyMarsh — cached-pandas groupby phantom corrected; `.215` adds `all`; prior loss blocker withdrawn
+
+Ledger and Git-log preflight found that the July 23 string-groupby rows
+introduced by `d9a0901ec` violated the repository's already-documented
+full-call comparison rule. The shared pandas helper constructed
+`g = df.groupby("key")["col_1"]` once outside `time_operation`; warmup then
+populated pandas' grouper cache, so each measured pandas iteration was
+reduction-only. Every `fp-bench` iteration constructs `SeriesGroupBy` inside
+its timed closure and therefore measured factorize-plus-reduce. The resulting
+0.190x-0.542x rows and the "hashbrown-vs-khash" source-loss conclusion were a
+cached-grouper measurement phantom.
+
+`br-frankenpandas-uza04.215` changes the pandas helper to construct the
+`GroupBy` inside every timed iteration and adds the previously uncovered
+`groupby_all_str` public comparator. No Rust source changed. Same-worker
+before/after on pinned CPU 56 used the exact same strict-remote `hz1`
+release-perf binary (SHA-256
+`942da8f2467151a129da33ba126510447ab8862357e574234a6fac145e0b1d85`):
+
+| `groupby_all_str` arm | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|
+| cached pandas, 100k | 2938.07 | 173.48 | 0.059x | 0.83 / 3.72 |
+| inline full-call, 100k | 2979.29 | 3623.61 | 1.216x | 0.38 / 0.80 |
+| inline full-call, 10k | 407.51 | 722.12 | 1.772x | 4.78 / 3.38 |
+
+The unchanged FP arm is the null control: 2938.07 us to 2979.29 us, a
+1.014x movement, while pandas moved 20.89x when its omitted factorization was
+restored. Every A/B and null-control CV above is below 5%.
+
+A full corrected 10k/100k sweep then admitted all affected 100k string
+aggregations as faster than pandas, except `all` at parity:
+mean 3.271x, median 1.671x, std 2.586x, var 2.586x, min 2.731x,
+max 2.704x, prod 2.692x, sem 2.277x, skew 2.301x, nunique 2.073x,
+and all 1.003x. The unchanged `groupby_mean_str` row was the public null
+workload and remained a 3.271x win. All listed 100k rows cleared 5% CV.
+At 10k every row except `min` also cleared the gate and measured
+1.694x-5.626x; the invalid `min` row is not used for any verdict.
+
+**Verdict: KEEP the harness-integrity correction and `groupby_all_str`
+coverage. WITHDRAW the prior string-groupby "hard blocker" as a pandas
+comparison verdict.** The five rejected FP hash-table variants remain valid
+negative evidence about alternatives to `FxHashMap<&[u8]>`, but they no
+longer describe a public performance gap and must not gate this frontier.
+The read surface remains dominated from `.212-.214`; RangeIndex
+`.172-.176` remains closed and unchanged.
+
+Conformance: strict-remote RCH on `vmi1149989` ran
+`cargo test -p fp-frame groupby --lib`: 207 passed, 0 failed, 4 ignored.
+The first requested worker (`hz1`) refused the test under critical disk
+pressure and strict mode correctly prevented local fallback. Agent Mail's
+corruption breaker also refused the advisory file lease before any write;
+Git/Beads truth was used without touching peer-owned dirt.
+
+Retry predicate: pandas may reuse a cached grouper only if the Rust workload
+is changed to construct and reuse the same `SeriesGroupBy` outside its timed
+closure; otherwise both sides must continue measuring the inline full call.
+Any future string-groupby source lever still requires a newly admitted loss,
+profile attribution, same-worker A/B/null with every CV below 5%, and
+conformance.
+
+Artifacts:
+
+- `artifacts/bench/cod_fp_uza04_215_groupby_all_str_10k_100k.json`
+- `artifacts/bench/cod_fp_uza04_215_groupby_all_str_inline_10k_100k.json`
+- `artifacts/bench/cod_fp_uza04_215_groupby_inline_full_10k_100k.json`
+- `artifacts/perf/cod_fp_uza04_215_groupby_inline_scorecard_2026-07-23.md`

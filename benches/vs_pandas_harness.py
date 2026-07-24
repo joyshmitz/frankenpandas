@@ -348,8 +348,10 @@ def _groupby_str_op_pandas(df: pd.DataFrame, op):
     'g{col_0 % 1000:04}' (~1000 distinct), value = col_1 (matches fp-bench)."""
     df = df.copy()
     df["key"] = ("g" + (df["col_0"] % 1000).astype("int64").map(lambda v: f"{v:04}"))
-    g = df.groupby("key")["col_1"]
-    return time_operation(lambda: op(g))
+    # fp-bench constructs SeriesGroupBy inside every timed iteration. Keep the
+    # pandas call inline too: reusing `g` would cache its grouper after warmup
+    # and compare reduction-only pandas against factorize-plus-reduce Rust.
+    return time_operation(lambda: op(df.groupby("key")["col_1"]))
 
 
 def bench_groupby_median_str_pandas(df: pd.DataFrame) -> list[float]:
@@ -386,6 +388,10 @@ def bench_groupby_skew_str_pandas(df: pd.DataFrame) -> list[float]:
 
 def bench_groupby_nunique_str_pandas(df: pd.DataFrame) -> list[float]:
     return _groupby_str_op_pandas(df, lambda g: g.nunique())
+
+
+def bench_groupby_all_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.all())
 
 
 def bench_df_groupby_int_var_pandas(df: pd.DataFrame) -> list[float]:
@@ -658,6 +664,7 @@ PANDAS_WORKLOADS = {
         "groupby_sem_str": bench_groupby_sem_str_pandas,
         "groupby_skew_str": bench_groupby_skew_str_pandas,
         "groupby_nunique_str": bench_groupby_nunique_str_pandas,
+        "groupby_all_str": bench_groupby_all_str_pandas,
         "df_groupby_int_var": bench_df_groupby_int_var_pandas,
         "df_groupby_int_mean": bench_df_groupby_int_mean_pandas,
         "groupby_widekey_sum": bench_groupby_widekey_sum_pandas,

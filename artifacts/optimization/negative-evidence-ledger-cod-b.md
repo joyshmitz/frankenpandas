@@ -833,3 +833,21 @@ b7nxg/un6on/k1xts) fully closed on fp-index 540/0.
   the five-reject string-factorization groupby blocker is the terminal lane
   condition. Retry only after a new CV-valid loss or the upstream hash floor
   changes.
+
+## 2026-07-23 - cached-pandas groupby phantom corrected; `uza04.215` KEEP
+
+- The shared pandas string-groupby helper cached its grouper outside the timed
+  loop; fp-bench rebuilt `SeriesGroupBy` inside the timed loop. This invalidates
+  the prior 0.190x-0.542x public loss rows and their terminal blocker.
+- Inline full-call A/B on pinned CPU 56 used one exact-HEAD remote-built binary.
+  The unchanged FP arm moved only 1.014x (2938.07 to 2979.29 us), while pandas
+  `groupby_all_str` moved from 173.48 us cached to 3623.61 us inline. All four
+  CVs were below 5%; corrected `all` is 1.772x/1.216x at 10k/100k.
+- All eleven corrected 100k string-groupby rows are wins or parity
+  (1.003x-3.271x), every one CV-valid. KEEP the comparator correction and new
+  `groupby_all_str` coverage. Strict-remote fp-frame groupby tests passed
+  207/0 (4 ignored).
+- Five rejected hash-table variants remain internal negative evidence, not a
+  public performance blocker. Retry cached-grouper timing only if the Rust arm
+  also reuses its grouper; require a new admitted loss plus profile-first
+  same-worker A/B/null and conformance before source work.

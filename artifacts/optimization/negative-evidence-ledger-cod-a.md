@@ -556,3 +556,25 @@ b7nxg/un6on/k1xts) fully closed on fp-index 540/0.
   the five-reject string-factorization groupby blocker is the terminal lane
   condition. Retry only after a new CV-valid loss or the upstream hash floor
   changes.
+
+## 2026-07-23 - cached-pandas groupby phantom corrected; `uza04.215` KEEP
+
+- The July 23 shared pandas string-groupby helper reused one `GroupBy` object
+  across warmups and samples, while fp-bench rebuilt `SeriesGroupBy` inside
+  every timed iteration. The prior 0.190x-0.542x string-aggregation loss rows
+  therefore compared cached reduction-only pandas with full-call Rust.
+- The helper now constructs pandas `GroupBy` inside each timed iteration, and
+  `groupby_all_str` is covered. Same-worker pinned-CPU before/after kept the
+  unchanged FP null arm within 1.014x (2938.07/2979.29 us; CV 0.83%/0.38%)
+  while pandas moved from 173.48 us cached to 3623.61 us inline (CV
+  3.72%/0.80%). Corrected `all` is 1.772x at 10k and 1.216x at 100k.
+- The corrected full 100k sweep is all wins/parity: mean 3.271x, median
+  1.671x, std/var 2.586x, min 2.731x, max 2.704x, prod 2.692x, sem 2.277x,
+  skew 2.301x, nunique 2.073x, all 1.003x; every CV is below 5%.
+- **WITHDRAW the prior public string-groupby hard blocker.** The five rejected
+  hash-table variants remain valid internal negative evidence, but no public
+  pandas loss now authorizes a sixth variant. Strict-remote groupby
+  conformance passed 207/0 (4 ignored) on `vmi1149989`.
+- Retry predicate: use a cached pandas grouper only if fp-bench also reuses
+  one outside the timed closure. Any source lever requires a new admitted
+  loss, profile, same-worker A/B/null with all CV below 5%, and conformance.

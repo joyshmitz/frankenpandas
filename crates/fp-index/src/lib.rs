@@ -28921,6 +28921,51 @@ mod tests {
     }
 
     #[test]
+    fn range_index_descending_ops_match_pandas_dustysummit() {
+        use super::RangeIndex;
+        // Regression coverage for descending-range handling — the exact smell
+        // that was buggy in the set operations. All expected values verified
+        // against pandas 2.2.3 (R(10,0,-2) = [10,8,6,4,2]).
+        let vals = |idx: &super::Index| -> Vec<i64> {
+            idx.labels()
+                .iter()
+                .map(|l| match l {
+                    super::IndexLabel::Int64(v) => *v,
+                    other => panic!("expected Int64 label, got {other:?}"),
+                })
+                .collect()
+        };
+        let desc = RangeIndex::new(10, 0, -2).unwrap();
+        let asc = RangeIndex::new(0, 10, 2).unwrap();
+
+        // argsort: the permutation that sorts values ascending.
+        assert_eq!(desc.argsort(), vec![4, 3, 2, 1, 0]);
+        assert_eq!(asc.argsort(), vec![0, 1, 2, 3, 4]);
+
+        // sort_values: ascending (descending rebuilds an ascending range).
+        assert_eq!(vals(&desc.sort_values().to_flat_index()), vec![2, 4, 6, 8, 10]);
+        assert_eq!(vals(&asc.sort_values().to_flat_index()), vec![0, 2, 4, 6, 8]);
+
+        // factorize: identity codes; uniques preserve the (descending) order.
+        let (codes, uniques) = desc.factorize();
+        assert_eq!(codes, vec![0, 1, 2, 3, 4]);
+        assert_eq!(vals(&uniques.to_flat_index()), vec![10, 8, 6, 4, 2]);
+
+        // take / repeat: order-preserving over the descending values.
+        assert_eq!(vals(&desc.take(&[0, 2, 4]).unwrap()), vec![10, 6, 2]);
+        assert_eq!(
+            vals(&desc.repeat(2)),
+            vec![10, 10, 8, 8, 6, 6, 4, 4, 2, 2]
+        );
+
+        // where keeps the value where cond is TRUE (replaces where false);
+        // putmask replaces where the mask is TRUE — opposite conventions.
+        let m = [true, false, true, false, true];
+        assert_eq!(vals(&desc.r#where(&m, 99).unwrap()), vec![10, 99, 6, 99, 2]);
+        assert_eq!(vals(&desc.putmask(&m, 99).unwrap()), vec![99, 8, 99, 4, 99]);
+    }
+
+    #[test]
     #[allow(clippy::type_complexity)]
     fn range_index_set_ops_match_pandas_2_2_3_differential_dustysummit() {
         use super::RangeIndex;

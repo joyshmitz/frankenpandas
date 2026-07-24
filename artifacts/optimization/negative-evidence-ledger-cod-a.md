@@ -542,3 +542,17 @@ b7nxg/un6on/k1xts) fully closed on fp-index 540/0.
   but invalid at FP CV 6.93%.
 - **KEEP coverage; SURFACE/REJECT source work.** Retry 100k only with both CVs
   below 5%; profile a source lever only if the admitted row becomes a loss.
+
+## 2026-07-23 - remaining JSON read orientations (DustyMarsh)
+
+- `uza04.214` adds `json_read_index`, `json_read_split`, and
+  `json_read_values` to fp-bench and the public harness.
+- Strict-remote `hz1` binary SHA-256:
+  `942da8f2467151a129da33ba126510447ab8862357e574234a6fac145e0b1d85`.
+- CV-valid 10k wins: split 1.711x (CV 2.22%/2.48%) and values 1.460x
+  (2.12%/0.97%). Index and every 100k row were high-CV, but all medians favored
+  FP in both pinned runs.
+- **KEEP coverage; SURFACE/REJECT source work.** The read matrix is dominated;
+  the five-reject string-factorization groupby blocker is the terminal lane
+  condition. Retry only after a new CV-valid loss or the upstream hash floor
+  changes.

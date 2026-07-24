@@ -2306,6 +2306,27 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Columns).expect("read_json");
             })
         }
+        ("io", "json_read_index") => {
+            // pandas: pd.read_json(json, orient="index"); parse an index-map JSON.
+            let json = df.to_json("index").expect("to_json setup");
+            time_us(|| {
+                let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Index).expect("read_json");
+            })
+        }
+        ("io", "json_read_split") => {
+            // pandas: pd.read_json(json, orient="split"); parse split JSON.
+            let json = df.to_json("split").expect("to_json setup");
+            time_us(|| {
+                let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Split).expect("read_json");
+            })
+        }
+        ("io", "json_read_values") => {
+            // pandas: pd.read_json(json, orient="values"); parse row-array JSON.
+            let json = df.to_json("values").expect("to_json setup");
+            time_us(|| {
+                let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Values).expect("read_json");
+            })
+        }
         ("io", "json_write_records") => {
             // pandas: df.to_json(orient="records"); 10-col f64 frame.
             time_us(|| {

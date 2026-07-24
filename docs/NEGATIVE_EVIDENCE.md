@@ -18821,3 +18821,47 @@ Artifacts:
 - `artifacts/bench/cod_frontier_read_hz1_10k_100k_2026-07-23.json`
 - `artifacts/bench/cod_frontier_json_read_columns_hz1_10k_100k_2026-07-23.json`
 - `artifacts/perf/cod_frontier_read_hz1_scorecard_2026-07-23.md`
+
+### 2026-07-23 DustyMarsh — remaining JSON read orientations — KEEP coverage; read surface dominated
+
+`br-frankenpandas-uza04.214` completed the public read matrix with
+`json_read_index`, `json_read_split`, and `json_read_values`. For each
+implementation, payload generation uses its matching `to_json(orient=...)`
+outside the timed region. The fp-bench binary was built strictly remotely on
+`hz1`; direct retrieval was again required because RCH synchronized only target
+metadata. Remote and local SHA-256 matched:
+`942da8f2467151a129da33ba126510447ab8862357e574234a6fac145e0b1d85`.
+
+Pinned CPU 56 admitted two new 10k wins:
+
+| Workload | Size | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|---:|
+| `json_read_split` | 10k | 6850.67 | 11719.07 | 1.711x | 2.22 / 2.48 |
+| `json_read_values` | 10k | 6525.33 | 9524.34 | 1.460x | 2.12 / 0.97 |
+
+`json_read_index` at 10k was directionally 2.221x faster but invalid at FP CV
+9.01%. All three 100k rows were directionally faster in the first run but
+invalid at FP CV 10.51%-19.02%. A second pinned CPU 60 run reproduced the same
+direction with FP/pandas medians of 192746.54/519845.18 us for index,
+88394.61/172065.06 us for split, and 85624.73/146970.21 us for values, while
+FP CV remained 11.56%-13.85%.
+
+**Verdict: KEEP the remaining benchmark coverage; SURFACE/REJECT any
+performance-source lever.** Records, columns, index, split, and values now all
+favor FrankenPandas wherever admissible, and every invalid row is directionally
+faster in repeated pinned runs. There is no read-side loss to profile. The only
+remaining requested groupby loss is the already-profiled string-key
+factorization floor with five rejected alternatives, so the existing ledgered
+blocker is the terminal condition for this lane.
+
+**Retry predicate:** rerun the invalid JSON rows only after an isolated worker
+can keep both sides below 5% CV. Reopen source work only if an admitted row is
+slower than pandas. Reopen groupby only after an upstream short-string hashing
+primitive or approved khash-class dependency changes its implementation floor,
+then require profile-first same-worker A/B/null control plus conformance.
+
+Artifacts:
+
+- `artifacts/bench/cod_frontier_json_remaining_hz1_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_frontier_json_remaining_hz1_100k_retry_cpu60_2026-07-23.json`
+- `artifacts/perf/cod_frontier_json_remaining_hz1_scorecard_2026-07-23.md`

@@ -857,6 +857,10 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.to_numpy()
             let _ = df.to_numpy();
         }),
+        ("dataframe_ops", "df_values") => time_us(|| {
+            // pandas: df.values (Vec<Vec<Scalar>> row-major materialization).
+            let _ = df.values();
+        }),
         ("dataframe_ops", "df_mode") => time_us(|| {
             // pandas: df.mode()
             let _ = df.mode().expect("mode");

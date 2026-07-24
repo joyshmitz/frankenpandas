@@ -141,6 +141,14 @@
 - **Tests affected:** `range_index_set_ops_match_pandas_2_2_3_differential_dustysummit` (data-driven from `testdata_rangeset_pandas_cases.rs`, all four ops); `range_index_set_ops_use_direct_values_b7nxg`, `range_index_set_ops_closed_form_membership_preserves_order_iatnc`, `range_index_set_ops_return_affine_spans_iatnc` (refreshed to pandas-correct ordering).
 - **Review date:** 2026-07-23
 
+### DISC-017: RangeIndex.slice_locs / searchsorted reject monotonic-decreasing (step < 0) ranges
+- **Reference:** pandas 2.2.3 permits `RangeIndex(10,0,-1).slice_locs(8,3)` → `(2, 8)` and `RangeIndex(10,0,-1).searchsorted(5)` → `0` on descending ranges.
+- **Our impl:** ACCEPTED divergence — fp returns an explicit `InvalidArgument` error for `slice_locs` and `searchsorted` when `step < 0` ("requires a monotonic[ally-]increasing RangeIndex"), rather than replicating pandas' behavior. get_loc / get_indexer / get_indexer_non_unique / reindex (direction-agnostic value→position lookups) DO work correctly on descending ranges; only the two ordering-boundary ops refuse.
+- **Impact:** Rationale for refusing rather than matching: pandas' `searchsorted` on a descending index is a numpy artifact — numpy `searchsorted` assumes an ascending array, so `desc.searchsorted(5) = 0` is a meaningless insertion point, not a correct one. pandas' descending `slice_locs` inherits the same ascending-assuming `get_slice_bound`, producing quirky edge results (e.g. `[7].slice_locs(8,-9) = (1,0)` — an EMPTY slice for a value that is in `[-9, 8]`). A randomized 40k-pair differential found no simple closed form matching pandas' descending slice_locs (≈7.6% of a naive `value<=start` / `value<end` closed form diverged, all in boundary/single-element cases). fp's explicit error avoids silently reproducing these numpy quirks; callers needing a descending slice can reverse the index first.
+- **Resolution:** ACCEPTED (DustySummit, 2026-07-23). Revisit only if a use case needs pandas-bug-compatible descending `slice_locs`; it would require replicating pandas' `get_slice_bound` direction handling, not a closed form.
+- **Tests affected:** none (fp's error path is covered by existing RangeIndex tests; no descending slice_locs/searchsorted parity test is asserted).
+- **Review date:** 2026-07-23
+
 ## Rules
 
 1. Every divergence gets a sequential ID (DISC-NNN)

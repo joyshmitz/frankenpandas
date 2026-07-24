@@ -59,3 +59,35 @@ The mission ("exceed pandas across the board") is essentially achieved: fp wins
 maintainer/architectural decision beyond the bounded-lever mandate. Bounded-lever
 cycling across transpose + RangeIndex + groupby + the whole repo surface is
 comprehensively exhausted.
+
+## Block-storage build — concrete scope & plan (DustySummit, 2026-07-24)
+
+Scoped the block-backed-storage build (the O(1) `.values`/`.to_numpy` view floor).
+It is TRACTABLE but a multi-commit architectural project, NOT a bounded lever —
+delivering user value requires wiring it through construction paths. Plan, feature-
+gated behind `block-storage` (default-off ⇒ default build/tests unaffected, risk
+bounded), modeled on the existing `lazy-transpose-view` `HomogeneousTranspose`
+variant:
+
+- **Commit 1 (foundation):** `Float64BlockStore { block: Arc<[f64]> (column-major),
+  rows, cols, names, index }` + a `LazyDataFrameColumns::Float64Block(Arc<..>)`
+  variant. Handle the ~14 contained match arms (get_one → block-slice Column;
+  materialized → build the BTreeMap from slices; clone/default/serde/PartialEq/
+  logical_len/name_at/into_materialized/make_eager/Deref) — the enum is centralized,
+  no direct matches sprawl the codebase. A `DataFrame::from_f64_block_columns`
+  constructor + O(1) `to_numpy` view for a block-backed frame + tests.
+- **Commit 2:** zero-copy `get_one` — needs a `Column` Arc<[f64]>+range backing so a
+  block column borrows the shared block instead of copying (the dot path already uses
+  `Arc<[f64]>` views, so the primitive largely exists).
+- **Commit 3+:** wire construction paths (`build_frame`/`from_columns`/read_csv/
+  homogeneous arithmetic results) to PRODUCE block-backed frames when all columns are
+  all-valid f64 — this is what makes real frames (and the `df_to_numpy` bench) O(1).
+  Pervasive but mechanical (each path checks homogeneity, builds the block).
+
+**Value:** matches pandas' core O(1) `.values`/`.to_numpy` zero-copy view — a genuine
+pandas-parity gap (fp's eager materialization is competitive with pandas' eager copy,
+but has no view). **Cost:** ~3–6 commits, touches core `DataFrame` storage +
+construction. **Decision:** this is the only remaining substantive work in the lane; it
+needs a "build block-storage" go since it is a multi-commit architectural project that
+cannot be delivered as a single bounded lever. Absent that go it remains a ledgered
+blocker; the perf frontier is otherwise won.

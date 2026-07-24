@@ -861,6 +861,14 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.values (Vec<Vec<Scalar>> row-major materialization).
             let _ = df.values();
         }),
+        ("dataframe_ops", "df_iterrows") => time_us(|| {
+            // pandas: list(df.iterrows())
+            let _ = df.iterrows();
+        }),
+        ("dataframe_ops", "df_itertuples") => time_us(|| {
+            // pandas: list(df.itertuples())
+            let _ = df.itertuples();
+        }),
         ("dataframe_ops", "df_mode") => time_us(|| {
             // pandas: df.mode()
             let _ = df.mode().expect("mode");

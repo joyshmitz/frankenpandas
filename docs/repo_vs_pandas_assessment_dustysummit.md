@@ -39,7 +39,18 @@ bounded lever).
    target-feature (auto-vectorizes the existing kernel to AVX2/FMA) — a Cargo/build
    maintainer decision (bead ol0dw), not agent code. My prior single-thread work
    (AXPY reorder + register-blocking, 15.6 GFLOP/s SSE2) already hit the SSE2 ceiling.
-   **Retry predicate:** only after the AVX2 build target-feature lands.
+   **REJECT #2 — AVX2 target-feature (2026-07-24):** built fp-bench with
+   `RUSTFLAGS=-C target-feature=+avx2,+fma` and measured. df_dot AVX2=3850us vs
+   SSE2=5426us = only **1.4x** (not the 2-4x expected), STILL 3.1x slower than
+   pandas single-thread (1229us). Everything else neutral (df_values 9913~9967,
+   rolling_std 1444~1443, groupby_mean_str 1169~1147 — memory/alloc/factorization
+   bound, matching the prior jawxr corr/cov result). AVX2 gives a marginal
+   df_dot-only gain that does NOT close the gap; the residual is OpenBLAS's
+   hand-tuned assembly GEMM microkernel vs fp's auto-vectorized Rust GEMM. Enabling
+   AVX2 globally (1.4x on one op, neutral elsewhere, at a portability cost) is not
+   worth it. The df_dot floor is OpenBLAS-kernel-quality-bound — closable only by a
+   hand-tuned assembly/intrinsics GEMM microkernel (large specialized effort).
+   **Retry predicate:** only if a hand-tuned GEMM microkernel is explicitly greenlit.
 
 ## Conclusion
 

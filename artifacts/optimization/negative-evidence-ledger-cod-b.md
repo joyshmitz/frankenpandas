@@ -785,3 +785,22 @@ epic vs OpenBLAS). Full detail + all bench artifacts in docs/NEGATIVE_EVIDENCE.m
 commits: column_name_at transpose fix (554x), parquet bench coverage, df_dot AXPY(16x)+A-panel(1.31x); 3
 floor/no-op REJECTs with retry predicates. RangeIndex bead lane (uza04.172-.179 + fvvrl/ckbyh/nkivs/tzvt3/
 b7nxg/un6on/k1xts) fully closed on fp-index 540/0.
+
+## 2026-07-23 - fresh-auth restart closure (DustyMarsh)
+
+- `uza04.172-.176` remain closed; current strict-remote fp-index validation
+  exercised all five named RangeIndex guards (577 passed, 0 failed, 10 ignored).
+  No code delta was warranted.
+- The full groupby matrix was unusably noisy, but a pinned retry made the
+  already-profiled string-factorization floor admissible at 100k: eight
+  aggregations measured 0.190x-0.542x with both-side CV below 5%.
+  **SURFACE/REJECT:** five prior factorization alternatives already lost; do
+  not attempt a sixth. Retry only after the upstream hasher/dependency floor
+  changes, followed by profile-first same-worker A/B/null and conformance.
+- `br-frankenpandas-uza04.212` adds JSON-records read to the public harness.
+  Admitted read ratios: CSV 155.292x/133.628x, JSON 1.766x at 10k, Parquet
+  6.183x/1.603x. JSON 100k stayed directionally faster but exceeded 5% CV
+  twice. **READ SURFACE/REJECT:** retry only on an isolated worker with both
+  CVs below 5%; only an admitted loss authorizes a subsequent profile.
+- See the dated `cod_restart_*_2026-07-23` benchmark artifacts and generated
+  scorecards, with the full evidence table in `docs/NEGATIVE_EVIDENCE.md`.

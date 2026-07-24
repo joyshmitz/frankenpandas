@@ -25,6 +25,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from io import StringIO
 from json import JSONDecodeError
 from pathlib import Path
 from statistics import mean, stdev
@@ -210,6 +211,15 @@ def bench_csv_read_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
 def bench_csv_write_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     csv_path = tmp_path / "bench_out.csv"
     return time_operation(lambda: df.to_csv(csv_path, index=False))
+
+
+def bench_json_read_records_pandas(df: pd.DataFrame, tmp_path: Path) -> list[float]:
+    del tmp_path
+    payload = df.to_json(orient="records")
+    return time_operation(
+        lambda: pd.read_json(StringIO(payload), orient="records")
+    )
+
 
 def bench_parquet_read_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     pq_path = tmp_path / "bench.parquet"
@@ -578,6 +588,7 @@ PANDAS_WORKLOADS = {
     "io": {
         "csv_read": bench_csv_read_pandas,
         "csv_write": bench_csv_write_pandas,
+        "json_read_records": bench_json_read_records_pandas,
         "parquet_read": bench_parquet_read_pandas,
         "parquet_write": bench_parquet_write_pandas,
     },

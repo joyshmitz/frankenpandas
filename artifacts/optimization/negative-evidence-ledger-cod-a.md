@@ -500,3 +500,30 @@ epic vs OpenBLAS). Full detail + all bench artifacts in docs/NEGATIVE_EVIDENCE.m
 commits: column_name_at transpose fix (554x), parquet bench coverage, df_dot AXPY(16x)+A-panel(1.31x); 3
 floor/no-op REJECTs with retry predicates. RangeIndex bead lane (uza04.172-.179 + fvvrl/ckbyh/nkivs/tzvt3/
 b7nxg/un6on/k1xts) fully closed on fp-index 540/0.
+
+## 2026-07-23 - cod auth restart measured-frontier refresh (DustyMarsh)
+
+- Reconfirmed `br-frankenpandas-uza04.172-.176` closed on current `main`;
+  strict-remote RCH ran the current fp-index suite (577 passed, 0 failed,
+  10 ignored), including each bead's named RangeIndex guard. No correctness
+  edit was needed.
+- Full groupby 10k/100k routing was inadmissible (42/42 high-CV), then a CPU 56
+  retry admitted the known string-key floor at 100k: median 0.542x, std
+  0.295x, var 0.302x, min 0.213x, max 0.222x, prod 0.190x, sem 0.262x,
+  skew 0.337x; every listed FP and pandas CV was below 5%.
+- **SURFACE/REJECT:** the result confirms the existing 90%-factorization
+  profile and five failed hash-table variants. Do not attempt a sixth. Retry
+  only after an upstream short-string hashing primitive or approved khash-class
+  dependency changes that floor; then require same-worker A/B/null, all CV
+  below 5%, and conformance.
+- Added the missing `json_read_records` pandas comparator under
+  `br-frankenpandas-uza04.212`. CSV read admitted at 155.292x/133.628x
+  (10k/100k), JSON records read at 1.766x (10k), and Parquet read at
+  6.183x/1.603x. JSON 100k was directionally faster but invalid twice.
+- **READ SURFACE/REJECT:** no slower admitted row means no bounded perf lever;
+  the zero-copy Parquet seam is architectural and cc-owned. Retry JSON 100k
+  only on an isolated worker with both CVs below 5%; profile first only if it
+  becomes an admitted loss.
+- Primary evidence and generated scorecards are the
+  `cod_restart_{groupby,read}_frontier*2026-07-23` artifacts linked in
+  `docs/NEGATIVE_EVIDENCE.md`.

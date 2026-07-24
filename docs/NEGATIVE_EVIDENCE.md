@@ -18675,3 +18675,100 @@ block-backed-storage representation as a multi-commit architectural project (the
 `PrototypeF64Block`). Do NOT attempt to "optimize" `to_numpy`'s `Vec<Vec<f64>>` — it is within-contract
 competitive and allocation-bound; parallelizing n small allocs is allocator-contention-bound and would not
 change the strategic picture.
+
+### 2026-07-23 DustyMarsh — cod restart: RangeIndex `.172-.176` reconfirmed; groupby/read measured frontier → SURFACE/REJECT
+
+Ledger and log preflight came first. `br-frankenpandas-uza04.172` through `.176`
+are already closed on `main`, covering wide `get_loc` arithmetic, wide reduction
+length arithmetic, closed-form `searchsorted`, saturating memory accounting, and
+wide positional/take arithmetic. A current-tree strict-remote
+`cargo test -p fp-index` was dispatched through RCH to worker `vmi1264463`;
+the RangeIndex-specific guards for all five beads ran in the full fp-index suite
+(577 passed, 0 failed, 10 ignored).
+No RangeIndex source change was justified, and the subsequent set-operation
+commits on `main` remain outside this completed slice.
+
+The release-perf `fp-bench` binary used for these measurements was built through
+strict-remote RCH and, at measurement time, had SHA-256
+`e54b007306334e53a240bc7128ee0bea40add3d34bab06d7b872d691eee5e592`.
+The first full groupby 10k/100k sweep was entirely `DROPPED_HIGH_CV` (42/42),
+so none of its directional medians are evidence. A pinned CPU 56 retry then
+reproduced the already-profiled string-key loss vein with admissible CV below
+5% on both sides at 100k:
+
+| Workload | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|
+| `groupby_median_str` | 2546.08 | 1379.35 | 0.542x | 0.77 / 0.53 |
+| `groupby_std_str` | 1229.81 | 362.19 | 0.295x | 0.49 / 1.53 |
+| `groupby_var_str` | 1238.00 | 373.69 | 0.302x | 0.92 / 1.58 |
+| `groupby_min_str` | 1138.53 | 242.64 | 0.213x | 0.81 / 2.55 |
+| `groupby_max_str` | 1143.09 | 253.77 | 0.222x | 0.46 / 2.61 |
+| `groupby_prod_str` | 1128.15 | 214.09 | 0.190x | 1.14 / 1.87 |
+| `groupby_sem_str` | 1426.61 | 373.75 | 0.262x | 0.73 / 1.43 |
+| `groupby_skew_str` | 1454.79 | 490.69 | 0.337x | 2.56 / 1.09 |
+
+This is confirming evidence for the preceding instrumented profile:
+`dense_group_ids` / `FxHashMap<&[u8]>` factorization consumes about 90% of the
+path, and five bounded alternatives already lost. **GROUPBY VERDICT:
+SURFACE/REJECT, no source candidate attempted.** A sixth factorization variant
+would violate the existing negative-evidence boundary and trespass into the
+architectural lane. **Retry predicate:** reopen only after an upstream
+`hashbrown`/`rustc-hash` short-string primitive or an approved khash-class
+dependency changes the implementation floor, then profile again before a
+same-worker A/B/null-control run with every CV below 5% and groupby conformance.
+
+The read frontier gained one missing public comparison:
+`json_read_records` now times pandas `read_json(..., orient="records")` against
+the existing fp-bench workload, with payload construction outside the timed
+region. Pinned CPU 57 results were:
+
+| Workload | Size | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|---:|
+| `csv_read` | 10k | 49.90 | 7749.84 | 155.292x | 4.71 / 0.30 |
+| `csv_read` | 100k | 713.38 | 95327.44 | 133.628x | 2.91 / 0.97 |
+| `json_read_records` | 10k | 11201.94 | 19778.39 | 1.766x | 1.19 / 3.04 |
+
+The broader CPU 56 run also admitted `parquet_read` at 6.183x (10k,
+CV 3.96%/4.29%) and 1.603x (100k, CV 3.42%/0.88%). JSON records read at
+100k was directionally faster twice (FP/pandas p50 110830/297830 us and
+108120/290991 us) but invalid both times: FP CV 6.27% then 6.65%, with the
+second pandas control also at 14.37%. **READ VERDICT: SURFACE/REJECT for a
+fresh perf lever; land only the harness coverage.** The admitted rows are
+already faster and do not identify a hotspot; Parquet's remaining zero-copy
+decode opportunity is architectural and cc-owned. **Retry predicate:** rerun
+JSON 100k only on an isolated worker where both processes clear 5% CV; attempt
+source work only if that admitted row becomes slower than pandas, and then
+profile before any one-lever A/B/null-control/conformance cycle.
+
+Artifacts:
+
+- `artifacts/bench/cod_restart_groupby_frontier_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_restart_groupby_str_frontier_retry_cpu56_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_restart_read_frontier_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_restart_read_frontier_retry_cpu57_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_restart_json_read_100k_retry_cpu60_2026-07-23.json`
+- `artifacts/perf/cod_restart_groupby_frontier_scorecard_2026-07-23.md`
+- `artifacts/perf/cod_restart_read_frontier_scorecard_2026-07-23.md`
+
+### 2026-07-23 DustySummit — row-major materialization row-PARALLEL on top of resolve-once — REJECT (allocation-bound, mimalloc-dependent)
+
+After shipping the serial resolve-once wins for df.values/to_dict/iterrows/itertuples (2.3-2.6x,
+433c9f695+1f6e929f9), tried row-parallelizing `row_major_values` on top (the `to_records` pattern:
+`std::thread::scope` over contiguous row ranges, gated n>=50k, workers = min(16, n/16384)). A/B
+(FP_VALUES_PAR, taskset -c 0-15 so both variants share a 16-core budget, 8 blocks, df_values float64 x10):
+**100k SERIAL 13781us -> PARALLEL 9802us = 1.41x (CV 8.2%/2.7%); 1M 109347 -> 58301 = 1.88x (CV 5.3%/5.6%)**.
+
+REJECT. Up to 16 workers for <2x = poor parallel efficiency → the row build (n `Vec<Scalar>` allocations +
+n*m Scalar clones) is ALLOCATION / MEMORY-BANDWIDTH bound, not compute bound; the parallel gain is amortized
+away by the shared memory bus + allocator (the [[merge-join-bound-not-gather-bound]] pattern). Worse, the win
+is mimalloc-DEPENDENT: only the fp-bench binary sets `#[global_allocator] MiMalloc` — the fp-frame LIBRARY uses
+the system allocator, where the parallel per-row alloc scales worse (or contends), so the bench win does NOT
+generalize to real library callers. CVs also mostly exceed the 5% bar (16-core cpuset noise). The clean,
+allocator-independent win was already captured by serial resolve-once. Reverted (working tree back to HEAD).
+
+Generalizes to the WHOLE row-major family: iterrows/itertuples build the same allocation-bound `Vec<Scalar>`
+rows, so parallel-on-top is rejected for them too without separate measurement. NB: `to_records` DOES
+parallelize (same pattern) — it took the same mimalloc bet; its per-row work may be heavier, but the same
+non-generalizability caveat applies to it. **Retry predicate:** revisit ONLY if fp-frame adopts mimalloc (or
+another per-thread-arena allocator) as a library-default global allocator, which would make the parallel row
+build generalize; a bench-only win here is not shippable value.

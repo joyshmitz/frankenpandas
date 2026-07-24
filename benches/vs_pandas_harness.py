@@ -394,6 +394,13 @@ def bench_groupby_all_str_pandas(df: pd.DataFrame) -> list[float]:
     return _groupby_str_op_pandas(df, lambda g: g.all())
 
 
+def bench_groupby_rank_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(
+        df,
+        lambda g: g.rank(method="average", ascending=True, na_option="keep"),
+    )
+
+
 def bench_df_groupby_int_var_pandas(df: pd.DataFrame) -> list[float]:
     # Int key (i%1000, fast dense-histogram factorization) + 3 f64 value cols,
     # df.groupby(key).var() — matches fp-bench df_groupby_int_var. A loss here
@@ -665,6 +672,7 @@ PANDAS_WORKLOADS = {
         "groupby_skew_str": bench_groupby_skew_str_pandas,
         "groupby_nunique_str": bench_groupby_nunique_str_pandas,
         "groupby_all_str": bench_groupby_all_str_pandas,
+        "groupby_rank_str": bench_groupby_rank_str_pandas,
         "df_groupby_int_var": bench_df_groupby_int_var_pandas,
         "df_groupby_int_mean": bench_df_groupby_int_mean_pandas,
         "groupby_widekey_sum": bench_groupby_widekey_sum_pandas,

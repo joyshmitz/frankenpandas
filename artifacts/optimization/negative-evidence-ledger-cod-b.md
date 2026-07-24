@@ -851,3 +851,12 @@ b7nxg/un6on/k1xts) fully closed on fp-index 540/0.
   public performance blocker. Retry cached-grouper timing only if the Rust arm
   also reuses its grouper; require a new admitted loss plus profile-first
   same-worker A/B/null and conformance before source work.
+
+## 2026-07-23 - `groupby_rank_str` harness coverage (`uza04.216`)
+
+- Added an inline full-call pandas rank comparator matching the existing Rust
+  average/ascending/keep workload.
+- Admitted wins: 3.053x at 10k (CV 1.34%/0.56%) and 3.177x at 100k
+  (0.50%/0.64%). The unchanged mean 100k null control remained a 3.279x win.
+- KEEP coverage; no source lever. Retry only after a new CV-valid loss, then
+  profile and require same-worker A/B/null plus rank conformance.

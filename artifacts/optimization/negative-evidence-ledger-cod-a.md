@@ -578,3 +578,15 @@ b7nxg/un6on/k1xts) fully closed on fp-index 540/0.
 - Retry predicate: use a cached pandas grouper only if fp-bench also reuses
   one outside the timed closure. Any source lever requires a new admitted
   loss, profile, same-worker A/B/null with all CV below 5%, and conformance.
+
+## 2026-07-23 - `groupby_rank_str` harness coverage (`uza04.216`)
+
+- Added the missing inline full-call pandas rank comparator matching
+  `method="average"`, ascending order, and `na_option="keep"`.
+- Pinned exact-current results: 10k 3.053x (597.29/1823.57 us, CV
+  1.34%/0.56%); 100k 3.177x (5300.91/16841.32 us, CV 0.50%/0.64%).
+  An independent pass also admitted wins at both sizes.
+- Unchanged `groupby_mean_str` 100k control stayed at 3.279x with both CVs
+  below 1%. KEEP coverage; no source lever is justified.
+- Retry only on a new inline full-call CV-valid loss, followed by profile-first
+  same-worker A/B/null with every deciding CV below 5% and rank conformance.

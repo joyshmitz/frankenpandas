@@ -18932,3 +18932,39 @@ Artifacts:
 - `artifacts/bench/cod_fp_uza04_215_groupby_all_str_inline_10k_100k.json`
 - `artifacts/bench/cod_fp_uza04_215_groupby_inline_full_10k_100k.json`
 - `artifacts/perf/cod_fp_uza04_215_groupby_inline_scorecard_2026-07-23.md`
+
+### 2026-07-23 DustyMarsh — `groupby_rank_str` public coverage — KEEP; no source lever
+
+After the cached-grouper correction, the next fp-bench-only groupby row was
+`groupby_rank_str`. Ledger and Git-log preflight found the existing typed/radix
+rank family already landed and a historical 1M win, so
+`br-frankenpandas-uza04.216` adds only the missing apples-to-apples pandas
+counterpart: inline full-call
+`groupby(...).rank(method="average", ascending=True, na_option="keep")`.
+
+Pinned CPU 56, exact-current remote-built binary:
+
+| Size | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---:|---:|---:|---:|---:|
+| 10k | 597.29 | 1823.57 | 3.053x | 1.34 / 0.56 |
+| 100k | 5300.91 | 16841.32 | 3.177x | 0.50 / 0.64 |
+
+An independent first pass also admitted 3.042x/3.569x wins at 10k/100k.
+The unchanged `groupby_mean_str` 100k null control measured 3.279x
+(1166.74/3826.14 us, CV 0.70%/0.82%), matching the preceding cycle's 3.271x
+band. Its 10k control row was high-CV and is not used.
+
+**Verdict: KEEP benchmark coverage; no source lever.** Rank is already
+3.05x-3.18x faster on the required sizes, and the strict-remote groupby
+conformance run from `.215` covered rank tests in its 207 passed / 0 failed
+result on the identical Rust tree.
+
+Retry predicate: revisit rank source only if an inline full-call row becomes a
+CV-valid loss on both sides; then profile first and require a same-worker
+A/B/null-control run with every deciding CV below 5% plus rank conformance.
+
+Artifacts:
+
+- `artifacts/bench/cod_fp_uza04_216_groupby_rank_str_10k_100k.json`
+- `artifacts/bench/cod_fp_uza04_216_groupby_rank_str_control_10k_100k.json`
+- `artifacts/perf/cod_fp_uza04_216_groupby_rank_scorecard_2026-07-23.md`
